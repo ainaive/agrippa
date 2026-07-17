@@ -99,6 +99,8 @@ class RunEngine {
   private modelPrices = new Map<string, { input: number; output: number; modelId?: string }>();
   private currentStepRowId: string | null = null;
   private producedArtifacts = new Set<string>();
+  // stepId → crashed-attempt count + last executor session, for crash resume
+  private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
 
   constructor(
     private readonly deps: EngineDeps,
@@ -187,6 +189,15 @@ class RunEngine {
           })
           .where(eq(runSteps.id, row.id));
         row.status = "failed";
+        row.error = { code: "crashed", message: "worker died mid-step" };
+      }
+      // a crash is an interrupted attempt, not a consumed retry: track it so the
+      // step gets an extra attempt and resumes the executor session
+      if (row.status === "failed" && (row.error as { code?: string } | null)?.code === "crashed") {
+        const rec = this.crashRecovery.get(row.stepId) ?? { crashed: 0, sessionId: null };
+        rec.crashed += 1;
+        if (row.executorSessionId) rec.sessionId = row.executorSessionId;
+        this.crashRecovery.set(row.stepId, rec);
       }
       const current = this.stepRows.get(row.stepId);
       if (!current || row.attempt > current.attempt) this.stepRows.set(row.stepId, row);
@@ -367,7 +378,11 @@ class RunEngine {
   // ── Steps ────────────────────────────────────────────────────────────────────
 
   private async executeStepWithRetry(phase: TemplatePhase, step: TemplateStep): Promise<void> {
-    const maxAttempts = (step.retry?.max ?? 0) + 1;
+    // crashes don't consume the retry budget — each adds one extra attempt so a
+    // no-retry step that died mid-run still re-executes instead of silently
+    // being skipped (its loop would otherwise be `for (2; 2 <= 1)`)
+    const recovery = this.crashRecovery.get(step.id);
+    const maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0);
     const startAttempt = (this.stepRows.get(step.id)?.attempt ?? 0) + 1;
 
     // conditional / requires gating
@@ -392,7 +407,9 @@ class RunEngine {
 
     for (let attempt = startAttempt; attempt <= maxAttempts; attempt++) {
       await this.checkInterrupts();
-      const row = await this.insertStepRow(phase, step, attempt);
+      // resume the crashed executor session on the first recovery attempt only
+      const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? null) : null;
+      const row = await this.insertStepRow(phase, step, attempt, resumeSessionId);
       this.currentStepRowId = row.id;
       try {
         if (step.kind === "system") {
@@ -689,6 +706,7 @@ class RunEngine {
     phase: TemplatePhase,
     step: TemplateStep,
     attempt: number,
+    resumeSessionId: string | null = null,
   ): Promise<StepRow> {
     const [row] = await this.db
       .insert(runSteps)
@@ -700,6 +718,8 @@ class RunEngine {
         seq: this.stepSeq(step.id),
         status: "running",
         agentRef: step.kind === "agent" ? step.model.role : step.action,
+        // carry the crashed attempt's session so buildRequest can resume it
+        executorSessionId: resumeSessionId,
         startedAt: new Date(),
       })
       .returning();

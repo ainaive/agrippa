@@ -422,6 +422,30 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(runTestRows).toHaveLength(2);
   });
 
+  it("crash on a no-retry step re-executes it on resume and resumes the session", async () => {
+    const { db, runId, makeDeps } = await setupFixture();
+    // find-root-cause carries no template retry; crash it mid-step
+    const crashing = makeDeps({ ...HAPPY_SCRIPT, "find-root-cause": { kind: "crash" } });
+    await expect(executeRun(crashing, runId)).rejects.toThrow("simulated worker crash");
+
+    // resume with a healthy worker: without the crash-recovery fix a no-retry
+    // step's loop is `for (2; 2 <= 1)` and the step is silently skipped
+    const healthy = makeDeps(HAPPY_SCRIPT);
+    expect(await executeRun(healthy, runId)).toBe("waiting_approval");
+
+    const attempts = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "find-root-cause")));
+    expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+      [1, "failed"],
+      [2, "succeeded"],
+    ]);
+    // the recovery attempt resumed the crashed executor session
+    const request = healthy.executor.requests.find((r) => r.stepId === "find-root-cause");
+    expect(request?.resumeSessionId).toBe("fake-find-root-cause-1");
+  });
+
   it("cancellation mid-step aborts promptly via the control channel", async () => {
     const { db, runId, makeDeps, bus } = await setupFixture();
     const deps = makeDeps({ ...HAPPY_SCRIPT, "find-root-cause": { kind: "hang" } });
