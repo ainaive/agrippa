@@ -1,5 +1,21 @@
 {
   "appName": "硅基工坊",
-  "language": "语言",
-  "loading": "加载中…"
+  "loading": "加载中…",
+  "selectProject": "选择项目",
+  "signOut": "退出登录",
+  "nav": {
+    "approvals": "审批",
+    "admin": "管理",
+    "dashboard": "工作台",
+    "catalog": "任务目录",
+    "tasks": "任务",
+    "settings": "设置"
+  },
+  "firstProject": {
+    "title": "创建你的第一个项目",
+    "hint": "项目是团队协作的空间——统一管理资源授权、预算与代码仓库。",
+    "name": "项目名称",
+    "slug": "标识符",
+    "create": "创建项目"
+  }
 }

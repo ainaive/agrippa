@@ -1,5 +1,21 @@
 {
   "appName": "Silicon Workshop",
-  "language": "Language",
-  "loading": "Loading…"
+  "loading": "Loading…",
+  "selectProject": "Select project",
+  "signOut": "Sign out",
+  "nav": {
+    "approvals": "Approvals",
+    "admin": "Admin",
+    "dashboard": "Dashboard",
+    "catalog": "Catalog",
+    "tasks": "Tasks",
+    "settings": "Settings"
+  },
+  "firstProject": {
+    "title": "Create your first project",
+    "hint": "Projects are where your team collaborates — they scope resources, budgets, and repositories.",
+    "name": "Project name",
+    "slug": "Slug",
+    "create": "Create project"
+  }
 }

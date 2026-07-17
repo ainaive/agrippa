@@ -1,0 +1,39 @@
+{
+  "tabs": {
+    "templates": "Templates",
+    "fabri": "Fabri",
+    "models": "Models",
+    "skills": "Skills",
+    "mcp": "MCP servers"
+  },
+  "columns": {
+    "name": "Name",
+    "slug": "Slug",
+    "scenario": "Scenario",
+    "status": "Status",
+    "tier": "Tier",
+    "pricing": "Pricing"
+  },
+  "template": {
+    "published": "published",
+    "draft": "no published version"
+  },
+  "skills": {
+    "noVersions": "no versions"
+  },
+  "mcp": {
+    "empty": "No MCP servers registered.",
+    "authed": "auth configured",
+    "noAuth": "no auth"
+  },
+  "editor": {
+    "source": "Template source (YAML)",
+    "validate": "Validate",
+    "saveDraft": "Save draft",
+    "valid": "Template is valid.",
+    "versions": "Versions",
+    "publish": "Publish",
+    "noVersions": "No versions yet — save a draft.",
+    "formPreview": "Form preview"
+  }
+}

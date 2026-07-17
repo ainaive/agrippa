@@ -1,0 +1,38 @@
+{
+  "tabs": {
+    "members": "Members",
+    "grants": "Resources",
+    "repos": "Repositories",
+    "quota": "Quota"
+  },
+  "members": {
+    "email": "Email of an existing user",
+    "add": "Add member"
+  },
+  "roles": {
+    "admin": "Admin",
+    "member": "Member",
+    "viewer": "Viewer"
+  },
+  "grants": {
+    "models": "Models",
+    "skills": "Skills",
+    "mcp": "MCP servers",
+    "fabri": "Fabri"
+  },
+  "repos": {
+    "url": "Repository URL",
+    "branch": "Default branch",
+    "token": "Access token (optional)",
+    "add": "Add",
+    "private": "credentialed",
+    "public": "public"
+  },
+  "quota": {
+    "costLimit": "Monthly cost limit (USD)",
+    "tokenLimit": "Monthly token limit",
+    "hardStop": "Hard stop when exhausted",
+    "save": "Save quota",
+    "saved": "Saved."
+  }
+}

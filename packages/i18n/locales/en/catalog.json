@@ -1,0 +1,16 @@
+{
+  "hint": "Pick a task type, fill in the parameters, and the platform executes it in the background.",
+  "notFound": "Task type not found",
+  "form": {
+    "parameters": "Parameters",
+    "title": "Task title",
+    "budget": "Budget",
+    "minutes": "min",
+    "submit": "Submit task",
+    "submitting": "Submitting…",
+    "missingRequired": "Missing required fields",
+    "noRepos": "No repositories connected — add one under project settings first.",
+    "selectRepo": "Select repository",
+    "docsUnsupported": "Document references are not available yet."
+  }
+}

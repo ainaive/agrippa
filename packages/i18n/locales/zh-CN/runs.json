@@ -1,0 +1,53 @@
+{
+  "run": "执行",
+  "timeline": "时间线",
+  "attempt": "第",
+  "noSteps": "暂无步骤",
+  "noOutput": "暂无输出",
+  "noArtifacts": "暂无产出物",
+  "status": {
+    "queued": "排队中",
+    "pending": "待执行",
+    "running": "执行中",
+    "waiting_approval": "待审批",
+    "succeeded": "已成功",
+    "failed": "已失败",
+    "cancelled": "已取消",
+    "timed_out": "已超时",
+    "skipped": "已跳过"
+  },
+  "tabs": {
+    "output": "输出",
+    "artifacts": "产出物",
+    "params": "参数"
+  },
+  "actions": {
+    "cancel": "取消执行",
+    "retry": "重试",
+    "download": "下载"
+  },
+  "approval": {
+    "hint": "执行已在检查点暂停。请审阅产出物后批准或驳回。",
+    "commentPlaceholder": "备注（可选）…",
+    "approve": "批准",
+    "reject": "驳回"
+  },
+  "approvalsInbox": {
+    "title": "待办审批",
+    "empty": "当前没有等待你审批的事项。"
+  },
+  "dashboard": {
+    "openTasks": "进行中",
+    "spend": "花费",
+    "total": "任务总数",
+    "recent": "最近任务",
+    "newTask": "新建任务",
+    "empty": "还没有任务——去任务目录选择一个吧。"
+  },
+  "table": {
+    "title": "标题",
+    "status": "状态",
+    "created": "创建时间",
+    "run": "执行"
+  }
+}
