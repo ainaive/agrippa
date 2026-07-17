@@ -7,7 +7,6 @@ import {
 } from "@agrippa/core";
 import { approvals, createDb, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
-import { FakeExecutor } from "@agrippa/executor-core";
 import {
   createRunQueue,
   durationToMinutes,
@@ -19,6 +18,7 @@ import {
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
+import { DemoExecutor } from "./deps/demo-executor";
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitWorkspaceManager } from "./deps/workspace";
 
@@ -32,7 +32,7 @@ const deps: EngineDeps = {
   db,
   executors: {
     "claude-agent-sdk": createClaudeExecutor(),
-    fake: new FakeExecutor(demoScript()),
+    fake: new DemoExecutor(),
   },
   bus,
   workspace: new GitWorkspaceManager(db),
@@ -44,11 +44,6 @@ const deps: EngineDeps = {
     error: (msg, extra) => console.error(`[worker] ${msg}`, extra ?? ""),
   },
 };
-
-/** Demo behaviors for AGRIPPA_EXECUTOR=fake runs — every step just succeeds. */
-function demoScript() {
-  return {};
-}
 
 const SLOTS = Number(process.env.WORKER_SLOTS ?? 2);
 
