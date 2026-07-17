@@ -125,6 +125,19 @@ export const templateVersionCreateSchema = z.object({
   sourceYaml: z.string().min(1).max(200_000),
 });
 
+// ── Execution ─────────────────────────────────────────────────────────────────
+
+export const taskSubmitSchema = z.object({
+  taskTypeId: z.uuid(),
+  title: z.string().min(1).max(200),
+  params: z.record(z.string(), z.unknown()).default({}),
+});
+
+export const approvalDecisionSchema = z.object({
+  decision: z.enum(["approved", "rejected"]),
+  comment: z.string().max(2000).optional(),
+});
+
 export const grantsPutSchema = z.array(
   z.object({
     resourceType: z.enum(RESOURCE_TYPES),

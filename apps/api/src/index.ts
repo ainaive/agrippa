@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createDb, migrateDb, seed } from "@agrippa/db";
-import { seedBuiltinTemplates } from "@agrippa/orchestration";
+import { createRunQueue, RedisEventBus, seedBuiltinTemplates } from "@agrippa/orchestration";
 import { createApp } from "./app";
 
 const db = createDb();
@@ -14,7 +14,11 @@ if (process.env.AGRIPPA_MIGRATE_ON_BOOT !== "0") {
   console.log(`[api] migrations + seed applied; templates published: ${published.length}`);
 }
 
-const app = createApp({ db });
+const queue = await createRunQueue(process.env.DATABASE_URL as string);
+const bus = process.env.REDIS_URL ? new RedisEventBus(process.env.REDIS_URL) : null;
+if (!bus) console.warn("[api] REDIS_URL not set — SSE falls back to DB polling");
+
+const app = createApp({ db, queue, bus });
 const port = Number(process.env.PORT ?? 3000);
 
 console.log(`[api] listening on :${port}`);
