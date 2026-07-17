@@ -8,8 +8,14 @@ import type { ArtifactStore, StoredArtifact } from "@agrippa/orchestration";
 const STORAGE_ROOT = process.env.ARTIFACT_STORAGE_ROOT ?? path.join(tmpdir(), "agrippa-artifacts");
 const INLINE_LIMIT = 64 * 1024;
 /** Hard cap on a single artifact so an agent can't OOM the worker (env-tunable). */
-const maxArtifactSize = (): number =>
-  Number(process.env.AGRIPPA_MAX_ARTIFACT_BYTES ?? 25 * 1024 * 1024);
+const DEFAULT_MAX_ARTIFACT_SIZE = 25 * 1024 * 1024;
+const maxArtifactSize = (): number => {
+  const raw = process.env.AGRIPPA_MAX_ARTIFACT_BYTES;
+  if (raw === undefined) return DEFAULT_MAX_ARTIFACT_SIZE;
+  const n = Number(raw);
+  // a bad value (e.g. "invalid" → NaN, or 0/negative) must not silently disable the cap
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_ARTIFACT_SIZE;
+};
 
 class ArtifactTooLargeError extends Error {
   constructor(key: string, size: number) {

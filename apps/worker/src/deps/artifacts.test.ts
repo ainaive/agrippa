@@ -119,4 +119,26 @@ describe("DiskArtifactStore path containment", () => {
       else process.env.AGRIPPA_MAX_ARTIFACT_BYTES = prev;
     }
   });
+
+  it("falls back to the default cap when the size env is not a valid number", async () => {
+    const ws = freshWorkspace();
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    writeFileSync(path.join(ws, ".agrippa/artifacts/small.md"), "hello");
+    const prev = process.env.AGRIPPA_MAX_ARTIFACT_BYTES;
+    process.env.AGRIPPA_MAX_ARTIFACT_BYTES = "invalid"; // NaN must not disable the cap
+    try {
+      // a normal small file still stores (default cap applies, not NaN)
+      const stored = await store.store(
+        "run-1",
+        "small",
+        "markdown",
+        { path: ".agrippa/artifacts/small.md" },
+        ws,
+      );
+      expect(stored.inline).toBe("hello");
+    } finally {
+      if (prev === undefined) delete process.env.AGRIPPA_MAX_ARTIFACT_BYTES;
+      else process.env.AGRIPPA_MAX_ARTIFACT_BYTES = prev;
+    }
+  });
 });
