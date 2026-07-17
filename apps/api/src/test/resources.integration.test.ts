@@ -229,6 +229,20 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
     expect(read[0]?.resourceId).toBe(modelId);
   });
 
+  it("audit log is org-admin readable and filterable by action", async () => {
+    const denied = await member.request("/api/v1/audit-logs");
+    expect(denied.status).toBe(403);
+
+    const all = await jsonOf<Array<{ action: string }>>(await admin.request("/api/v1/audit-logs"));
+    expect(all.length).toBeGreaterThan(0);
+
+    const filtered = await jsonOf<Array<{ action: string }>>(
+      await admin.request("/api/v1/audit-logs?action=project.create"),
+    );
+    expect(filtered.length).toBeGreaterThan(0);
+    expect(filtered.every((row) => row.action === "project.create")).toBe(true);
+  });
+
   it("builtin re-seed is idempotent (checksum guard)", async () => {
     const { seedBuiltinTemplates } = await import("@agrippa/orchestration");
     const result = await seedBuiltinTemplates(db, TEMPLATES_DIR);
