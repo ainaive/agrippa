@@ -9,6 +9,8 @@ import {
   artifacts,
   mcpServers,
   orchestrationTemplates,
+  projectMembers,
+  projects,
   runEvents,
   runSteps,
   runs,
@@ -331,6 +333,36 @@ export const executionRoutes = new Hono<AppEnv>()
   })
 
   // ── Approvals ───────────────────────────────────────────────────────────────
+  // ── Approvals inbox ─────────────────────────────────────────────────────────
+  // Cross-project: every pending checkpoint in a project the caller belongs to.
+  // Read-only; deciding goes through POST /runs/:id/approvals/:approvalId.
+  .get("/approvals/pending", async (c) => {
+    const rows = await c.var.db
+      .select({
+        id: approvals.id,
+        checkpointId: approvals.checkpointId,
+        payload: approvals.payload,
+        requestedAt: approvals.requestedAt,
+        runId: runs.id,
+        runNumber: runs.number,
+        taskId: tasks.id,
+        taskTitle: tasks.title,
+        projectId: projects.id,
+        projectName: projects.name,
+        projectRole: projectMembers.role,
+      })
+      .from(approvals)
+      .innerJoin(runs, eq(approvals.runId, runs.id))
+      .innerJoin(tasks, eq(runs.taskId, tasks.id))
+      .innerJoin(projects, eq(runs.projectId, projects.id))
+      .innerJoin(
+        projectMembers,
+        and(eq(projectMembers.projectId, runs.projectId), eq(projectMembers.userId, c.var.user.id)),
+      )
+      .where(eq(approvals.status, "pending"))
+      .orderBy(desc(approvals.requestedAt));
+    return c.json(rows);
+  })
   .get("/runs/:id/approvals", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
     const rows = await c.var.db.select().from(approvals).where(eq(approvals.runId, run.id));

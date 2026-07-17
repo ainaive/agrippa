@@ -68,6 +68,7 @@ GET  /runs/:id                            # embeds a viewer-scoped template plan
 GET  /runs/:id/steps                      # each row carries usage {costUsd, tokens} aggregated from token_usage
 GET  /runs/:id/events                     # SSE; Last-Event-ID replay (see 04)
 POST /runs/:id/cancel
+GET  /approvals/pending                   # cross-project inbox: pending checkpoints in the caller's projects
 GET  /runs/:id/approvals                  POST /runs/:id/approvals/:approvalId  # {decision, comment}
 GET  /runs/:id/artifacts                  GET /artifacts/:id/download
 ```

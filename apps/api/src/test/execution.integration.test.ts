@@ -42,6 +42,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   let db: Awaited<ReturnType<typeof freshTestDb>>;
   let admin: TestClient;
   let viewer: TestClient;
+  let outsider: TestClient;
   let projectId: string;
   let repoConnectionId: string;
   let taskTypeId: string;
@@ -72,6 +73,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     app = createApp({ db, queue: fakeQueue, bus });
     admin = await signUp(app, "Root", "root@example.com");
     viewer = await signUp(app, "Vera", "vera@example.com");
+    outsider = await signUp(app, "Oz", "oz@example.com");
 
     projectId = (
       await jsonOf<{ id: string }>(
@@ -228,6 +230,18 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(approvalsRes[0]?.status).toBe("pending");
     const approvalId = approvalsRes[0]?.id as string;
 
+    // the pending-approvals inbox is membership-scoped
+    const inbox = await jsonOf<
+      Array<{ id: string; runId: string; taskTitle: string; projectRole: string }>
+    >(await viewer.request("/api/v1/approvals/pending"));
+    expect(inbox.map((i) => i.id)).toContain(approvalId);
+    expect(inbox[0]?.taskTitle).toBe("Fix the widget");
+    expect(inbox[0]?.projectRole).toBe("viewer");
+    const outsiderInbox = await jsonOf<Array<{ id: string }>>(
+      await outsider.request("/api/v1/approvals/pending"),
+    );
+    expect(outsiderInbox).toEqual([]);
+
     // viewers cannot decide
     const denied = await viewer.request(`/api/v1/runs/${runId}/approvals/${approvalId}`, {
       method: "POST",
@@ -245,6 +259,12 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(await executeRun(engineDeps(), runId)).toBe("succeeded");
     const run = await jsonOf<{ status: string }>(await admin.request(`/api/v1/runs/${runId}`));
     expect(run.status).toBe("succeeded");
+
+    // decided approvals leave the inbox
+    const drained = await jsonOf<Array<{ id: string }>>(
+      await viewer.request("/api/v1/approvals/pending"),
+    );
+    expect(drained.map((i) => i.id)).not.toContain(approvalId);
   });
 
   it("exposes steps and downloadable artifacts", async () => {

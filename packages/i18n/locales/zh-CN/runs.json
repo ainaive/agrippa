@@ -50,7 +50,9 @@
   },
   "approvalsInbox": {
     "title": "待办审批",
-    "empty": "当前没有等待你审批的事项。"
+    "empty": "当前没有等待你审批的事项。",
+    "openRun": "打开执行",
+    "review": "审阅"
   },
   "phases": {
     "checkpoint": "审批检查点",

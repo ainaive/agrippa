@@ -1,70 +1,113 @@
-import { useQueries } from "@tanstack/react-query";
+import { projectRoleAtLeast } from "@agrippa/core";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { ChevronDownIcon, CircleCheckBigIcon, ExternalLinkIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { RunStatusBadge } from "../components/RunStatusBadge";
-import { useMe } from "../features/me";
+import { EmptyState } from "@/components/EmptyState";
+import { TableSkeleton } from "@/components/LoadingSkeletons";
+import { PageHeader } from "@/components/PageHeader";
+import { RunStatusBadge } from "@/components/RunStatusBadge";
+import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { ApprovalPanel } from "@/features/runs/ApprovalPanel";
+import { type PendingApproval, usePendingApprovals } from "@/features/usePendingApprovals";
 import { api } from "../lib/api";
-import { formatTime } from "../lib/format";
-import type { TaskRow } from "../lib/types";
+import { formatTime, lt } from "../lib/format";
+import type { Approval, Artifact } from "../lib/types";
 
-/**
- * Cross-project inbox: runs waiting for approval across the user's projects.
- * M1 derives it from task lists; a dedicated endpoint can come later.
- */
+/** Expanded row: loads the run's artifacts so the panel can preview present[]. */
+function InlineDecision({ item }: { item: PendingApproval }) {
+  const artifacts = useQuery({
+    queryKey: ["run", item.runId, "artifacts"],
+    queryFn: () => api<Artifact[]>(`/runs/${item.runId}/artifacts`),
+  });
+  const approval: Approval = {
+    id: item.id,
+    checkpointId: item.checkpointId,
+    status: "pending",
+    payload: item.payload,
+    requestedAt: item.requestedAt,
+    comment: null,
+  };
+  return <ApprovalPanel runId={item.runId} approval={approval} artifacts={artifacts.data ?? []} />;
+}
+
+function InboxRow({ item }: { item: PendingApproval }) {
+  const { t } = useTranslation("runs");
+  const canDecide = projectRoleAtLeast(item.projectRole, "member");
+  return (
+    <Collapsible>
+      <div className="flex items-center gap-3 py-3">
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium">
+            {item.taskTitle}
+            <span className="ml-1.5 text-sm font-normal text-muted-foreground">
+              #{item.runNumber}
+            </span>
+          </p>
+          <p className="truncate text-xs text-muted-foreground">
+            {item.payload.title ? lt(item.payload.title) : item.checkpointId} ·{" "}
+            {formatTime(item.requestedAt)}
+          </p>
+        </div>
+        <RunStatusBadge status="waiting_approval" />
+        <Button size="sm" variant="ghost" asChild>
+          <Link
+            to="/projects/$projectId/runs/$runId"
+            params={{ projectId: item.projectId, runId: item.runId }}
+          >
+            <ExternalLinkIcon />
+            {t("approvalsInbox.openRun")}
+          </Link>
+        </Button>
+        {canDecide ? (
+          <CollapsibleTrigger asChild>
+            <Button size="sm" variant="outline" className="group/trigger">
+              {t("approvalsInbox.review")}
+              <ChevronDownIcon className="transition-transform group-data-[state=open]/trigger:rotate-180" />
+            </Button>
+          </CollapsibleTrigger>
+        ) : null}
+      </div>
+      <CollapsibleContent className="pb-3">
+        <InlineDecision item={item} />
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 export function ApprovalsPage() {
   const { t } = useTranslation("runs");
-  const me = useMe();
+  const pending = usePendingApprovals();
 
-  const perProject = useQueries({
-    queries: me.projects.map((project) => ({
-      queryKey: ["tasks", project.projectId],
-      queryFn: () => api<TaskRow[]>(`/projects/${project.projectId}/tasks`),
-      refetchInterval: 10_000,
-    })),
-  });
-
-  const waiting = me.projects.flatMap((project, index) =>
-    (perProject[index]?.data ?? [])
-      .filter((task) => task.runStatus === "waiting_approval")
-      .map((task) => ({ project, task })),
-  );
+  const byProject = new Map<string, { projectName: string; items: PendingApproval[] }>();
+  for (const item of pending.data ?? []) {
+    const group = byProject.get(item.projectId) ?? { projectName: item.projectName, items: [] };
+    group.items.push(item);
+    byProject.set(item.projectId, group);
+  }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("approvalsInbox.title")}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {waiting.length === 0 ? (
-          <p className="py-8 text-center text-sm text-muted-foreground">
-            {t("approvalsInbox.empty")}
-          </p>
-        ) : (
-          <ul className="divide-y">
-            {waiting.map(({ project, task }) => (
-              <li key={task.id} className="flex items-center justify-between gap-3 py-3">
-                <div>
-                  <Link
-                    to="/projects/$projectId/runs/$runId"
-                    params={{
-                      projectId: project.projectId,
-                      runId: task.latestRunId ?? "",
-                    }}
-                    className="font-medium hover:underline"
-                  >
-                    {task.title}
-                  </Link>
-                  <p className="text-xs text-muted-foreground">
-                    {project.name} · {formatTime(task.createdAt)}
-                  </p>
-                </div>
-                <RunStatusBadge status="waiting_approval" />
-              </li>
-            ))}
-          </ul>
-        )}
-      </CardContent>
-    </Card>
+    <div className="space-y-6">
+      <PageHeader title={t("approvalsInbox.title")} />
+      {pending.isLoading ? (
+        <TableSkeleton rows={3} />
+      ) : (pending.data ?? []).length === 0 ? (
+        <EmptyState icon={CircleCheckBigIcon} title={t("approvalsInbox.empty")} />
+      ) : (
+        [...byProject.entries()].map(([projectId, group]) => (
+          <section key={projectId}>
+            <h2 className="mb-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+              {group.projectName}
+            </h2>
+            <div className="divide-y rounded-lg border px-4">
+              {group.items.map((item) => (
+                <InboxRow key={item.id} item={item} />
+              ))}
+            </div>
+          </section>
+        ))
+      )}
+    </div>
   );
 }

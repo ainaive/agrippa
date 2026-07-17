@@ -11,17 +11,20 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
 import { getLastProjectId } from "@/features/lastProject";
 import { useMe } from "@/features/me";
+import { usePendingApprovals } from "@/features/usePendingApprovals";
 
 export function AppSidebar({ currentProjectId }: { currentProjectId: string | null }) {
   const { t } = useTranslation("common");
   const me = useMe();
   const matchRoute = useMatchRoute();
+  const pendingApprovals = usePendingApprovals().data?.length ?? 0;
 
   // Keep project navigation visible while on org-level pages (approvals, admin)
   // by falling back to the last-visited project, GitLab-context style.
@@ -95,6 +98,11 @@ export function AppSidebar({ currentProjectId }: { currentProjectId: string | nu
                     <span>{t("nav.approvals")}</span>
                   </Link>
                 </SidebarMenuButton>
+                {pendingApprovals > 0 ? (
+                  <SidebarMenuBadge className="bg-status-warning/15 text-status-warning">
+                    {pendingApprovals}
+                  </SidebarMenuBadge>
+                ) : null}
               </SidebarMenuItem>
               {me.orgRole === "org_admin" ? (
                 <SidebarMenuItem>

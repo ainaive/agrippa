@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-project approvals inbox** — `GET /api/v1/approvals/pending` returns every pending checkpoint in the caller's projects (membership-scoped, with project role). The Approvals page now lists them grouped by project with inline review: presented artifacts preview in place and members can approve/reject without opening the run. The sidebar entry carries a live pending-count badge.
+
 ### Changed (web UI overhaul, in progress)
 
 - **GitLab-style app shell** — the thin top bar + horizontal tabs are replaced by a persistent left sidebar (collapsible to an icon rail; sheet drawer on mobile) with a searchable project switcher, grouped Project/Organization navigation, and role-gated entries. A slim top bar carries breadcrumbs (derived from the route tree) and an avatar menu bundling language, theme (light/dark/system, persisted), and sign-out. New indigo/violet visual identity over cool-tinted neutrals with semantic status colors; emoji glyphs replaced by lucide icons; toasts (sonner) and confirmation dialogs wired into the shell. Projects can now be created any time from the switcher, not just on first login.

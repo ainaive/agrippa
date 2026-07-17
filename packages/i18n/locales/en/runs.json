@@ -50,7 +50,9 @@
   },
   "approvalsInbox": {
     "title": "Pending approvals",
-    "empty": "Nothing is waiting for your approval."
+    "empty": "Nothing is waiting for your approval.",
+    "openRun": "Open run",
+    "review": "Review"
   },
   "phases": {
     "checkpoint": "Approval checkpoint",

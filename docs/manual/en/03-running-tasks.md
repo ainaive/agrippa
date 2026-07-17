@@ -25,7 +25,7 @@ If you close the page, nothing is lost — reopening replays the full event hist
 
 When a run reaches a checkpoint it pauses with an amber **approval banner** naming the checkpoint and presenting the relevant artifacts (e.g. the proposed fix plan). Any project *member* or *admin* can **Approve** (the run resumes where it paused) or **Reject** (the run fails with `approval_rejected`), optionally with a comment. Unattended checkpoints expire after the template's timeout — typically cancelling the run.
 
-The top-bar **Approvals** page is your cross-project inbox: every run waiting on you, in one list.
+The sidebar's **Approvals** page is your cross-project inbox: every pending checkpoint across your projects, grouped by project, with a live count badge on the sidebar entry. Expand **Review** on any row to see the presented artifacts and approve or reject right there — no need to open the run.
 
 ## Cancel, retry, and failures
 
