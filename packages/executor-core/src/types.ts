@@ -1,4 +1,5 @@
 import type { ArtifactKind } from "@agrippa/core";
+import type { WorkspaceAccess } from "./isolation";
 
 /**
  * The Executor contract (docs/design/03-executor-abstraction.md, ADR-0005).
@@ -44,6 +45,12 @@ export type ToolPolicy = {
   disallowedTools?: string[];
   /** Absolute path writes must stay within (the run workspace). */
   writeRoot: string;
+  /**
+   * Repo access declared by the template workspace. `readOnly` confines writes
+   * to the artifact directory and forbids shell; `readWrite` allows both within
+   * the workspace. Enforced by evaluateToolCall in ./isolation.
+   */
+  access: WorkspaceAccess;
 };
 
 export type PriorStepSummary = {

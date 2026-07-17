@@ -9,9 +9,12 @@ import { approvals, createDb, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import {
   createRunQueue,
+  decideApproval,
   durationToMinutes,
   type EngineDeps,
   executeRun,
+  finalizeRun,
+  findStrandedApprovalRuns,
   InProcessEventBus,
   RedisEventBus,
 } from "@agrippa/orchestration";
@@ -76,16 +79,11 @@ await queue.boss.work(
 
 await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayload>[]) => {
   for (const job of jobs) {
-    const [approval] = await db
-      .select()
-      .from(approvals)
-      .where(eq(approvals.id, job.data.approvalId));
-    if (approval?.status !== "pending") continue;
-    await db
-      .update(approvals)
-      .set({ status: "expired", decidedAt: new Date() })
-      .where(eq(approvals.id, approval.id));
-    deps.logger.warn(`approval ${approval.id} expired — resuming run for onTimeout handling`);
+    // CAS pending → expired; null means a user already decided it (or a prior
+    // run of this job did) — nothing to do
+    const expired = await decideApproval(db, job.data.approvalId, { status: "expired" });
+    if (!expired) continue;
+    deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
     await queue.enqueueRun(job.data.runId); // engine applies the template's onTimeout
   }
 });
@@ -106,16 +104,21 @@ async function scheduleApprovalExpiry(runId: string): Promise<void> {
 }
 
 async function markRunFailed(runId: string, err: unknown): Promise<void> {
-  const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+  const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
   if (!run || isTerminalRunStatus(run.status)) return;
-  await db
-    .update(runs)
-    .set({
-      status: "failed",
-      finishedAt: new Date(),
-      error: { code: "internal", message: `retries exhausted: ${String(err).slice(0, 500)}` },
-    })
-    .where(eq(runs.id, runId));
+  // one shared finalization impl: CAS from the *current* status (so a queued run
+  // whose setup threw before it was claimed transitions queued→failed, not the
+  // illegal queued→failed of a hard-coded from), and it emits the terminal event
+  // that the old id-only update omitted
+  const error = { code: "internal", message: `retries exhausted: ${String(err).slice(0, 500)}` };
+  await finalizeRun(db, {
+    runId,
+    from: run.status,
+    to: "failed",
+    error,
+    usageTotals: {},
+    eventPayload: { error },
+  });
 }
 
 /**
@@ -129,6 +132,11 @@ setInterval(async () => {
       .from(runs)
       .where(and(eq(runs.status, "queued"), lt(runs.queuedAt, sql`now() - interval '30 seconds'`)));
     for (const run of stragglers) await queue.enqueueRun(run.id);
+
+    // runs paused on an approval that has since been decided but whose resume
+    // enqueue was lost (e.g. the API/worker died between the decision and the
+    // send) — re-enqueue so the decision actually takes effect
+    for (const runId of await findStrandedApprovalRuns(db)) await queue.enqueueRun(runId);
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }

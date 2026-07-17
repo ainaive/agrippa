@@ -16,6 +16,15 @@ services:
       AGRIPPA_BASE_URL: ${AGRIPPA_BASE_URL:-http://localhost:3000}
       AGRIPPA_SECRET_KEY: ${AGRIPPA_SECRET_KEY:?set AGRIPPA_SECRET_KEY (openssl rand -base64 32)}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET (openssl rand -base64 32)}
+      # the API chooses the executor at submit, so it must see the same setting
+      AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
+    volumes:
+      # the API serves artifact downloads; it only needs the shared artifact
+      # store (not run workspaces), and only reads it — mount read-only so a
+      # compromised API can't modify or delete worker-produced artifacts. Both
+      # images run as `bun` and chown this dir, so the volume is bun-owned
+      # whichever container initializes it.
+      - artifacts:/work/artifacts:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,7 +54,8 @@ services:
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
       WORKER_SLOTS: ${WORKER_SLOTS:-2}
     volumes:
-      - workdata:/work
+      - workspaces:/work/runs # throwaway per-run checkouts (worker only)
+      - artifacts:/work/artifacts # shared with the API for downloads
     depends_on:
       postgres:
         condition: service_healthy
@@ -73,4 +83,5 @@ services:
 
 volumes:
   pgdata:
-  workdata:
+  workspaces: # per-run checkouts, worker-only
+  artifacts: # artifact store, shared worker↔api (both run as bun)

@@ -9,3 +9,13 @@ export function createDb(url: string | undefined = process.env.DATABASE_URL) {
 }
 
 export type Db = ReturnType<typeof createDb>;
+
+/** The transaction handle drizzle passes to a `db.transaction(async (tx) => …)` callback. */
+export type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * Either a pooled connection or an open transaction — the query-capable surface
+ * shared by both. Helpers that must be able to run inside a caller's transaction
+ * accept this rather than `Db` (which additionally exposes `$client`).
+ */
+export type DbOrTx = Db | Transaction;

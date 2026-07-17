@@ -1,5 +1,5 @@
 import { Redis } from "ioredis";
-import type { BusEvent, RunEventBus } from "./bus";
+import type { BusEvent, RunEventBus, Subscription } from "./bus";
 
 const eventChannel = (runId: string) => `run:${runId}:events`;
 const controlChannel = (runId: string) => `run:${runId}:control`;
@@ -39,17 +39,25 @@ export class RedisEventBus implements RunEventBus {
     }
   }
 
-  subscribe(runId: string, listener: (event: BusEvent) => void): () => void {
+  subscribe(runId: string, listener: (event: BusEvent) => void): Subscription {
     const set = this.listeners.get(runId) ?? new Set();
     set.add(listener);
     this.listeners.set(runId, set);
-    void this.sub.subscribe(eventChannel(runId));
-    return () => {
-      set.delete(listener);
-      if (set.size === 0) {
-        this.listeners.delete(runId);
-        void this.sub.unsubscribe(eventChannel(runId));
-      }
+    // `ready` resolves once Redis acknowledges SUBSCRIBE; the SSE handler awaits
+    // it before replaying so an event published in that window isn't lost
+    const ready = this.sub
+      .subscribe(eventChannel(runId))
+      .then(() => undefined)
+      .catch(() => undefined); // Redis down → SSE falls back to DB replay
+    return {
+      unsubscribe: () => {
+        set.delete(listener);
+        if (set.size === 0) {
+          this.listeners.delete(runId);
+          void this.sub.unsubscribe(eventChannel(runId));
+        }
+      },
+      ready,
     };
   }
 

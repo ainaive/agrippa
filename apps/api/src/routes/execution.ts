@@ -18,13 +18,16 @@ import {
   templateVersions,
 } from "@agrippa/db";
 import {
+  appendRunEvent as allocateRunEvent,
+  authorizeResources,
   buildParamsValidator,
+  decideApproval,
   resolveModelRoles,
   SubmitError,
   type TemplateDoc,
-  verifyResourceGrants,
+  verifyRepoRefs,
 } from "@agrippa/orchestration";
-import { and, asc, desc, eq, gt, max } from "drizzle-orm";
+import { and, asc, desc, eq, gt } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
@@ -44,28 +47,6 @@ async function loadRunScoped(
   if (!run) throw AppError.notFound("Run");
   await assertProjectRole(c.var.db, c.var.user.id, run.projectId, min);
   return run;
-}
-
-/** Appends an API-originated event to the run log (seq = max + 1) and the bus. */
-async function appendRunEvent(
-  c: { var: AppEnv["Variables"] },
-  runId: string,
-  type: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  const [maxSeq] = await c.var.db
-    .select({ v: max(runEvents.seq) })
-    .from(runEvents)
-    .where(eq(runEvents.runId, runId));
-  const seq = (maxSeq?.v ?? 0) + 1;
-  await c.var.db.insert(runEvents).values({ runId, seq, type, payload });
-  await c.var.bus?.publish({
-    runId,
-    seq,
-    type,
-    payload,
-    createdAt: new Date().toISOString(),
-  });
 }
 
 export const executionRoutes = new Hono<AppEnv>()
@@ -108,11 +89,15 @@ export const executionRoutes = new Hono<AppEnv>()
       await assertQuotaHeadroom(db, projectId);
 
       try {
+        // every repoRef must reference a connection owned by this project
+        await verifyRepoRefs(db, projectId, compiled.spec.inputs, parsed.data);
+
         const skillRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
         const mcpRows = await db
           .select({ id: mcpServers.id, slug: mcpServers.slug })
           .from(mcpServers);
-        await verifyResourceGrants(db, projectId, compiled, {
+        // required grants enforced; optional resources pinned only when granted
+        const resourceManifest = await authorizeResources(db, projectId, compiled, {
           skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
           mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
         });
@@ -142,6 +127,7 @@ export const executionRoutes = new Hono<AppEnv>()
               executorId: DEFAULT_EXECUTOR,
               paramsSnapshot: parsed.data,
               modelResolution,
+              resourceManifest,
               budget: compiled.spec.budgets as unknown as Record<string, unknown>,
               createdBy: user.id,
             })
@@ -239,6 +225,7 @@ export const executionRoutes = new Hono<AppEnv>()
         executorId: latest.executorId,
         paramsSnapshot: latest.paramsSnapshot,
         modelResolution: latest.modelResolution,
+        resourceManifest: latest.resourceManifest,
         budget: latest.budget,
         createdBy: c.var.user.id,
       })
@@ -303,33 +290,56 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(approvals)
       .where(and(eq(approvals.id, c.req.param("approvalId")), eq(approvals.runId, run.id)));
     if (!approval) throw AppError.notFound("Approval");
-    if (approval.status !== "pending") {
-      throw AppError.conflict("already_decided", `Approval is ${approval.status}`);
-    }
-    const [updated] = await c.var.db
-      .update(approvals)
-      .set({
-        status: input.decision,
-        decidedBy: c.var.user.id,
-        decidedAt: new Date(),
-        comment: input.comment,
-      })
-      .where(eq(approvals.id, approval.id))
-      .returning();
-    await appendRunEvent(c, run.id, "approval.decided", {
+    const eventPayload = {
       approvalId: approval.id,
       checkpointId: approval.checkpointId,
       decision: input.decision,
+    };
+    // decision (CAS on status='pending'), the approval.decided event, and the
+    // audit row commit together — a partial write can't leave the timeline or
+    // audit log missing the decision that a later retry would then skip
+    const result = await c.var.db.transaction(async (tx) => {
+      const updated = await decideApproval(tx, approval.id, {
+        status: input.decision,
+        decidedBy: c.var.user.id,
+        comment: input.comment,
+      });
+      if (!updated) return { updated: null as null };
+      const event = await allocateRunEvent(tx, {
+        runId: run.id,
+        type: "approval.decided",
+        payload: eventPayload,
+      });
+      await audit(
+        c,
+        {
+          action: "run.approval.decide",
+          resourceType: "approval",
+          resourceId: approval.id,
+          projectId: run.projectId,
+          payload: { decision: input.decision },
+        },
+        tx,
+      );
+      return { updated, event };
     });
-    await audit(c, {
-      action: "run.approval.decide",
-      resourceType: "approval",
-      resourceId: approval.id,
-      projectId: run.projectId,
-      payload: { decision: input.decision },
+    if (!result.updated) {
+      // already decided, OR a prior attempt decided then failed to enqueue: in
+      // both cases the durable state is correct, so re-enqueue to unstick the
+      // run (the sweeper also backstops this) and report the conflict
+      await c.var.queue?.enqueueRun(run.id);
+      throw AppError.conflict("already_decided", "Approval is already decided");
+    }
+    // publish + enqueue only after the decision durably committed
+    await c.var.bus?.publish({
+      runId: run.id,
+      seq: result.event.seq,
+      type: "approval.decided",
+      payload: eventPayload,
+      createdAt: result.event.createdAt.toISOString(),
     });
     await c.var.queue?.enqueueRun(run.id); // resume at the gated phase
-    return c.json(updated);
+    return c.json(result.updated);
   })
 
   // ── Artifacts ───────────────────────────────────────────────────────────────
@@ -419,9 +429,6 @@ export const executionRoutes = new Hono<AppEnv>()
         return rows;
       };
 
-      // 1) replay history (gap-free by construction)
-      await replay();
-
       const isTerminal = async (): Promise<boolean> => {
         const [row] = await db
           .select({ status: runs.status })
@@ -430,40 +437,38 @@ export const executionRoutes = new Hono<AppEnv>()
         return row ? isTerminalRunStatus(row.status) : true;
       };
 
-      if (await isTerminal()) return;
-
-      // 2) live: bridge the bus when present, else poll the DB
+      // Live: bridge the bus when present, else poll the DB. The bus is only a
+      // WAKE-UP — every event is delivered by an ordered `replay()` from
+      // Postgres, so the cursor advances contiguously. Sending bus events
+      // directly would advance a high-water cursor past a dropped seq, and that
+      // gap would then be skipped forever (even on Last-Event-ID reconnect).
       if (bus) {
-        const queue: Array<() => Promise<void>> = [];
         let notify: (() => void) | null = null;
-        const unsubscribe = bus.subscribe(run.id, (event) => {
-          queue.push(async () => {
-            if (event.seq > cursor) {
-              await sendRow({ ...event, createdAt: event.createdAt });
-            }
-          });
-          notify?.();
-        });
+        const subscription = bus.subscribe(run.id, () => notify?.());
         try {
+          // wait until the subscription is actually live, THEN replay history,
+          // so nothing published in between is dropped (ADR-0007)
+          await subscription.ready;
+          await replay();
           while (!closed) {
-            while (queue.length > 0) {
-              const job = queue.shift();
-              if (job) await job();
-            }
             if (await isTerminal()) {
-              await replay(); // drain anything raced between bus and DB
+              await replay(); // final ordered drain
               break;
             }
+            // sleep until woken by the bus (or a 2 s safety tick), then replay
             await new Promise<void>((resolve) => {
               notify = resolve;
               setTimeout(resolve, 2000);
             });
             notify = null;
+            await replay();
           }
         } finally {
-          unsubscribe();
+          subscription.unsubscribe();
         }
       } else {
+        await replay();
+        if (await isTerminal()) return;
         while (!closed) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
           await replay();

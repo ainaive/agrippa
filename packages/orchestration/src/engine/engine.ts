@@ -1,9 +1,4 @@
-import {
-  canTransitionRun,
-  isTerminalRunStatus,
-  type RunStatus,
-  type StepStatus,
-} from "@agrippa/core";
+import { isTerminalRunStatus, type RunStatus, type StepStatus } from "@agrippa/core";
 import {
   approvals,
   artifacts,
@@ -20,15 +15,19 @@ import {
 import {
   BudgetExceededError,
   BudgetMeter,
+  collectEnvSecretValues,
+  createSecretRedactor,
   type ExecutionContext,
   type Executor,
   type ExecutorEvent,
   type PriorStepSummary,
+  type ResolvedMcpServer,
   type ResolvedModel,
+  type SecretRedactor,
   type StepExecutionRequest,
   type UsageDelta,
 } from "@agrippa/executor-core";
-import { and, eq, max, sql } from "drizzle-orm";
+import { and, eq, gte, max, ne, sql } from "drizzle-orm";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
 import type { ModelResolution } from "../resolve";
 import {
@@ -38,6 +37,7 @@ import {
   type TemplateStep,
 } from "../template-schema";
 import type { EngineDeps, RunOutcome } from "./deps";
+import { appendRunEvent, finalizeRun, transitionRun } from "./run-lifecycle";
 
 type RunRow = typeof runs.$inferSelect;
 type StepRow = typeof runSteps.$inferSelect;
@@ -53,6 +53,30 @@ class RunFailure extends Error {
     super(message);
     this.name = "RunFailure";
   }
+}
+
+/**
+ * Raised when this worker loses the run-claim to another still-active worker.
+ * We must not finalize or execute — the owner is running the run — so execute()
+ * catches it and exits without touching the run.
+ */
+class RunClaimLost extends Error {
+  constructor() {
+    super("run is owned by another worker");
+    this.name = "RunClaimLost";
+  }
+}
+
+/** The credential values a resolved MCP server injects, for secret redaction. */
+function mcpSecretValues(server: ResolvedMcpServer): string[] {
+  if (server.transport === "stdio") return Object.values(server.env);
+  const values: string[] = [];
+  for (const header of Object.values(server.headers)) {
+    values.push(header);
+    const bearer = /^Bearer\s+(.+)$/i.exec(header);
+    if (bearer) values.push(bearer[1] as string);
+  }
+  return values;
 }
 
 /**
@@ -92,7 +116,6 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
 }
 
 class RunEngine {
-  private seq = 0;
   private meter!: BudgetMeter;
   private readonly abort = new AbortController();
   private abortReason: AbortReason | null = null;
@@ -104,6 +127,10 @@ class RunEngine {
   private modelPrices = new Map<string, { input: number; output: number; modelId?: string }>();
   private currentStepRowId: string | null = null;
   private producedArtifacts = new Set<string>();
+  // stepId → crashed-attempt count + last executor session, for crash resume
+  private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
+  // scrubs known secret values from event payloads before persist/publish
+  private readonly redactor: SecretRedactor = createSecretRedactor(collectEnvSecretValues());
 
   constructor(
     private readonly deps: EngineDeps,
@@ -136,6 +163,8 @@ class RunEngine {
       const outcome = await this.runPhases();
       return outcome;
     } catch (err) {
+      // another worker owns the run — leave it entirely to them, finalize nothing
+      if (err instanceof RunClaimLost) return "already_terminal";
       return await this.handleFailure(err);
     } finally {
       if (this.timeoutTimer) clearTimeout(this.timeoutTimer);
@@ -152,10 +181,22 @@ class RunEngine {
       .select({ v: max(runEvents.seq) })
       .from(runEvents)
       .where(eq(runEvents.runId, run.id));
-    this.seq = maxSeq?.v ?? 0;
-    const resuming = this.seq > 0;
+    const resuming = (maxSeq?.v ?? 0) > 0;
 
-    await this.transition(run.status, "running");
+    if (!(await this.transition(run.status, "running"))) {
+      // another worker/path advanced the run between our read and here
+      const [current] = await db
+        .select({ status: runs.status })
+        .from(runs)
+        .where(eq(runs.id, run.id));
+      if (current && current.status === "cancelled") {
+        throw new RunFailure("cancelled", "run cancelled", "cancelled");
+      }
+      // it's terminal (another worker finished it) or already `running` under
+      // another live worker — either way this worker must not proceed and
+      // duplicate side effects; the owner (or a later re-delivery) drives it
+      throw new RunClaimLost();
+    }
     if (run.startedAt === null) {
       await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, run.id));
       this.run.startedAt = new Date();
@@ -179,6 +220,15 @@ class RunEngine {
           })
           .where(eq(runSteps.id, row.id));
         row.status = "failed";
+        row.error = { code: "crashed", message: "worker died mid-step" };
+      }
+      // a crash is an interrupted attempt, not a consumed retry: track it so the
+      // step gets an extra attempt and resumes the executor session
+      if (row.status === "failed" && (row.error as { code?: string } | null)?.code === "crashed") {
+        const rec = this.crashRecovery.get(row.stepId) ?? { crashed: 0, sessionId: null };
+        rec.crashed += 1;
+        if (row.executorSessionId) rec.sessionId = row.executorSessionId;
+        this.crashRecovery.set(row.stepId, rec);
       }
       const current = this.stepRows.get(row.stepId);
       if (!current || row.attempt > current.attempt) this.stepRows.set(row.stepId, row);
@@ -200,6 +250,18 @@ class RunEngine {
       })
       .from(tokenUsage)
       .where(eq(tokenUsage.runId, run.id));
+    // per-phase spend, rebuilt by phase so per-phase budgets survive a resume
+    // (usage rows carry a step id; run_steps carries the phase)
+    const perPhaseRows = await db
+      .select({
+        phaseId: runSteps.phaseId,
+        cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+      })
+      .from(tokenUsage)
+      .innerJoin(runSteps, eq(tokenUsage.stepId, runSteps.id))
+      .where(eq(tokenUsage.runId, run.id))
+      .groupBy(runSteps.phaseId);
+    const perPhaseSpent = Object.fromEntries(perPhaseRows.map((r) => [r.phaseId, Number(r.cost)]));
     const budgets = this.template.spec.budgets;
     const quota = await this.quotaHeadroom();
     this.meter = new BudgetMeter(
@@ -211,7 +273,11 @@ class RunEngine {
         quotaCostUsd: quota.costUsd,
         quotaTokens: quota.tokens,
       },
-      { costUsd: Number(usageTotals?.cost ?? 0), tokens: Number(usageTotals?.tokens ?? 0) },
+      {
+        costUsd: Number(usageTotals?.cost ?? 0),
+        tokens: Number(usageTotals?.tokens ?? 0),
+        perPhaseCostUsd: perPhaseSpent,
+      },
     );
 
     // duration budget survives resume: deadline anchors to the original start
@@ -231,6 +297,13 @@ class RunEngine {
     this.workspaceDir = await this.deps.workspace.ensureDir(run.id);
   }
 
+  /**
+   * Remaining project quota headroom for *this* run, refreshed at each step
+   * boundary so concurrent runs see each other's spend. Counts the current
+   * month (matching the submit-time gate in apps/api usage.ts) and excludes
+   * this run's own persisted usage — the meter already carries that, so
+   * including it here would double-count on resume.
+   */
   private async quotaHeadroom(): Promise<{ costUsd?: number; tokens?: number }> {
     const [quota] = await this.db
       .select()
@@ -243,7 +316,13 @@ class RunEngine {
         tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
       })
       .from(tokenUsage)
-      .where(eq(tokenUsage.projectId, this.run.projectId));
+      .where(
+        and(
+          eq(tokenUsage.projectId, this.run.projectId),
+          ne(tokenUsage.runId, this.run.id),
+          gte(tokenUsage.occurredAt, sql`date_trunc('month', now())`),
+        ),
+      );
     const headroom: { costUsd?: number; tokens?: number } = {};
     if (quota.costLimitUsd !== null) {
       headroom.costUsd = Math.max(0, Number(quota.costLimitUsd) - Number(spent?.cost ?? 0));
@@ -281,6 +360,10 @@ class RunEngine {
           continue;
         }
         await this.checkInterrupts();
+        // re-read project quota each step so concurrent runs can't collectively
+        // overspend by each checking only a stale start-of-run snapshot
+        const quota = await this.quotaHeadroom();
+        this.meter.refreshQuota(quota.costUsd, quota.tokens);
         this.meter.check();
         await this.executeStepWithRetry(phase, step);
       }
@@ -359,7 +442,11 @@ class RunEngine {
   // ── Steps ────────────────────────────────────────────────────────────────────
 
   private async executeStepWithRetry(phase: TemplatePhase, step: TemplateStep): Promise<void> {
-    const maxAttempts = (step.retry?.max ?? 0) + 1;
+    // crashes don't consume the retry budget — each adds one extra attempt so a
+    // no-retry step that died mid-run still re-executes instead of silently
+    // being skipped (its loop would otherwise be `for (2; 2 <= 1)`)
+    const recovery = this.crashRecovery.get(step.id);
+    const maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0);
     const startAttempt = (this.stepRows.get(step.id)?.attempt ?? 0) + 1;
 
     // conditional / requires gating
@@ -368,16 +455,33 @@ class RunEngine {
       return;
     }
     if (step.requires) {
-      const { missing } = await this.deps.resources.mcpServers(step.requires.mcpServers);
-      if (missing.length > 0) {
-        await this.markSkipped(phase, step, `missing optional resources: ${missing.join(", ")}`);
+      const authorizedMcp = this.authorizedMcpRefs(step.requires.mcpServers);
+      const ungrantedMcp = step.requires.mcpServers.filter((ref) => !authorizedMcp.includes(ref));
+      const { missing: missingMcp } = await this.deps.resources.mcpServers(authorizedMcp);
+      // a required skill must be BOTH authorized (in the manifest) and available
+      // (has an active version) — otherwise the step runs without what it needs
+      const authorizedSkills = this.authorizedSkillRefs(step.requires.skills);
+      const ungrantedSkills = step.requires.skills.filter((ref) => !authorizedSkills.includes(ref));
+      const { missing: missingSkills } = await this.deps.resources.skills(
+        authorizedSkills,
+        this.workspaceDir,
+      );
+      const unavailable = [...ungrantedMcp, ...missingMcp, ...ungrantedSkills, ...missingSkills];
+      if (unavailable.length > 0) {
+        await this.markSkipped(
+          phase,
+          step,
+          `missing optional resources: ${unavailable.join(", ")}`,
+        );
         return;
       }
     }
 
     for (let attempt = startAttempt; attempt <= maxAttempts; attempt++) {
       await this.checkInterrupts();
-      const row = await this.insertStepRow(phase, step, attempt);
+      // resume the crashed executor session on the first recovery attempt only
+      const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? null) : null;
+      const row = await this.insertStepRow(phase, step, attempt, resumeSessionId);
       this.currentStepRowId = row.id;
       try {
         if (step.kind === "system") {
@@ -424,7 +528,12 @@ class RunEngine {
         ? evaluateExpression(wrapped[1] as string, this.expressionContext())
         : spec.repo;
       const ref = spec.ref ? interpolate(spec.ref, this.expressionContext()) : undefined;
-      await this.deps.workspace.checkout(this.run.id, { repo, ref, access: spec.access });
+      await this.deps.workspace.checkout(this.run.id, {
+        repo,
+        ref,
+        access: spec.access,
+        projectId: this.run.projectId,
+      });
       await this.emit("workspace.ready", { ref });
     }
   }
@@ -522,16 +631,34 @@ class RunEngine {
         model: modelFor(s.model.role),
       }));
 
-    const skills = await this.deps.resources.skills(step.skills, this.workspaceDir);
-    const { resolved: mcpServers, missing } = await this.deps.resources.mcpServers(step.mcpServers);
-    const optionalRefs = new Set(
+    // resolve only what the run is authorized for — ungranted optional
+    // resources are dropped here, never resolved from the global registry
+    const { resolved: skills, missing: missingSkills } = await this.deps.resources.skills(
+      this.authorizedSkillRefs(step.skills),
+      this.workspaceDir,
+    );
+    const { resolved: mcpServers, missing: missingMcp } = await this.deps.resources.mcpServers(
+      this.authorizedMcpRefs(step.mcpServers),
+    );
+    // register the resolved MCP credentials so they're redacted from any event
+    this.redactor.add(mcpServers.flatMap(mcpSecretValues));
+    // an unavailable *required* resource fails the step; optional ones are dropped
+    const optionalMcp = new Set(
       this.template.spec.resources.mcpServers.filter((m) => m.optional).map((m) => m.ref),
     );
-    const hardMissing = missing.filter((ref) => !optionalRefs.has(ref));
+    const optionalSkill = new Set(
+      this.template.spec.resources.skills
+        .filter((s) => s.optional)
+        .map((s) => s.ref.split("@")[0] as string),
+    );
+    const hardMissing = [
+      ...missingMcp.filter((ref) => !optionalMcp.has(ref)),
+      ...missingSkills.filter((ref) => !optionalSkill.has(ref.split("@")[0] as string)),
+    ];
     if (hardMissing.length > 0) {
-      throw new StepFailed(`required MCP servers unavailable: ${hardMissing.join(", ")}`, {
+      throw new StepFailed(`required resources unavailable: ${hardMissing.join(", ")}`, {
         code: "tool_error",
-        message: `required MCP servers unavailable: ${hardMissing.join(", ")}`,
+        message: `required resources unavailable: ${hardMissing.join(", ")}`,
       });
     }
 
@@ -552,7 +679,12 @@ class RunEngine {
       subagents,
       skills,
       mcpServers,
-      toolPolicy: { writeRoot: this.workspaceDir },
+      // no workspace repo → scratch dir with nothing to protect (readWrite);
+      // a repo checkout carries the template's declared access (default readOnly)
+      toolPolicy: {
+        writeRoot: this.workspaceDir,
+        access: this.template.spec.workspace?.access ?? "readWrite",
+      },
       limits: { maxTurns: 50 },
       workspaceDir: this.workspaceDir,
       resumeSessionId: row.executorSessionId ?? undefined,
@@ -562,6 +694,18 @@ class RunEngine {
         kind: this.template.spec.outputs.artifacts.find((a) => a.key === key)?.kind ?? "markdown",
       })),
     };
+  }
+
+  /** MCP refs the run is authorized to use (pinned at submit; see resolve.authorizeResources). */
+  private authorizedMcpRefs(refs: string[]): string[] {
+    const allowed = new Set(this.run.resourceManifest.mcpServers);
+    return refs.filter((ref) => allowed.has(ref));
+  }
+
+  /** Skill refs whose slug the run is authorized to use. */
+  private authorizedSkillRefs(refs: string[]): string[] {
+    const allowed = new Set(this.run.resourceManifest.skills);
+    return refs.filter((ref) => allowed.has(ref.split("@")[0] as string));
   }
 
   private expressionContext(): Record<string, unknown> {
@@ -581,6 +725,36 @@ class RunEngine {
     row: StepRow,
     event: ExecutorEvent,
   ): Promise<void> {
+    if (event.type === "artifact") {
+      // validate the contract BEFORE emitting: an uncontracted artifact's inline
+      // contents/path/key must not leak into run_events or the SSE stream. Emit
+      // the normalized contract kind so downstream sees the declared type.
+      const produces = "produces" in step ? step.produces : [];
+      if (!produces.includes(event.key)) {
+        this.deps.logger.warn("dropping uncontracted artifact", {
+          runId: this.run.id,
+          stepId: step.id,
+          key: event.key,
+        });
+        return;
+      }
+      const contractKind =
+        this.template.spec.outputs.artifacts.find((a) => a.key === event.key)?.kind ?? event.kind;
+      await this.emit(
+        "artifact",
+        {
+          phaseId: phase.id,
+          stepId: step.id,
+          key: event.key,
+          kind: contractKind,
+          path: event.path,
+        },
+        row.id,
+      );
+      await this.storeArtifact(row, { ...event, kind: contractKind });
+      return;
+    }
+
     const { type, ...payload } = event as { type: string } & Record<string, unknown>;
     await this.emit(type, { phaseId: phase.id, stepId: step.id, ...payload }, row.id);
     if (event.type === "step.started" && event.sessionId) {
@@ -588,9 +762,6 @@ class RunEngine {
         .update(runSteps)
         .set({ executorSessionId: event.sessionId })
         .where(eq(runSteps.id, row.id));
-    }
-    if (event.type === "artifact") {
-      await this.storeArtifact(row, event);
     }
   }
 
@@ -605,6 +776,10 @@ class RunEngine {
       { inline: event.inline, path: event.path },
       this.workspaceDir,
     );
+    // a missing OR empty source produced no bytes — don't create a zero-byte row
+    // (and don't mark the key produced, so a required-but-empty artifact still
+    // fails the contract rather than passing it)
+    if (stored.size === 0 && stored.storageRef === null) return;
     await this.db.insert(artifacts).values({
       runId: this.run.id,
       stepId: row.id,
@@ -645,6 +820,7 @@ class RunEngine {
     phase: TemplatePhase,
     step: TemplateStep,
     attempt: number,
+    resumeSessionId: string | null = null,
   ): Promise<StepRow> {
     const [row] = await this.db
       .insert(runSteps)
@@ -656,6 +832,8 @@ class RunEngine {
         seq: this.stepSeq(step.id),
         status: "running",
         agentRef: step.kind === "agent" ? step.model.role : step.action,
+        // carry the crashed attempt's session so buildRequest can resume it
+        executorSessionId: resumeSessionId,
         startedAt: new Date(),
       })
       .returning();
@@ -719,20 +897,22 @@ class RunEngine {
     payload: Record<string, unknown>,
     stepRowId?: string,
   ): Promise<void> {
-    this.seq += 1;
-    const createdAt = new Date();
-    await this.db.insert(runEvents).values({
+    // redact known secret values (provider key, MCP tokens) an agent may have
+    // echoed into message/tool output, so they never reach run_events or SSE
+    const safePayload = this.redactor.redact(payload);
+    // seq is allocated by the database (run-lifecycle.appendRunEvent), not from
+    // an in-memory counter that a concurrent writer could collide with
+    const { seq, createdAt } = await appendRunEvent(this.db, {
       runId: this.run.id,
       stepId: stepRowId ?? this.currentStepRowId,
-      seq: this.seq,
       type,
-      payload,
+      payload: safePayload,
     });
     await this.deps.bus.publish({
       runId: this.run.id,
-      seq: this.seq,
+      seq,
       type,
-      payload,
+      payload: safePayload,
       createdAt: createdAt.toISOString(),
     });
   }
@@ -768,13 +948,15 @@ class RunEngine {
     if (this.abortReason) throw this.abortFailure();
   }
 
-  private async transition(from: RunStatus, to: RunStatus): Promise<void> {
-    if (from === to) return;
-    if (!canTransitionRun(from, to)) {
-      throw new Error(`illegal run transition ${from} → ${to}`);
-    }
-    await this.db.update(runs).set({ status: to }).where(eq(runs.id, this.run.id));
-    this.run.status = to;
+  /**
+   * Compare-and-swap the run status. Returns false when the row had already
+   * moved off `from` (e.g. a concurrent cancel/finalize won the race); callers
+   * that must not clobber the other outcome check the result.
+   */
+  private async transition(from: RunStatus, to: RunStatus): Promise<boolean> {
+    const applied = await transitionRun(this.db, this.run.id, from, to);
+    if (applied) this.run.status = to;
+    return applied;
   }
 
   private async handleFailure(err: unknown): Promise<RunOutcome> {
@@ -806,20 +988,49 @@ class RunEngine {
     error: { code: string; message: string } | null,
   ): Promise<void> {
     const snapshot = this.meter?.snapshot() ?? { costUsd: 0, tokens: 0, perPhaseCostUsd: {} };
-    await this.transition(this.run.status, status);
-    await this.db
-      .update(runs)
-      .set({
-        finishedAt: new Date(),
-        error: error ?? null,
-        usageTotals: {
-          costUsd: snapshot.costUsd,
-          tokens: snapshot.tokens,
-          perPhaseCostUsd: snapshot.perPhaseCostUsd,
-        },
-      })
-      .where(eq(runs.id, this.run.id));
-    await this.emit(`run.${status}`, error ? { error } : {});
+    const usageTotals = {
+      costUsd: snapshot.costUsd,
+      tokens: snapshot.tokens,
+      perPhaseCostUsd: snapshot.perPhaseCostUsd,
+    };
+    const from = this.run.status;
+    let finalStatus = status;
+    let eventPayload = this.redactor.redact(error ? { error } : {});
+
+    // finalizeRun commits the status CAS + finishedAt/totals + terminal event in
+    // one tx. For a success we require cancel_requested=false so a cancel that
+    // landed after the last interrupt check wins atomically (no read/CAS gap).
+    let result = await finalizeRun(this.db, {
+      runId: this.run.id,
+      from,
+      to: status,
+      requireNotCancelled: status === "succeeded",
+      error,
+      usageTotals,
+      eventPayload,
+    });
+    if (result.outcome === "cancelled_instead") {
+      finalStatus = "cancelled";
+      const cancelError = { code: "cancelled", message: "run cancelled" };
+      eventPayload = this.redactor.redact({ error: cancelError });
+      result = await finalizeRun(this.db, {
+        runId: this.run.id,
+        from,
+        to: "cancelled",
+        error: cancelError,
+        usageTotals,
+        eventPayload,
+      });
+    }
+    if (result.outcome !== "finalized") return; // another path finalized the run
+    this.run.status = finalStatus;
+    await this.deps.bus.publish({
+      runId: this.run.id,
+      seq: result.seq,
+      type: `run.${finalStatus}`,
+      payload: eventPayload,
+      createdAt: result.createdAt.toISOString(),
+    });
     try {
       await this.deps.workspace.cleanup(this.run.id);
     } catch (err) {

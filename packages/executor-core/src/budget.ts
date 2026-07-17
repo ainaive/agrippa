@@ -35,13 +35,12 @@ export type BudgetSnapshot = {
 export class BudgetMeter {
   private costUsd: number;
   private tokens: number;
+  private limits: BudgetLimits;
   private readonly perPhase: Record<string, number>;
   private currentPhase = "";
 
-  constructor(
-    private readonly limits: BudgetLimits,
-    initial: Partial<BudgetSnapshot> = {},
-  ) {
+  constructor(limits: BudgetLimits, initial: Partial<BudgetSnapshot> = {}) {
+    this.limits = limits;
     this.costUsd = initial.costUsd ?? 0;
     this.tokens = initial.tokens ?? 0;
     this.perPhase = { ...(initial.perPhaseCostUsd ?? {}) };
@@ -50,6 +49,15 @@ export class BudgetMeter {
   enterPhase(phaseId: string): void {
     this.currentPhase = phaseId;
     this.perPhase[phaseId] ??= 0;
+  }
+
+  /**
+   * Refresh the project-quota headroom (leaving run/phase limits untouched).
+   * Called at each step boundary so a run reacts to quota consumed by other
+   * concurrent runs rather than a stale snapshot taken at start.
+   */
+  refreshQuota(quotaCostUsd: number | undefined, quotaTokens: number | undefined): void {
+    this.limits = { ...this.limits, quotaCostUsd, quotaTokens };
   }
 
   record(usage: UsageDelta & { costUsd: number }): void {

@@ -93,6 +93,10 @@ export function compileTemplate(sourceYaml: string, options: CompileOptions = {}
     for (const ref of step.requires?.mcpServers ?? []) {
       if (!mcpRefs.has(ref)) issues.push(`${where}: requires unknown mcp server '${ref}'`);
     }
+    for (const ref of step.requires?.skills ?? []) {
+      if (!skillSlugs.has(skillSlugOfRef(ref)))
+        issues.push(`${where}: requires unknown skill '${ref}'`);
+    }
     for (const key of step.produces) {
       if (!artifactKeys.has(key)) {
         issues.push(`${where}: produces '${key}' which is not in outputs.artifacts`);

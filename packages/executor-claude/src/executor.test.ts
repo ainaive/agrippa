@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
@@ -36,7 +36,7 @@ function makeRequest(overrides: Partial<StepExecutionRequest> = {}): StepExecuti
     mcpServers: [
       { slug: "github", transport: "http", url: "https://mcp.example/", headers: { a: "b" } },
     ],
-    toolPolicy: { writeRoot: workspaceDir },
+    toolPolicy: { writeRoot: workspaceDir, access: "readWrite" },
     limits: { maxTurns: 50 },
     workspaceDir,
     priorContext: [{ stepId: "earlier", output: "earlier result", artifactKeys: [] }],
@@ -47,13 +47,20 @@ function makeRequest(overrides: Partial<StepExecutionRequest> = {}): StepExecuti
 
 const sdk = (message: unknown) => message as SDKMessage;
 
-function scriptedQuery(messages: unknown[], capture?: { options?: Options; prompt?: string }) {
+function scriptedQuery(
+  messages: unknown[],
+  capture?: { options?: Options; prompt?: string },
+  onStart?: () => void,
+) {
   return (params: { prompt: string; options?: Options }) => {
     if (capture) {
       capture.options = params.options;
       capture.prompt = params.prompt;
     }
     return (async function* () {
+      // runs after the executor has cleared expected artifacts — this is where a
+      // real agent would write its files
+      onStart?.();
       for (const message of messages) yield sdk(message);
     })();
   };
@@ -99,40 +106,78 @@ describe("claude executor option mapping (docs/design/03)", () => {
     expect(prompt).toContain(".agrippa/artifacts/fix-report.md");
   });
 
-  it("canUseTool denies writes outside the workspace and allows inside", async () => {
-    const req = makeRequest();
-    const { options } = buildQueryArgs(req, makeCtx(), new AbortController());
-    const canUseTool = options.canUseTool;
-    if (!canUseTool) throw new Error("canUseTool missing");
+  it("canUseTool contains writes and shell per the workspace policy", async () => {
+    const ctx = { signal: new AbortController().signal, suggestions: [] } as never;
+    const rwReq = makeRequest();
+    const rw = buildQueryArgs(rwReq, makeCtx(), new AbortController()).options.canUseTool;
+    if (!rw) throw new Error("canUseTool missing");
 
-    const denied = await canUseTool("Write", { file_path: "/etc/passwd" }, {
-      signal: new AbortController().signal,
-      suggestions: [],
-    } as never);
-    expect(denied?.behavior).toBe("deny");
-
-    const allowed = await canUseTool(
-      "Write",
-      { file_path: path.join(req.workspaceDir, "src/x.ts") },
-      { signal: new AbortController().signal, suggestions: [] } as never,
+    // read-write: writes inside the workspace allowed, escaping writes denied
+    expect((await rw("Write", { file_path: "/etc/passwd" }, ctx))?.behavior).toBe("deny");
+    expect(
+      (await rw("Write", { file_path: path.join(rwReq.workspaceDir, "src/x.ts") }, ctx))?.behavior,
+    ).toBe("allow");
+    // sibling-prefix directory must not pass the containment check
+    expect((await rw("Write", { file_path: `${rwReq.workspaceDir}-evil/x` }, ctx))?.behavior).toBe(
+      "deny",
     );
-    expect(allowed?.behavior).toBe("allow");
+    // read-write: shell is permitted (OS-sandboxed when available)
+    expect((await rw("Bash", { command: "ls" }, ctx))?.behavior).toBe("allow");
+    // reads are confined to the workspace: /proc and other runs are denied
+    expect((await rw("Read", { file_path: "/proc/self/environ" }, ctx))?.behavior).toBe("deny");
+    expect((await rw("Read", { file_path: "/work/runs/other/secret" }, ctx))?.behavior).toBe(
+      "deny",
+    );
+    expect(
+      (await rw("Read", { file_path: path.join(rwReq.workspaceDir, "src/a.ts") }, ctx))?.behavior,
+    ).toBe("allow");
 
-    const bash = await canUseTool("Bash", { command: "ls" }, {
-      signal: new AbortController().signal,
-      suggestions: [],
-    } as never);
-    expect(bash?.behavior).toBe("allow");
+    // read-only: shell denied, repo writes denied, artifact writes allowed
+    const roReq = makeRequest();
+    roReq.toolPolicy = { writeRoot: roReq.workspaceDir, access: "readOnly" };
+    const ro = buildQueryArgs(roReq, makeCtx(), new AbortController()).options.canUseTool;
+    if (!ro) throw new Error("canUseTool missing");
+    expect((await ro("Bash", { command: "ls" }, ctx))?.behavior).toBe("deny");
+    expect(
+      (await ro("Write", { file_path: path.join(roReq.workspaceDir, "src/x.ts") }, ctx))?.behavior,
+    ).toBe("deny");
+    expect(
+      (
+        await ro(
+          "Write",
+          { file_path: path.join(roReq.workspaceDir, ".agrippa/artifacts/report.md") },
+          ctx,
+        )
+      )?.behavior,
+    ).toBe("allow");
+  });
+
+  it("scrubs platform secrets from the agent subprocess env", () => {
+    const req = makeRequest();
+    const prev = process.env.AGRIPPA_SECRET_KEY;
+    process.env.AGRIPPA_SECRET_KEY = "master-key";
+    try {
+      const { options } = buildQueryArgs(req, makeCtx(), new AbortController());
+      expect(options.env?.AGRIPPA_SECRET_KEY).toBeUndefined();
+      expect(options.env?.DATABASE_URL).toBeUndefined();
+      // strict MCP + no repo settings/hooks honored
+      expect(options.strictMcpConfig).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AGRIPPA_SECRET_KEY;
+      else process.env.AGRIPPA_SECRET_KEY = prev;
+    }
   });
 });
 
 describe("claude executor event stream", () => {
   it("translates SDK messages into normalized executor events", async () => {
     const req = makeRequest();
-    // agent wrote an artifact into the convention directory
     const artifactDir = path.join(req.workspaceDir, ".agrippa/artifacts");
-    mkdirSync(artifactDir, { recursive: true });
-    writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
+    // the agent writes its artifact during the run (after the executor clears)
+    const writeArtifact = () => {
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
+    };
 
     const messages = [
       { type: "system", subtype: "init", session_id: "sess-1" },
@@ -165,7 +210,7 @@ describe("claude executor event stream", () => {
       { type: "result", subtype: "success", result: "All done.", is_error: false },
     ];
 
-    const executor = createClaudeExecutor(scriptedQuery(messages));
+    const executor = createClaudeExecutor(scriptedQuery(messages, undefined, writeArtifact));
     const events = await collect(executor.executeStep(req, makeCtx()));
 
     expect(events[0]).toEqual({ type: "step.started", sessionId: "sess-1" });
@@ -202,6 +247,85 @@ describe("claude executor event stream", () => {
       path: ".agrippa/artifacts/fix-report.md",
     });
     expect(events.at(-1)).toEqual({ type: "step.completed", output: "All done." });
+  });
+
+  it("collects only contracted artifacts, skipping patch and uncontracted files", async () => {
+    const req = makeRequest({
+      expectedArtifacts: [
+        { key: "fix-report", kind: "markdown" },
+        { key: "patch", kind: "patch" },
+      ],
+    });
+    const artifactDir = path.join(req.workspaceDir, ".agrippa/artifacts");
+    mkdirSync(artifactDir, { recursive: true });
+    // stray files that already exist (the patch, which the engine generates, and
+    // a scratch file); the agent writes fix-report during the run
+    writeFileSync(path.join(artifactDir, "patch"), "diff --git a/x b/x");
+    writeFileSync(path.join(artifactDir, "scratch.txt"), "junk");
+    const writeReport = () => writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
+
+    // patch instructions must not tell the agent to author the patch file
+    const { prompt } = buildQueryArgs(req, makeCtx(), new AbortController());
+    expect(prompt).toContain(".agrippa/artifacts/fix-report.md");
+    expect(prompt).not.toContain(".agrippa/artifacts/patch");
+
+    const executor = createClaudeExecutor(
+      scriptedQuery(
+        [
+          { type: "system", subtype: "init", session_id: "s" },
+          { type: "result", subtype: "success", result: "done", is_error: false },
+        ],
+        undefined,
+        writeReport,
+      ),
+    );
+    const events = await collect(executor.executeStep(req, makeCtx()));
+    const artifacts = events.filter((e) => e.type === "artifact");
+    expect(artifacts).toEqual([
+      {
+        type: "artifact",
+        key: "fix-report",
+        kind: "markdown",
+        path: ".agrippa/artifacts/fix-report.md",
+      },
+    ]);
+  });
+
+  it("clears a stale expected artifact before the attempt runs", async () => {
+    const req = makeRequest(); // expects fix-report (markdown)
+    const artifactDir = path.join(req.workspaceDir, ".agrippa/artifacts");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(path.join(artifactDir, "fix-report.md"), "# stale from attempt 1");
+
+    // this attempt's agent produces nothing
+    const executor = createClaudeExecutor(
+      scriptedQuery([
+        { type: "system", subtype: "init", session_id: "s" },
+        { type: "result", subtype: "success", result: "done", is_error: false },
+      ]),
+    );
+    const events = await collect(executor.executeStep(req, makeCtx()));
+    expect(events.filter((e) => e.type === "artifact")).toEqual([]);
+    expect(existsSync(path.join(artifactDir, "fix-report.md"))).toBe(false);
+  });
+
+  it("does not clear through a .agrippa symlink that escapes the workspace", async () => {
+    const req = makeRequest();
+    // an agent pointed .agrippa at a shared store holding another run's artifact
+    const shared = mkdtempSync(path.join(tmpdir(), "shared-store-"));
+    mkdirSync(path.join(shared, "artifacts"), { recursive: true });
+    const victim = path.join(shared, "artifacts", "fix-report.md");
+    writeFileSync(victim, "another run's artifact");
+    symlinkSync(shared, path.join(req.workspaceDir, ".agrippa"));
+
+    const executor = createClaudeExecutor(
+      scriptedQuery([
+        { type: "system", subtype: "init", session_id: "s" },
+        { type: "result", subtype: "success", result: "done", is_error: false },
+      ]),
+    );
+    await collect(executor.executeStep(req, makeCtx()));
+    expect(existsSync(victim)).toBe(true); // shared store untouched
   });
 
   it("maps SDK errors and aborts to step.failed", async () => {

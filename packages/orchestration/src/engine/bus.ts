@@ -11,9 +11,17 @@ export type BusEvent = {
   createdAt: string;
 };
 
+/**
+ * A live subscription. `ready` resolves once the underlying transport has
+ * actually begun delivering (for Redis, once SUBSCRIBE is acknowledged) — the
+ * SSE handler awaits it before replaying history so no event is lost in the gap
+ * between replay and an as-yet-inactive subscription.
+ */
+export type Subscription = { unsubscribe: () => void; ready: Promise<void> };
+
 export interface RunEventBus {
   publish(event: BusEvent): Promise<void>;
-  subscribe(runId: string, listener: (event: BusEvent) => void): () => void;
+  subscribe(runId: string, listener: (event: BusEvent) => void): Subscription;
   /** Control channel — today only "cancel". */
   publishControl(runId: string, message: string): Promise<void>;
   subscribeControl(runId: string, listener: (message: string) => void): () => void;
@@ -28,11 +36,11 @@ export class InProcessEventBus implements RunEventBus {
     for (const listener of this.listeners.get(event.runId) ?? []) listener(event);
   }
 
-  subscribe(runId: string, listener: (event: BusEvent) => void): () => void {
+  subscribe(runId: string, listener: (event: BusEvent) => void): Subscription {
     const set = this.listeners.get(runId) ?? new Set();
     set.add(listener);
     this.listeners.set(runId, set);
-    return () => set.delete(listener);
+    return { unsubscribe: () => set.delete(listener), ready: Promise.resolve() };
   }
 
   async publishControl(runId: string, message: string): Promise<void> {

@@ -4,6 +4,7 @@ export * from "./engine/deps";
 export * from "./engine/engine";
 export * from "./engine/fakes";
 export * from "./engine/redis-bus";
+export * from "./engine/run-lifecycle";
 export * from "./expression";
 export * from "./queue";
 export * from "./resolve";

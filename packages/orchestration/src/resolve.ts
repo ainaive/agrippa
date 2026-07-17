@@ -1,5 +1,5 @@
 import type { ModelTier } from "@agrippa/core";
-import { type Db, models, projectResourceGrants } from "@agrippa/db";
+import { type Db, models, projectResourceGrants, repoConnections } from "@agrippa/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { TemplateDoc, TemplateInput } from "./template-schema";
@@ -132,8 +132,21 @@ export async function resolveModelRoles(
   return resolution;
 }
 
-/** Required (non-optional) skills and MCP servers must be granted to the project. */
-export async function verifyResourceGrants(
+/** The set of resource slugs a run is authorized to use, pinned at submit. */
+export type ResourceManifest = { mcpServers: string[]; skills: string[] };
+
+/**
+ * Verify required skill/MCP grants and pin the authorized set.
+ *
+ * Required resources must be granted (else the submit fails). Optional
+ * resources are *included only when granted* — previously they skipped the
+ * grant check entirely and the worker then resolved them from the global
+ * registry with the platform's global credential, so a project with no grant
+ * still received (for example) the shared GitHub token. The returned manifest
+ * is frozen onto the run; the worker resolves resources only from it, never by
+ * re-reading the mutable global registry.
+ */
+export async function authorizeResources(
   db: Db,
   projectId: string,
   compiled: TemplateDoc,
@@ -141,7 +154,7 @@ export async function verifyResourceGrants(
     skillIdBySlug: Map<string, string>;
     mcpIdBySlug: Map<string, string>;
   },
-): Promise<void> {
+): Promise<ResourceManifest> {
   const grants = await db
     .select()
     .from(projectResourceGrants)
@@ -153,25 +166,67 @@ export async function verifyResourceGrants(
     grantedByType.set(grant.resourceType, set);
   }
 
+  const manifest: ResourceManifest = { mcpServers: [], skills: [] };
+
   for (const skill of compiled.spec.resources.skills) {
-    if (skill.optional) continue;
     const slug = skill.ref.split("@")[0] as string;
     const id = registry.skillIdBySlug.get(slug);
-    if (!id) throw new SubmitError("skill_unregistered", `Skill '${slug}' is not registered`);
-    if (!grantedByType.get("skill")?.has(id)) {
-      throw new SubmitError("skill_not_granted", `Skill '${slug}' is not granted to this project`);
+    const granted = id !== undefined && (grantedByType.get("skill")?.has(id) ?? false);
+    if (!skill.optional) {
+      if (!id) throw new SubmitError("skill_unregistered", `Skill '${slug}' is not registered`);
+      if (!granted) {
+        throw new SubmitError(
+          "skill_not_granted",
+          `Skill '${slug}' is not granted to this project`,
+        );
+      }
     }
+    if (granted) manifest.skills.push(slug);
   }
   for (const server of compiled.spec.resources.mcpServers) {
-    if (server.optional) continue;
     const id = registry.mcpIdBySlug.get(server.ref);
-    if (!id) {
-      throw new SubmitError("mcp_unregistered", `MCP server '${server.ref}' is not registered`);
+    const granted = id !== undefined && (grantedByType.get("mcp_server")?.has(id) ?? false);
+    if (!server.optional) {
+      if (!id) {
+        throw new SubmitError("mcp_unregistered", `MCP server '${server.ref}' is not registered`);
+      }
+      if (!granted) {
+        throw new SubmitError(
+          "mcp_not_granted",
+          `MCP server '${server.ref}' is not granted to this project`,
+        );
+      }
     }
-    if (!grantedByType.get("mcp_server")?.has(id)) {
+    if (granted) manifest.mcpServers.push(server.ref);
+  }
+  return manifest;
+}
+
+/**
+ * Validate that every repoRef param points at a repo connection owned by the
+ * submitting project. Without this a member could submit another project's (or
+ * tenant's) `repoConnectionId` and the worker would clone that repo with its
+ * stored credential — a cross-tenant authorization bypass.
+ */
+export async function verifyRepoRefs(
+  db: Db,
+  projectId: string,
+  inputs: TemplateInput[],
+  params: Record<string, unknown>,
+): Promise<void> {
+  const repoInputs = inputs.filter((i) => i.type === "repoRef");
+  for (const input of repoInputs) {
+    const value = params[input.key] as { repoConnectionId?: string } | undefined;
+    const id = value?.repoConnectionId;
+    if (!id) continue; // optional/unset repoRef — nothing to authorize
+    const [connection] = await db
+      .select({ id: repoConnections.id })
+      .from(repoConnections)
+      .where(and(eq(repoConnections.id, id), eq(repoConnections.projectId, projectId)));
+    if (!connection) {
       throw new SubmitError(
-        "mcp_not_granted",
-        `MCP server '${server.ref}' is not granted to this project`,
+        "repo_not_in_project",
+        `Repo connection '${id}' does not belong to this project`,
       );
     }
   }

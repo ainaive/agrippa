@@ -35,6 +35,13 @@ import {
   InMemoryArtifactStore,
   silentLogger,
 } from "./fakes";
+import {
+  appendRunEvent,
+  decideApproval,
+  finalizeRun,
+  findStrandedApprovalRuns,
+  transitionRun,
+} from "./run-lifecycle";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates");
@@ -63,11 +70,13 @@ type Fixture = {
   };
 };
 
-type DepsOptions = { mcpServers?: string[] };
+type DepsOptions = { mcpServers?: string[]; skills?: string[] };
 
 type FixtureOptions = {
   params?: Record<string, unknown>;
   quota?: { costLimitUsd?: number; tokenLimit?: number };
+  /** Override the run's authorized-resource manifest (default: all template resources). */
+  resourceManifest?: { mcpServers: string[]; skills: string[] };
 };
 
 async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -166,6 +175,10 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
       executorId: "fake",
       paramsSnapshot: params,
       modelResolution,
+      resourceManifest: options.resourceManifest ?? {
+        mcpServers: template.spec.resources.mcpServers.map((m) => m.ref),
+        skills: template.spec.resources.skills.map((s) => s.ref.split("@")[0] as string),
+      },
       budget: template.spec.budgets as unknown as Record<string, unknown>,
       createdBy: user.id,
     })
@@ -183,7 +196,10 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
       executor,
       bus,
       workspace,
-      resources: new FakeResourceMaterializer({ mcpServers: opts.mcpServers ?? [] }),
+      resources: new FakeResourceMaterializer({
+        mcpServers: opts.mcpServers ?? [],
+        ...(opts.skills !== undefined ? { skills: opts.skills } : {}),
+      }),
       artifacts: new InMemoryArtifactStore(),
       logger: silentLogger,
     };
@@ -380,6 +396,37 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect((run?.error as { code: string } | null)?.code).toBe("budget_exceeded");
   });
 
+  it("resume does not double-count the run's own spend against the quota", async () => {
+    const { runId, makeDeps } = await setupFixture({ quota: { tokenLimit: 3000 } });
+    // cheap pre-approval steps: reproduce-bug spends 1600, find-root-cause 200
+    const cheap: Record<string, FakeStepBehavior> = {
+      ...HAPPY_SCRIPT,
+      "reproduce-bug": {
+        kind: "succeed",
+        usage: { inputTokens: 1000, outputTokens: 600 },
+        events: [{ type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" }],
+        output: "reproduced",
+      },
+      "find-root-cause": {
+        kind: "succeed",
+        usage: { inputTokens: 100, outputTokens: 100 },
+        events: [
+          { type: "artifact", key: "localization-report", kind: "markdown", inline: "# RC" },
+        ],
+        output: "rc",
+      },
+    };
+    // spend 1600, then crash before the approval gate
+    await expect(
+      executeRun(makeDeps({ ...cheap, "find-root-cause": { kind: "crash" } }), runId),
+    ).rejects.toThrow("simulated worker crash");
+
+    // 1600 is already persisted. The old code subtracted it from the headroom
+    // AND seeded the meter with it, double-counting on resume and tripping the
+    // 3000 quota (1600 > 3000 - 1600). It must instead reach the approval gate.
+    expect(await executeRun(makeDeps(cheap), runId)).toBe("waiting_approval");
+  });
+
   it("crash mid-step → queue retry resumes, skips succeeded steps, never double-counts usage", async () => {
     const { db, runId, makeDeps } = await setupFixture();
     await executeRun(makeDeps(HAPPY_SCRIPT), runId);
@@ -413,6 +460,30 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     const usageRows = await db.select().from(tokenUsage).where(eq(tokenUsage.runId, runId));
     const runTestRows = usageRows.filter((u) => attempts.map((a) => a.id).includes(u.stepId ?? ""));
     expect(runTestRows).toHaveLength(2);
+  });
+
+  it("crash on a no-retry step re-executes it on resume and resumes the session", async () => {
+    const { db, runId, makeDeps } = await setupFixture();
+    // find-root-cause carries no template retry; crash it mid-step
+    const crashing = makeDeps({ ...HAPPY_SCRIPT, "find-root-cause": { kind: "crash" } });
+    await expect(executeRun(crashing, runId)).rejects.toThrow("simulated worker crash");
+
+    // resume with a healthy worker: without the crash-recovery fix a no-retry
+    // step's loop is `for (2; 2 <= 1)` and the step is silently skipped
+    const healthy = makeDeps(HAPPY_SCRIPT);
+    expect(await executeRun(healthy, runId)).toBe("waiting_approval");
+
+    const attempts = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "find-root-cause")));
+    expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+      [1, "failed"],
+      [2, "succeeded"],
+    ]);
+    // the recovery attempt resumed the crashed executor session
+    const request = healthy.executor.requests.find((r) => r.stepId === "find-root-cause");
+    expect(request?.resumeSessionId).toBe("fake-find-root-cause-1");
   });
 
   it("cancellation mid-step aborts promptly via the control channel", async () => {
@@ -505,15 +576,210 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(rows[0]?.status).toBe("skipped");
   });
 
+  it("skips open-pr when the optional MCP server is not authorized, even if it exists", async () => {
+    // manifest omits github: the project has no grant. The server is otherwise
+    // available (materializer has it), but an ungranted optional resource must
+    // never be resolved — else the run would receive the global GitHub token.
+    const { db, runId, makeDeps } = await setupFixture({
+      params: { autoOpenPr: true },
+      resourceManifest: { mcpServers: [], skills: [] },
+    });
+    await executeRun(makeDeps(HAPPY_SCRIPT, { mcpServers: ["github"] }), runId);
+    await approve(db, runId);
+    const deps = makeDeps(HAPPY_SCRIPT, { mcpServers: ["github"] });
+    expect(await executeRun(deps, runId)).toBe("succeeded");
+    const rows = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "open-pr")));
+    expect(rows[0]?.status).toBe("skipped");
+    // the executor never saw the github server
+    expect(deps.executor.requests.some((r) => r.stepId === "open-pr")).toBe(false);
+  });
+
+  it("fails a step whose required skill has no available version", async () => {
+    const { db, runId, makeDeps } = await setupFixture();
+    await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+    await approve(db, runId);
+    // no skills resolve — implement-fix's required builtin/git-workflow is missing
+    expect(await executeRun(makeDeps(HAPPY_SCRIPT, { skills: [] }), runId)).toBe("failed");
+    const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect((run?.error as { message?: string } | null)?.message).toContain(
+      "required resources unavailable",
+    );
+  });
+
   it("streams live events over the bus while executing", async () => {
     const { runId, makeDeps, bus } = await setupFixture();
     const seen: string[] = [];
-    const unsubscribe = bus.subscribe(runId, (event) => seen.push(event.type));
+    const subscription = bus.subscribe(runId, (event) => seen.push(event.type));
     await executeRun(makeDeps(HAPPY_SCRIPT), runId);
-    unsubscribe();
+    subscription.unsubscribe();
     expect(seen[0]).toBe("run.started");
     expect(seen).toContain("step.started");
     expect(seen).toContain("usage");
     expect(seen).toContain("approval.required");
+  });
+
+  it("redacts known secret values from persisted events", async () => {
+    const secret = "sk-ant-supersecretvalue-1234567890";
+    const prev = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = secret; // the engine seeds its redactor from env
+    let db: Db;
+    let runId: string;
+    try {
+      const fx = await setupFixture();
+      db = fx.db;
+      runId = fx.runId;
+      const script: Record<string, FakeStepBehavior> = {
+        ...HAPPY_SCRIPT,
+        "reproduce-bug": {
+          kind: "succeed",
+          events: [
+            { type: "message.completed", role: "assistant", text: `the key is ${secret} oops` },
+            { type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" },
+          ],
+          output: "done",
+        },
+      };
+      await executeRun(fx.makeDeps(script), runId);
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prev;
+    }
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    const msg = events.find((e) => e.type === "message.completed");
+    const serialized = JSON.stringify(msg?.payload);
+    expect(serialized).toContain("[REDACTED]");
+    expect(serialized).not.toContain(secret);
+  });
+});
+
+describe.skipIf(!dbUp)("run-lifecycle module", () => {
+  it("transitionRun is a compare-and-swap on the expected status", async () => {
+    const { db, runId } = await setupFixture();
+    // queued → running applies once; a second call with the stale `from` fails
+    expect(await transitionRun(db, runId, "queued", "running")).toBe(true);
+    expect(await transitionRun(db, runId, "queued", "running")).toBe(false);
+    // a late finalize cannot overwrite a status it no longer holds
+    expect(await transitionRun(db, runId, "running", "cancelled")).toBe(true);
+    expect(await transitionRun(db, runId, "running", "succeeded")).toBe(false);
+    const [row] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("cancelled");
+  });
+
+  it("appendRunEvent allocates a monotonic per-run seq from the database", async () => {
+    const { db, runId } = await setupFixture();
+    const a = await appendRunEvent(db, { runId, type: "x.one", payload: {} });
+    const b = await appendRunEvent(db, { runId, type: "x.two", payload: {} });
+    // concurrent appends must not collide on the unique (run_id, seq) index
+    const [c, d] = await Promise.all([
+      appendRunEvent(db, { runId, type: "x.three", payload: {} }),
+      appendRunEvent(db, { runId, type: "x.four", payload: {} }),
+    ]);
+    const seqs = [a.seq, b.seq, c.seq, d.seq].sort((m, n) => m - n);
+    expect(new Set(seqs).size).toBe(4);
+    expect(b.seq).toBeGreaterThan(a.seq);
+
+    // must also work INSIDE a transaction — the old max(seq)+1-with-retry aborted
+    // the whole tx on the first unique violation (the approval-flow regression)
+    const e = await db.transaction((tx) =>
+      appendRunEvent(tx, { runId, type: "x.five", payload: {} }),
+    );
+    expect(e.seq).toBeGreaterThan(d.seq);
+  });
+
+  it("findStrandedApprovalRuns selects only runs with no pending approval", async () => {
+    const { db, runId } = await setupFixture();
+    await db.update(runs).set({ status: "waiting_approval" }).where(eq(runs.id, runId));
+
+    // one pending approval → not stranded
+    const [a1] = await db
+      .insert(approvals)
+      .values({ runId, checkpointId: "cp-1", status: "pending" })
+      .returning();
+    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+
+    // a second, earlier checkpoint gets approved while cp-1 is still pending →
+    // still not stranded (the multi-approval trap the old innerJoin fell into)
+    await db
+      .insert(approvals)
+      .values({ runId, checkpointId: "cp-0", status: "approved" })
+      .returning();
+    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+
+    // cp-1 decided too → now every approval is decided → stranded, re-enqueue
+    await decideApproval(db, a1?.id as string, { status: "approved" });
+    expect(await findStrandedApprovalRuns(db)).toContain(runId);
+  });
+
+  it("finalizeRun lets a late cancel win over a success (atomic, no read/CAS gap)", async () => {
+    const { db, runId } = await setupFixture();
+    await transitionRun(db, runId, "queued", "running");
+    await db.update(runs).set({ cancelRequested: true }).where(eq(runs.id, runId));
+    // a success that requires no pending cancel is refused, leaving status running
+    const r = await finalizeRun(db, {
+      runId,
+      from: "running",
+      to: "succeeded",
+      requireNotCancelled: true,
+      error: null,
+      usageTotals: {},
+      eventPayload: {},
+    });
+    expect(r.outcome).toBe("cancelled_instead");
+    const [row] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("running");
+    // re-finalizing as cancelled commits
+    const c = await finalizeRun(db, {
+      runId,
+      from: "running",
+      to: "cancelled",
+      error: null,
+      usageTotals: {},
+      eventPayload: {},
+    });
+    expect(c.outcome).toBe("finalized");
+  });
+
+  it("finalizeRun fails a still-queued run and emits the terminal event", async () => {
+    const { db, runId } = await setupFixture();
+    const err = { code: "internal", message: "boom" };
+    const r = await finalizeRun(db, {
+      runId,
+      from: "queued",
+      to: "failed",
+      error: err,
+      usageTotals: {},
+      eventPayload: { error: err },
+    });
+    expect(r.outcome).toBe("finalized");
+    const [run] = await db
+      .select({ status: runs.status, finishedAt: runs.finishedAt })
+      .from(runs)
+      .where(eq(runs.id, runId));
+    expect(run?.status).toBe("failed");
+    expect(run?.finishedAt).not.toBeNull();
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.some((e) => e.type === "run.failed")).toBe(true);
+  });
+
+  it("decideApproval is a compare-and-swap on pending", async () => {
+    const { db, runId } = await setupFixture();
+    const [approval] = await db
+      .insert(approvals)
+      .values({ runId, checkpointId: "cp-1", status: "pending" })
+      .returning();
+    const id = approval?.id as string;
+    const first = await decideApproval(db, id, { status: "approved" });
+    expect(first?.status).toBe("approved");
+    // a racing expiry cannot overwrite the user's decision
+    const second = await decideApproval(db, id, { status: "expired" });
+    expect(second).toBeNull();
+    const [row] = await db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.id, id));
+    expect(row?.status).toBe("approved");
   });
 });

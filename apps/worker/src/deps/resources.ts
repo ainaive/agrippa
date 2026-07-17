@@ -21,13 +21,22 @@ const TEMPLATES_DIR =
 export class DbResourceMaterializer implements ResourceMaterializer {
   constructor(private readonly db: Db) {}
 
-  async skills(refs: string[], workspaceDir: string): Promise<ResolvedSkill[]> {
+  async skills(
+    refs: string[],
+    workspaceDir: string,
+  ): Promise<{ resolved: ResolvedSkill[]; missing: string[] }> {
     const resolved: ResolvedSkill[] = [];
+    const missing: string[] = [];
     for (const ref of refs) {
       const slug = skillSlugOfRef(ref);
       const range = ref.includes("@") ? (ref.split("@")[1] as string) : "*";
       const [head] = await this.db.select().from(skills).where(eq(skills.slug, slug));
-      if (!head) throw new Error(`skill '${slug}' is not registered`);
+      if (!head) {
+        // unregistered or no active matching version → unavailable, not an error;
+        // the engine treats it symmetrically with a missing MCP server
+        missing.push(ref);
+        continue;
+      }
       const versions = await this.db
         .select()
         .from(skillVersions)
@@ -35,7 +44,10 @@ export class DbResourceMaterializer implements ResourceMaterializer {
       const version = versions
         .filter((v) => v.status === "active" && Bun.semver.satisfies(v.version, range))
         .sort((a, b) => Bun.semver.order(b.version, a.version))[0];
-      if (!version) throw new Error(`skill '${slug}' has no version satisfying '${range}'`);
+      if (!version) {
+        missing.push(ref);
+        continue;
+      }
 
       const skillName = slug.split("/").pop() as string;
       const target = path.join(workspaceDir, ".claude", "skills", skillName);
@@ -52,7 +64,7 @@ export class DbResourceMaterializer implements ResourceMaterializer {
       }
       resolved.push({ slug, version: version.version, localPath: target });
     }
-    return resolved;
+    return { resolved, missing };
   }
 
   async mcpServers(refs: string[]): Promise<{ resolved: ResolvedMcpServer[]; missing: string[] }> {

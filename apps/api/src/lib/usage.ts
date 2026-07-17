@@ -45,8 +45,10 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
 
 /**
  * Submit-time quota gate (docs/design/04): hard-stop quotas reject new work
- * once the period's spend has reached either limit. The engine re-checks at
- * every step boundary for mid-run enforcement.
+ * once the current month's spend has reached either limit. The engine re-reads
+ * the same month-scoped project usage at every step boundary (excluding the
+ * run's own spend, which its budget meter already carries) for mid-run
+ * enforcement, so this gate and the engine agree on the accounting window.
  */
 export async function assertQuotaHeadroom(db: Db, projectId: string): Promise<void> {
   const [quota] = await db

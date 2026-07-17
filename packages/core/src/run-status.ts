@@ -33,7 +33,7 @@ export type StepStatus = (typeof STEP_STATUSES)[number];
  * not listed here is illegal and must be rejected.
  */
 const LEGAL_TRANSITIONS: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
-  queued: ["running", "cancelled"],
+  queued: ["running", "cancelled", "failed"],
   running: ["succeeded", "failed", "timed_out", "waiting_approval", "cancelled"],
   waiting_approval: ["running", "cancelled", "failed"],
   succeeded: [],

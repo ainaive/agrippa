@@ -15,6 +15,20 @@
       "when": 1784261124504,
       "tag": "0001_run-step-output",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784274345055,
+      "tag": "0002_run-resource-manifest",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784282490871,
+      "tag": "0003_run-next-event-seq",
+      "breakpoints": true
     }
   ]
 }

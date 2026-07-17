@@ -2,9 +2,10 @@
 FROM oven/bun:1.3
 WORKDIR /app
 
-# git for run workspaces (clone/diff); ripgrep helps agent search
+# git for run workspaces (clone/diff); ripgrep helps agent search; bubblewrap
+# backs the SDK command sandbox (without it, sandboxing silently degrades)
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ripgrep ca-certificates \
+  && apt-get install -y --no-install-recommends git ripgrep ca-certificates bubblewrap \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock bunfig.toml tsconfig.base.json tsconfig.json ./
@@ -18,4 +19,13 @@ ENV NODE_ENV=production
 ENV AGRIPPA_TEMPLATES_DIR=/app/templates
 ENV WORKSPACE_ROOT=/work/runs
 ENV ARTIFACT_STORAGE_ROOT=/work/artifacts
+
+# Run agent code as a non-root user so a shell tool call cannot reach the
+# container filesystem or other roots (docs/design/03 §Sandboxing). Only /work
+# (runtime storage) is made writable — /app stays root-owned so agent commands
+# can't modify worker code, dependencies, or templates and persist into later
+# runs. Chowning /work here makes a freshly-created named volume inherit `bun`
+# ownership.
+RUN mkdir -p /work/runs /work/artifacts && chown -R bun:bun /work
+USER bun
 CMD ["bun", "apps/worker/src/index.ts"]

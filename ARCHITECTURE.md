@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the orientation map for contributors. The authoritative design lives in `docs/design/` (10 documents) and `docs/adr/` (8 decision records); this file tells you what exists, where it lives, and which invariants hold it together.
+This document is the orientation map for contributors. The authoritative design lives in `docs/design/` (10 documents) and `docs/adr/` (9 decision records); this file tells you what exists, where it lives, and which invariants hold it together.
 
 ## Bird's-eye view
 
@@ -35,7 +35,7 @@ Dependency direction is enforced by `scripts/check-deps.ts` (runtime deps only).
 
 ## Key flows
 
-**Submit → run.** `POST /projects/:id/tasks` validates params against the compiled input schema (the same schema the SPA rendered the form from), verifies skill/MCP grants, resolves model roles → concrete granted models (frozen into `runs.model_resolution`), checks hard-stop quota headroom, then inserts task+run in one transaction and sends a pg-boss job keyed by run id. A worker sweeper re-enqueues stragglers, so a run can never be stranded nor double-queued.
+**Submit → run.** `POST /projects/:id/tasks` validates params against the compiled input schema (the same schema the SPA rendered the form from), verifies each `repoRef` is owned by the project, resolves model roles → concrete granted models (frozen into `runs.model_resolution`), pins the authorized skills/MCP into `runs.resource_manifest` (required grants enforced, optional included only when granted), checks hard-stop quota headroom, then inserts task+run in one transaction and sends a pg-boss job keyed by run id. A worker sweeper re-enqueues stragglers (and runs left paused by a lost approval-resume), so a run can never be stranded nor double-queued.
 
 **Engine loop.** The engine (worker-side) walks phases/steps: `when:` conditions, optional-resource skips, per-step retries, budget checks at every boundary. Agent steps stream normalized executor events which the engine persists to `run_events` (per-run monotonic `seq`), mirrors to the bus, and projects into `run_steps`/`token_usage`/`artifacts`. At the end it enforces the artifact contract — *succeeded* always means the contracted outputs exist.
 
@@ -52,7 +52,10 @@ Dependency direction is enforced by `scripts/check-deps.ts` (runtime deps only).
 3. **Steps are the idempotency unit** — restart-safe by template rule, resumable by session id where the executor supports it.
 4. **Usage rows are keyed `(run, step, attempt)`** so retries re-incur cost without ever double-counting.
 5. **Executors are stateless I/O**: all inputs in the request, all outputs as events; they never touch the database.
-6. **Secrets never leave as plaintext**: encrypted at rest (AES-256-GCM), write-only in the API, scrubbed from git remotes before agent code runs.
+6. **Secrets never leave as plaintext**: encrypted at rest (AES-256-GCM), write-only in the API, scrubbed from git remotes before agent code runs, stripped from the agent subprocess environment (the master key and datastore URLs never reach a tool call), and redacted from event payloads before they persist or stream.
+7. **Containment goes through one seam**: every tool call (reads and writes confined to the workspace) and the subprocess env are decided by `packages/executor-core/isolation.ts`; the adapter never reimplements it (ADR-0009). OS-level isolation between runs and keeping the provider key out of the subprocess are deferred to the container layer.
+8. **The worker trusts only the pinned manifest**: repos are project-scoped and skills/MCP resolve solely from `runs.resource_manifest`, never the mutable global registry.
+9. **Lifecycle mutations are atomic**: run status transitions are compare-and-swap on the expected status and event `seq` is allocated by the database, so concurrent writers can't clobber a status or collide on a seq (`run-lifecycle.ts`).
 
 ## Where to look
 

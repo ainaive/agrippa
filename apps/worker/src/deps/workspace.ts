@@ -3,9 +3,26 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { type Db, decryptSecret, loadSecretKey, repoConnections, secrets } from "@agrippa/db";
 import type { WorkspaceManager, WorkspaceSpec } from "@agrippa/orchestration";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? path.join(tmpdir(), "agrippa-workspaces");
+
+/**
+ * Repo-supplied paths removed before any agent runs (a checked-out repo is
+ * untrusted): `.claude`/`.mcp.json` would be honored by the SDK project setting
+ * source (hooks run shell, settings grant permissions, .mcp.json wires servers);
+ * `.agrippa` is the platform's own artifact convention dir — a committed
+ * `.agrippa -> /work` symlink would otherwise let workspace-relative artifact
+ * paths escape to the shared store. Registry skills and the artifact dir are
+ * re-created fresh afterwards (docs/design/03 §Sandboxing).
+ */
+const REPO_CONFIG_TO_STRIP = [".claude", ".mcp.json", ".agrippa"];
+
+async function sanitizeWorkspace(dir: string): Promise<void> {
+  for (const entry of REPO_CONFIG_TO_STRIP) {
+    await rm(path.join(dir, entry), { recursive: true, force: true });
+  }
+}
 
 async function git(args: string[], cwd?: string): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
@@ -46,10 +63,17 @@ export class GitWorkspaceManager implements WorkspaceManager {
     const repoRef = spec.repo as { repoConnectionId?: string } | null;
     if (!repoRef?.repoConnectionId) throw new Error("workspace.checkout: repoRef missing");
 
+    // scope by project so a run can never clone another project's/tenant's repo
+    // even if its params carry a foreign repoConnectionId
     const [connection] = await this.db
       .select()
       .from(repoConnections)
-      .where(eq(repoConnections.id, repoRef.repoConnectionId));
+      .where(
+        and(
+          eq(repoConnections.id, repoRef.repoConnectionId),
+          eq(repoConnections.projectId, spec.projectId),
+        ),
+      );
     if (!connection) throw new Error("workspace.checkout: repo connection not found");
 
     let cloneUrl = connection.url;
@@ -74,6 +98,7 @@ export class GitWorkspaceManager implements WorkspaceManager {
     await git(["clone", "--depth", "50", "--branch", ref, cloneUrl, dir]);
     // scrub the credential from the remote before any agent code runs
     await git(["remote", "set-url", "origin", connection.url], dir);
+    await sanitizeWorkspace(dir);
   }
 
   async diff(runId: string): Promise<string> {
