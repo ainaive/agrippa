@@ -9,12 +9,11 @@ How a submitted task becomes a finished run: queueing, the run state machine, re
 `POST /projects/:id/tasks` validates params against the compiled template inputs, verifies each `repoRef` points at a repo connection **owned by the project**, checks resource grants and quota headroom, then in **one Postgres transaction**:
 
 1. insert `tasks` row,
-2. insert `runs` row (`status = queued`, pinned `template_version_id`, `params_snapshot`, frozen `model_resolution`, a pinned `resource_manifest` of the skills/MCP the run is authorized to use, computed `budget`),
-3. enqueue pg-boss job `run.execute({runId})`.
+2. insert `runs` row (`status = queued`, pinned `template_version_id`, `params_snapshot`, frozen `model_resolution`, a pinned `resource_manifest` of the skills/MCP the run is authorized to use, computed `budget`).
 
-The `resource_manifest` is the authorization boundary: required grants are enforced at submit and optional resources are included **only when granted**, so the worker resolves skills/MCP strictly from the manifest and never re-reads the mutable global registry — an ungranted optional resource is simply unavailable (see [ADR-0009](../adr/0009-security-correctness-deep-modules.md)).
+After the transaction commits, the handler enqueues the pg-boss job `run.execute({runId})`. The `resource_manifest` is the authorization boundary: required grants are enforced at submit and optional resources are included **only when granted**, so the worker resolves skills/MCP strictly from the manifest and never re-reads the mutable global registry — an ungranted optional resource is simply unavailable (see [ADR-0009](../adr/0009-security-correctness-deep-modules.md)).
 
-Because pg-boss stores jobs in Postgres, there is no dual-write window: either the run and its job both exist, or neither does. This is the primary reason for pg-boss over a Redis-backed queue.
+The enqueue is a post-commit send, so a narrow dual-write window exists (a crash between commit and send would leave a `queued` run with no job). It is mitigated, not eliminated: the worker's reconciliation sweeper re-enqueues `queued` runs older than 30 s. pg-boss stores jobs in Postgres, so once the send lands the job is durable — the primary reason for pg-boss over a Redis-backed queue.
 
 ## Run State Machine
 
@@ -108,4 +107,4 @@ Ordering rule: the engine writes `run_events` **first** — the per-run monotoni
 3. flush the buffer, deduplicating by `seq` against the replay,
 4. emit each as `id: <seq>\nevent: <type>\ndata: <payload>`.
 
-Subscribing **before** replaying is what makes reconnection gap-free by construction: an event committed and published in the window between replay and subscribe would otherwise be delivered only at the terminal replay. No polling anywhere (a bus-less deployment falls back to periodic DB replay). Redis here is a pure fan-out optimization — if Redis is briefly down, clients reconnect and replay from Postgres.
+Subscribing **before** replaying is what makes reconnection gap-free by construction: an event committed and published in the window between replay and subscribe would otherwise be delivered only at the terminal replay. Redis is optional: with a bus, live events push instantly; without one, the stream falls back to periodic DB replay, which preserves correctness (just with a small latency). Either way, if Redis is briefly down, clients reconnect and replay from Postgres.
