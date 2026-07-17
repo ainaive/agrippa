@@ -1,0 +1,91 @@
+apiVersion: agrippa/v1
+kind: OrchestrationTemplate
+metadata:
+  slug: test.regression-verify
+  scenario: test-verification
+  name: { en: "Regression Verification", zh-CN: "回归验证" }
+  description:
+    en: "Run the test suites against a change and report a verdict with evidence."
+    zh-CN: "针对变更执行测试套件，输出带证据的验证结论。"
+spec:
+  faber: sentinel
+
+  inputs:
+    - key: repo
+      type: repoRef
+      required: true
+      label: { en: "Repository", zh-CN: "代码仓库" }
+    - key: ref
+      type: string
+      default: main
+      label: { en: "Branch or ref to verify", zh-CN: "待验证分支或引用" }
+    - key: testCommand
+      type: string
+      required: false
+      label: { en: "Test command (optional; auto-detected otherwise)", zh-CN: "测试命令（可选，默认自动识别）" }
+
+  workspace:
+    repo: ${inputs.repo}
+    ref: ${inputs.ref}
+    access: readWrite
+
+  resources:
+    skills:
+      - ref: builtin/test-runner@^1
+    subagents:
+      - id: verifier
+        description: "Runs tests and validates outcomes"
+        promptFile: _shared/prompts/verifier.md
+        tools: [Bash, Read]
+        model: { role: fast }
+
+  models:
+    roles:
+      analysis: { tier: balanced, fallback: [fast] }
+      fast: { tier: fast }
+
+  phases:
+    - id: setup
+      name: { en: "Setup", zh-CN: "准备" }
+      steps:
+        - id: setup
+          kind: system
+          action: workspace.checkout
+
+    - id: execute
+      name: { en: "Execute", zh-CN: "执行" }
+      steps:
+        - id: run-suites
+          kind: agent
+          model: { role: fast }
+          subagents: [verifier]
+          skills: [builtin/test-runner]
+          instructions: |
+            Run the test suites on ref "${inputs.ref}".
+            ${inputs.testCommand} — use this command if provided, otherwise detect
+            the project's test command. Capture verbatim results; re-run single
+            failures once to separate flakes from deterministic failures.
+          produces: [test-log]
+          retry: { max: 1 }
+
+    - id: verdict
+      name: { en: "Verdict", zh-CN: "结论" }
+      steps:
+        - id: verdict
+          kind: agent
+          model: { role: analysis }
+          instructions: |
+            Write the verification verdict: pass/fail per suite, deterministic
+            failures vs flakes, and verbatim evidence for every claim. End with a
+            single-line verdict: PASS, FAIL, or PASS-WITH-FLAKES.
+          produces: [verdict-report]
+
+  budgets:
+    maxCostUsd: 4
+    maxDurationMinutes: 30
+
+  outputs:
+    artifacts:
+      - { key: test-log, kind: markdown, required: false }
+      - { key: verdict-report, kind: markdown, required: true }
+    summary: { from: verdict-report }

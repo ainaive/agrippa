@@ -1,0 +1,53 @@
+{
+  "run": "Run",
+  "timeline": "Timeline",
+  "attempt": "attempt",
+  "noSteps": "No steps yet",
+  "noOutput": "No output yet",
+  "noArtifacts": "No artifacts yet",
+  "status": {
+    "queued": "Queued",
+    "pending": "Pending",
+    "running": "Running",
+    "waiting_approval": "Waiting approval",
+    "succeeded": "Succeeded",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "timed_out": "Timed out",
+    "skipped": "Skipped"
+  },
+  "tabs": {
+    "output": "Output",
+    "artifacts": "Artifacts",
+    "params": "Parameters"
+  },
+  "actions": {
+    "cancel": "Cancel run",
+    "retry": "Retry",
+    "download": "Download"
+  },
+  "approval": {
+    "hint": "This run is paused at a checkpoint. Review the artifacts, then approve or reject.",
+    "commentPlaceholder": "Optional comment…",
+    "approve": "Approve",
+    "reject": "Reject"
+  },
+  "approvalsInbox": {
+    "title": "Pending approvals",
+    "empty": "Nothing is waiting for your approval."
+  },
+  "dashboard": {
+    "openTasks": "Active runs",
+    "spend": "Spend",
+    "total": "Total tasks",
+    "recent": "Recent tasks",
+    "newTask": "New task",
+    "empty": "No tasks yet — pick one from the catalog."
+  },
+  "table": {
+    "title": "Title",
+    "status": "Status",
+    "created": "Created",
+    "run": "Run"
+  }
+}

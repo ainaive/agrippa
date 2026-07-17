@@ -1,0 +1,38 @@
+{
+  "tabs": {
+    "members": "成员",
+    "grants": "资源授权",
+    "repos": "代码仓库",
+    "quota": "配额"
+  },
+  "members": {
+    "email": "已注册用户的邮箱",
+    "add": "添加成员"
+  },
+  "roles": {
+    "admin": "管理员",
+    "member": "成员",
+    "viewer": "访客"
+  },
+  "grants": {
+    "models": "模型",
+    "skills": "技能",
+    "mcp": "MCP 服务",
+    "fabri": "硅基人"
+  },
+  "repos": {
+    "url": "仓库地址",
+    "branch": "默认分支",
+    "token": "访问令牌（可选）",
+    "add": "添加",
+    "private": "已配置凭证",
+    "public": "公开"
+  },
+  "quota": {
+    "costLimit": "每月费用上限（美元）",
+    "tokenLimit": "每月 Token 上限",
+    "hardStop": "超限后强制停止",
+    "save": "保存配额",
+    "saved": "已保存。"
+  }
+}

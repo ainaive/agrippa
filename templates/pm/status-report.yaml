@@ -1,0 +1,81 @@
+apiVersion: agrippa/v1
+kind: OrchestrationTemplate
+metadata:
+  slug: pm.status-report
+  scenario: project-management
+  name: { en: "Status Report", zh-CN: "状态报告" }
+  description:
+    en: "Gather repository activity and synthesize a project status report."
+    zh-CN: "汇总代码仓库活动，生成项目状态报告。"
+spec:
+  faber: navigator
+
+  inputs:
+    - key: repo
+      type: repoRef
+      required: true
+      label: { en: "Repository", zh-CN: "代码仓库" }
+    - key: period
+      type: select
+      default: last-week
+      label: { en: "Reporting period", zh-CN: "报告周期" }
+      options:
+        - { value: last-week, label: { en: "Last week", zh-CN: "上周" } }
+        - { value: last-sprint, label: { en: "Last two weeks", zh-CN: "近两周" } }
+        - { value: last-month, label: { en: "Last month", zh-CN: "上月" } }
+    - key: focus
+      type: text
+      required: false
+      label: { en: "Focus areas (optional)", zh-CN: "关注重点（可选）" }
+      ui: { widget: textarea, rows: 3 }
+
+  workspace:
+    repo: ${inputs.repo}
+    access: readOnly
+
+  resources: {}
+
+  models:
+    roles:
+      analysis: { tier: balanced, fallback: [fast] }
+      fast: { tier: fast }
+
+  phases:
+    - id: gather
+      name: { en: "Gather", zh-CN: "收集" }
+      steps:
+        - id: setup
+          kind: system
+          action: workspace.checkout
+        - id: gather-activity
+          kind: agent
+          model: { role: analysis }
+          instructions: |
+            Review this repository's activity for the period "${inputs.period}":
+            commit history, merged changes, areas of churn, and anything unusual.
+            Ground every observation in evidence (git log, diffs); never invent activity.
+            Record your findings as structured notes.
+          produces: [activity-notes]
+
+    - id: report
+      name: { en: "Report", zh-CN: "报告" }
+      steps:
+        - id: synthesize
+          kind: agent
+          model: { role: analysis }
+          instructions: |
+            Using the activity notes, write a status report with sections:
+            Summary, Progress, Risks & Concerns, and Next Steps.
+            ${inputs.focus} — weight these focus areas if given.
+            Write it bilingual-friendly: clear, plain language.
+          produces: [status-report]
+
+  budgets:
+    maxCostUsd: 3
+    maxDurationMinutes: 20
+
+  outputs:
+    artifacts:
+      - { key: activity-notes, kind: markdown, required: false }
+      - { key: status-report, kind: markdown, required: true }
+    summary: { from: status-report }

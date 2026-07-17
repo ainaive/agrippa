@@ -1,0 +1,92 @@
+apiVersion: agrippa/v1
+kind: OrchestrationTemplate
+metadata:
+  slug: pm.plan-breakdown
+  scenario: project-management
+  name: { en: "Plan Breakdown", zh-CN: "计划拆解" }
+  description:
+    en: "Break a goal or PRD into milestones and estimated tasks, with an approval gate."
+    zh-CN: "将目标或需求文档拆解为里程碑与可估算的任务，包含审批环节。"
+spec:
+  faber: navigator
+
+  inputs:
+    - key: goal
+      type: text
+      required: true
+      label: { en: "Goal or PRD", zh-CN: "目标或需求文档" }
+      ui: { widget: textarea, rows: 10 }
+    - key: constraints
+      type: text
+      required: false
+      label: { en: "Constraints (deadlines, team, budget)", zh-CN: "约束（工期、团队、预算）" }
+      ui: { widget: textarea, rows: 4 }
+    - key: granularity
+      type: select
+      default: stories
+      label: { en: "Breakdown granularity", zh-CN: "拆解粒度" }
+      options:
+        - { value: milestones, label: { en: "Milestones only", zh-CN: "仅里程碑" } }
+        - { value: stories, label: { en: "Milestones + stories", zh-CN: "里程碑 + 需求项" } }
+        - { value: tasks, label: { en: "Down to tasks", zh-CN: "细化到任务" } }
+
+  resources: {}
+
+  models:
+    roles:
+      planning: { tier: strong, fallback: [balanced] }
+      fast: { tier: fast }
+
+  phases:
+    - id: analyze
+      name: { en: "Analyze", zh-CN: "分析" }
+      steps:
+        - id: analyze-goal
+          kind: agent
+          model: { role: planning }
+          instructions: |
+            Analyze the goal below. Identify scope, assumptions, unknowns, and risks.
+            Constraints: ${inputs.constraints}
+            --- GOAL ---
+            ${inputs.goal}
+          produces: [analysis-notes]
+
+    - id: draft
+      name: { en: "Draft", zh-CN: "草案" }
+      steps:
+        - id: draft-plan
+          kind: agent
+          model: { role: planning }
+          instructions: |
+            Produce a draft breakdown at "${inputs.granularity}" granularity:
+            milestones with outcomes, work items with rough estimates and
+            dependencies, and a sequencing rationale.
+          produces: [draft-plan]
+
+    - id: publish
+      name: { en: "Publish", zh-CN: "发布" }
+      approval:
+        checkpoint: approve-plan
+        title: { en: "Approve the draft plan", zh-CN: "确认计划草案" }
+        present: [draft-plan]
+        timeout: 48h
+        onTimeout: cancel
+      steps:
+        - id: finalize
+          kind: agent
+          model: { role: fast }
+          instructions: |
+            Finalize the approved draft into a clean plan document:
+            summary table of milestones, then detailed work items.
+          produces: [plan-breakdown]
+
+  budgets:
+    maxCostUsd: 4
+    maxDurationMinutes: 30
+
+  outputs:
+    artifacts:
+      - { key: analysis-notes, kind: markdown, required: false }
+      - { key: draft-plan, kind: markdown, required: true }
+      - { key: plan-breakdown, kind: markdown, required: true }
+    summary: { from: plan-breakdown }

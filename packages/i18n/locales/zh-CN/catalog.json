@@ -1,0 +1,16 @@
+{
+  "hint": "选择任务类型并填写参数，平台将在后台自动执行。",
+  "notFound": "任务类型不存在",
+  "form": {
+    "parameters": "参数",
+    "title": "任务标题",
+    "budget": "预算",
+    "minutes": "分钟",
+    "submit": "提交任务",
+    "submitting": "提交中…",
+    "missingRequired": "缺少必填字段",
+    "noRepos": "尚未关联代码仓库——请先在项目设置中添加。",
+    "selectRepo": "选择代码仓库",
+    "docsUnsupported": "文档引用暂不可用。"
+  }
+}

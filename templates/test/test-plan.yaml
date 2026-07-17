@@ -1,0 +1,83 @@
+apiVersion: agrippa/v1
+kind: OrchestrationTemplate
+metadata:
+  slug: test.test-plan
+  scenario: test-verification
+  name: { en: "Test Plan", zh-CN: "测试计划" }
+  description:
+    en: "Produce a risk-based test plan and case matrix for a feature or change."
+    zh-CN: "为功能或变更生成基于风险的测试计划与用例矩阵。"
+spec:
+  faber: sentinel
+
+  inputs:
+    - key: changeDescription
+      type: text
+      required: true
+      label: { en: "Feature or change to test", zh-CN: "待测功能或变更" }
+      ui: { widget: textarea, rows: 8 }
+    - key: repo
+      type: repoRef
+      required: true
+      label: { en: "Repository", zh-CN: "代码仓库" }
+    - key: riskFocus
+      type: select
+      default: functional
+      label: { en: "Primary risk focus", zh-CN: "主要风险关注点" }
+      options:
+        - { value: functional, label: { en: "Functional correctness", zh-CN: "功能正确性" } }
+        - { value: regression, label: { en: "Regression safety", zh-CN: "回归安全" } }
+        - { value: performance, label: { en: "Performance", zh-CN: "性能" } }
+        - { value: security, label: { en: "Security", zh-CN: "安全" } }
+
+  workspace:
+    repo: ${inputs.repo}
+    access: readOnly
+
+  resources: {}
+
+  models:
+    roles:
+      analysis: { tier: balanced, fallback: [fast] }
+      fast: { tier: fast }
+
+  phases:
+    - id: analyze
+      name: { en: "Analyze", zh-CN: "分析" }
+      steps:
+        - id: setup
+          kind: system
+          action: workspace.checkout
+        - id: analyze-risk
+          kind: agent
+          model: { role: analysis }
+          instructions: |
+            Analyze the change below against the codebase with a "${inputs.riskFocus}"
+            risk focus. Identify what could break, boundary conditions, and the
+            existing test coverage relevant to it.
+            --- CHANGE ---
+            ${inputs.changeDescription}
+          produces: [risk-analysis]
+
+    - id: plan
+      name: { en: "Plan", zh-CN: "计划" }
+      steps:
+        - id: design-cases
+          kind: agent
+          model: { role: analysis }
+          instructions: |
+            Produce (1) a test plan: scope, environments, entry/exit criteria,
+            prioritized by the risk analysis; and (2) a case matrix table:
+            case id, precondition, steps, expected result, priority.
+          produces: [test-plan, case-matrix]
+
+  budgets:
+    maxCostUsd: 3
+    maxDurationMinutes: 20
+
+  outputs:
+    artifacts:
+      - { key: risk-analysis, kind: markdown, required: false }
+      - { key: test-plan, kind: markdown, required: true }
+      - { key: case-matrix, kind: markdown, required: true }
+    summary: { from: test-plan }

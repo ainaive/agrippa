@@ -1,0 +1,15 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/i18n" },
+    { "path": "packages/db" },
+    { "path": "packages/orchestration" },
+    { "path": "packages/executor-core" },
+    { "path": "packages/executor-claude" },
+    { "path": "packages/api-client" },
+    { "path": "apps/api" },
+    { "path": "apps/worker" },
+    { "path": "apps/web" }
+  ]
+}

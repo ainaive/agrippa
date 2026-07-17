@@ -1,0 +1,20 @@
+{
+  "name": "@agrippa/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@agrippa/core": "workspace:*",
+    "@agrippa/db": "workspace:*",
+    "@agrippa/executor-claude": "workspace:*",
+    "@agrippa/executor-core": "workspace:*",
+    "@agrippa/orchestration": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "ioredis": "^5.11.1",
+    "pg-boss": "^12.26.1"
+  }
+}
