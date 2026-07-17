@@ -1,0 +1,161 @@
+apiVersion: agrippa/v1
+kind: OrchestrationTemplate
+metadata:
+  slug: swdev.bug-localize-fix
+  scenario: software-development
+  name: { en: "Bug Localization & Fix", zh-CN: "缺陷定位与修复" }
+  description:
+    en: "Reproduce a reported bug, localize the root cause, implement and verify a fix."
+    zh-CN: "复现缺陷、定位根因、实现修复并验证。"
+spec:
+  faber: forge
+
+  inputs:
+    - key: bugReport
+      type: text
+      required: true
+      label: { en: "Bug report", zh-CN: "缺陷描述" }
+      ui: { widget: textarea, rows: 8 }
+    - key: repo
+      type: repoRef
+      required: true
+      label: { en: "Repository", zh-CN: "代码仓库" }
+    - key: branch
+      type: string
+      default: main
+      label: { en: "Base branch", zh-CN: "基准分支" }
+    - key: reproduceCommand
+      type: string
+      required: false
+      label: { en: "Reproduce command (optional)", zh-CN: "复现命令（可选）" }
+    - key: autoOpenPr
+      type: boolean
+      default: false
+      label: { en: "Open a pull request when done", zh-CN: "完成后自动创建 PR" }
+
+  workspace:
+    repo: ${inputs.repo}
+    ref: ${inputs.branch}
+    access: readWrite
+
+  resources:
+    skills:
+      - ref: builtin/git-workflow@^1
+      - ref: builtin/test-runner@^1
+    mcpServers:
+      - ref: github
+        optional: true
+    subagents:
+      - id: code-locator
+        description: "Searches the codebase to localize the root cause"
+        promptFile: _shared/prompts/code-locator.md
+        tools: [Read, Grep, Glob]
+        model: { role: analysis }
+      - id: verifier
+        description: "Runs tests and validates the fix"
+        promptFile: _shared/prompts/verifier.md
+        tools: [Bash, Read]
+        model: { role: fast }
+
+  models:
+    roles:
+      planning: { tier: strong, fallback: [balanced] }
+      analysis: { tier: balanced }
+      coding: { tier: strong }
+      fast: { tier: fast }
+    allowProjectOverride: true
+
+  phases:
+    - id: reproduce
+      name: { en: "Reproduce", zh-CN: "复现" }
+      steps:
+        - id: setup
+          kind: system
+          action: workspace.checkout
+        - id: reproduce-bug
+          kind: agent
+          model: { role: analysis }
+          instructions: |
+            Attempt to reproduce the bug described below.
+            ${inputs.reproduceCommand} may help. Record exact commands and observed
+            vs expected behavior in a reproduction report.
+            --- BUG REPORT ---
+            ${inputs.bugReport}
+          produces: [reproduction-report]
+          onFailure: continue
+
+    - id: localize
+      name: { en: "Localize", zh-CN: "定位" }
+      steps:
+        - id: find-root-cause
+          kind: agent
+          model: { role: planning }
+          subagents: [code-locator]
+          instructions: |
+            Using the reproduction report and the codebase, identify the root cause.
+            Produce a localization report: suspect files/lines, causal chain,
+            and a proposed fix plan with risk assessment.
+          produces: [localization-report]
+
+    - id: fix
+      name: { en: "Fix", zh-CN: "修复" }
+      approval:
+        checkpoint: approve-fix-plan
+        title: { en: "Approve proposed fix plan", zh-CN: "确认修复方案" }
+        present: [localization-report]
+        timeout: 24h
+        onTimeout: cancel
+      steps:
+        - id: implement-fix
+          kind: agent
+          model: { role: coding }
+          skills: [builtin/git-workflow]
+          instructions: |
+            Implement the approved fix plan on a new branch. Keep the change minimal.
+            Commit with a conventional commit message.
+          produces: [patch]
+
+    - id: verify
+      name: { en: "Verify", zh-CN: "验证" }
+      steps:
+        - id: run-tests
+          kind: agent
+          model: { role: fast }
+          subagents: [verifier]
+          skills: [builtin/test-runner]
+          instructions: |
+            Run the reproduction steps and the test suite against the fixed branch.
+            Fail this step if the bug still reproduces or tests regress.
+          retry: { max: 2 }
+
+    - id: report
+      name: { en: "Report", zh-CN: "报告" }
+      steps:
+        - id: summarize
+          kind: agent
+          model: { role: fast }
+          instructions: "Write a fix report: root cause, change summary, verification evidence."
+          produces: [fix-report]
+        - id: open-pr
+          kind: agent
+          when: ${inputs.autoOpenPr}
+          requires: { mcpServers: [github] }
+          mcpServers: [github]
+          model: { role: fast }
+          instructions: "Push the branch and open a PR; include the fix report as the body."
+          produces: [pr-link]
+
+  budgets:
+    maxCostUsd: 8
+    maxDurationMinutes: 45
+    perPhase:
+      fix: { maxCostUsd: 4 }
+
+  outputs:
+    artifacts:
+      - { key: reproduction-report, kind: markdown, required: false }
+      - { key: localization-report, kind: markdown, required: true }
+      - { key: patch, kind: patch, required: true }
+      - { key: fix-report, kind: markdown, required: true }
+      - { key: pr-link, kind: link, required: false }
+    summary: { from: fix-report }

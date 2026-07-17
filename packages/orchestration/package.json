@@ -5,5 +5,13 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agrippa/core": "workspace:*",
+    "@agrippa/db": "workspace:*",
+    "@agrippa/executor-core": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
   }
 }

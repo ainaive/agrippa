@@ -1,4 +1,5 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src"]
+  "include": ["src"],
+  "references": [{ "path": "../core" }, { "path": "../db" }, { "path": "../executor-core" }]
 }
