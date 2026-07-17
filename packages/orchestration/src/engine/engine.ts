@@ -668,7 +668,21 @@ class RunEngine {
         .where(eq(runSteps.id, row.id));
     }
     if (event.type === "artifact") {
-      await this.storeArtifact(row, event);
+      // only accept artifacts the step contracted to produce — a non-compliant
+      // executor cannot smuggle in uncontracted keys or a mismatched kind
+      const produces = "produces" in step ? step.produces : [];
+      if (!produces.includes(event.key)) {
+        this.deps.logger.warn("dropping uncontracted artifact", {
+          runId: this.run.id,
+          stepId: step.id,
+          key: event.key,
+        });
+        return;
+      }
+      const contractKind = this.template.spec.outputs.artifacts.find(
+        (a) => a.key === event.key,
+      )?.kind;
+      await this.storeArtifact(row, { ...event, kind: contractKind ?? event.kind });
     }
   }
 
@@ -683,6 +697,9 @@ class RunEngine {
       { inline: event.inline, path: event.path },
       this.workspaceDir,
     );
+    // a missing/empty source produced no bytes — don't create a zero-byte row
+    // (and don't mark the key produced, so a required artifact still fails)
+    if (stored.inline === null && stored.storageRef === null) return;
     await this.db.insert(artifacts).values({
       runId: this.run.id,
       stepId: row.id,

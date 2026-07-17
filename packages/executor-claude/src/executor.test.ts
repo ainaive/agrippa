@@ -232,6 +232,43 @@ describe("claude executor event stream", () => {
     expect(events.at(-1)).toEqual({ type: "step.completed", output: "All done." });
   });
 
+  it("collects only contracted artifacts, skipping patch and uncontracted files", async () => {
+    const req = makeRequest({
+      expectedArtifacts: [
+        { key: "fix-report", kind: "markdown" },
+        { key: "patch", kind: "patch" },
+      ],
+    });
+    const artifactDir = path.join(req.workspaceDir, ".agrippa/artifacts");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
+    // the agent also wrote the patch (engine generates it) and a stray file
+    writeFileSync(path.join(artifactDir, "patch"), "diff --git a/x b/x");
+    writeFileSync(path.join(artifactDir, "scratch.txt"), "junk");
+
+    // patch instructions must not tell the agent to author the patch file
+    const { prompt } = buildQueryArgs(req, makeCtx(), new AbortController());
+    expect(prompt).toContain(".agrippa/artifacts/fix-report.md");
+    expect(prompt).not.toContain(".agrippa/artifacts/patch");
+
+    const executor = createClaudeExecutor(
+      scriptedQuery([
+        { type: "system", subtype: "init", session_id: "s" },
+        { type: "result", subtype: "success", result: "done", is_error: false },
+      ]),
+    );
+    const events = await collect(executor.executeStep(req, makeCtx()));
+    const artifacts = events.filter((e) => e.type === "artifact");
+    expect(artifacts).toEqual([
+      {
+        type: "artifact",
+        key: "fix-report",
+        kind: "markdown",
+        path: ".agrippa/artifacts/fix-report.md",
+      },
+    ]);
+  });
+
   it("maps SDK errors and aborts to step.failed", async () => {
     const failing = createClaudeExecutor(
       scriptedQuery([
