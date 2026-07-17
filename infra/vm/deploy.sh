@@ -42,7 +42,7 @@ systemctl restart agrippa-api
 echo "==> wait for /healthz on :${PORT}"
 healthy=0
 for _ in $(seq 1 60); do
-  if curl -sf "http://127.0.0.1:${PORT}/healthz" >/dev/null; then
+  if curl -sf --max-time 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null; then
     healthy=1
     break
   fi

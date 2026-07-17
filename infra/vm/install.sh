@@ -117,14 +117,19 @@ if [ ! -f "$ENV_FILE" ]; then
     -e "s|__SECRET_KEY__|${SECRET_KEY}|" \
     -e "s|__AUTH_SECRET__|${AUTH_SECRET}|" \
     "$APP_DIR/infra/vm/env.example" >"$ENV_FILE"
+  if [ "$SKIP_REDIS" -eq 1 ]; then
+    # No Redis on this box — leave the URL unset so SSE falls back to DB
+    # polling instead of ioredis retrying a dead server forever.
+    sed -i 's|^REDIS_URL=|# REDIS_URL=|' "$ENV_FILE"
+  fi
   chown root:agrippa "$ENV_FILE"
   chmod 640 "$ENV_FILE"
   cat <<'BANNER'
 
-  ┌────────────────────────────────────────────────────────────────────┐
-  │  BACK UP AGRIPPA_SECRET_KEY from the env file NOW.                 │
-  │  Losing it orphans every credential the platform has stored.      │
-  └────────────────────────────────────────────────────────────────────┘
+  ┌───────────────────────────────────────────────────────────────┐
+  │  BACK UP AGRIPPA_SECRET_KEY from the env file NOW.            │
+  │  Losing it orphans every credential the platform has stored.  │
+  └───────────────────────────────────────────────────────────────┘
 BANNER
 else
   echo "    exists — leaving secrets and database password untouched"
