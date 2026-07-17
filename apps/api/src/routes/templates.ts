@@ -198,7 +198,7 @@ export const templateValidateRoute = new Hono<AppEnv>().post(
       return c.json({ valid: true, checksum, compiled });
     } catch (err) {
       if (err instanceof TemplateValidationError) {
-        return c.json({ valid: false, issues: err.issues }, 400);
+        return c.json({ valid: false, issues: err.issues });
       }
       throw err;
     }

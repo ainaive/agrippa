@@ -125,6 +125,14 @@ export const templateVersionCreateSchema = z.object({
   sourceYaml: z.string().min(1).max(200_000),
 });
 
+export const repoCreateSchema = z.object({
+  provider: z.enum(["github", "gitlab", "generic-git"]),
+  url: z.url(),
+  defaultBranch: z.string().min(1).default("main"),
+  /** Write-only; encrypted into the secrets table. */
+  token: z.string().min(1).optional(),
+});
+
 // ── Execution ─────────────────────────────────────────────────────────────────
 
 export const taskSubmitSchema = z.object({

@@ -192,7 +192,7 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
       method: "POST",
       json: { sourceYaml: "apiVersion: agrippa/v1\nkind: Nope" },
     });
-    expect(bad.status).toBe(400);
+    expect(bad.status).toBe(200); // dry-run result, not an error
     const body = await jsonOf<{ valid: boolean; issues: string[] }>(bad);
     expect(body.valid).toBe(false);
     expect(body.issues.length).toBeGreaterThan(0);

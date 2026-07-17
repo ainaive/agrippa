@@ -7,10 +7,13 @@ import {
   projectUpdateSchema,
   quotaUpdateSchema,
   type ResourceType,
+  repoCreateSchema,
 } from "@agrippa/core";
 import {
   auditLogs,
+  encryptSecret,
   fabri,
+  loadSecretKey,
   mcpServers,
   models,
   orchestrationTemplates,
@@ -18,6 +21,8 @@ import {
   projectQuotas,
   projectResourceGrants,
   projects,
+  repoConnections,
+  secrets,
   skills,
   users,
 } from "@agrippa/db";
@@ -239,6 +244,81 @@ export const projectRoutes = new Hono<AppEnv>()
       resourceType: "project_member",
       resourceId: userId,
       projectId,
+    });
+    return c.json({ removed: true });
+  })
+
+  // ── Repo connections ───────────────────────────────────────────────────────
+  .get("/:projectId/repos", requireProjectRole("viewer"), async (c) => {
+    const rows = await c.var.db
+      .select({
+        id: repoConnections.id,
+        provider: repoConnections.provider,
+        url: repoConnections.url,
+        defaultBranch: repoConnections.defaultBranch,
+        status: repoConnections.status,
+        hasCredential: repoConnections.credentialSecretRef,
+      })
+      .from(repoConnections)
+      .where(eq(repoConnections.projectId, c.req.param("projectId")));
+    return c.json(rows.map((r) => ({ ...r, hasCredential: r.hasCredential !== null })));
+  })
+  .post(
+    "/:projectId/repos",
+    requireProjectRole("admin"),
+    validate("json", repoCreateSchema),
+    async (c) => {
+      const projectId = c.req.param("projectId");
+      const { token, ...input } = c.req.valid("json");
+      const db = c.var.db;
+      let credentialSecretRef: string | null = null;
+      if (token) {
+        const [secret] = await db
+          .insert(secrets)
+          .values({
+            orgId: c.var.user.orgId,
+            kind: "git_credential",
+            ciphertext: encryptSecret(token, loadSecretKey()),
+            createdBy: c.var.user.id,
+          })
+          .returning();
+        credentialSecretRef = secret?.id ?? null;
+      }
+      const [created] = await db
+        .insert(repoConnections)
+        .values({ projectId, ...input, credentialSecretRef })
+        .returning();
+      await audit(c, {
+        action: "project.repo.add",
+        resourceType: "repo_connection",
+        resourceId: created?.id,
+        projectId,
+        payload: { url: input.url },
+      });
+      return c.json(
+        created
+          ? { ...created, credentialSecretRef: undefined, hasCredential: !!credentialSecretRef }
+          : null,
+        201,
+      );
+    },
+  )
+  .delete("/:projectId/repos/:repoId", requireProjectRole("admin"), async (c) => {
+    const deleted = await c.var.db
+      .delete(repoConnections)
+      .where(
+        and(
+          eq(repoConnections.projectId, c.req.param("projectId")),
+          eq(repoConnections.id, c.req.param("repoId")),
+        ),
+      )
+      .returning({ id: repoConnections.id });
+    if (deleted.length === 0) throw AppError.notFound("Repo connection");
+    await audit(c, {
+      action: "project.repo.remove",
+      resourceType: "repo_connection",
+      resourceId: c.req.param("repoId"),
+      projectId: c.req.param("projectId"),
     });
     return c.json({ removed: true });
   })
