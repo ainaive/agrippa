@@ -8,13 +8,15 @@ import { and, eq } from "drizzle-orm";
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? path.join(tmpdir(), "agrippa-workspaces");
 
 /**
- * Repo-supplied agent configuration that would otherwise be honored by the SDK
- * project setting source: hooks run shell, settings grant tool permissions, and
- * .mcp.json wires servers. A checked-out repo is untrusted, so these are removed
- * before any agent runs. Registry skills are re-materialized into .claude/skills
- * afterwards (docs/design/03 §Sandboxing).
+ * Repo-supplied paths removed before any agent runs (a checked-out repo is
+ * untrusted): `.claude`/`.mcp.json` would be honored by the SDK project setting
+ * source (hooks run shell, settings grant permissions, .mcp.json wires servers);
+ * `.agrippa` is the platform's own artifact convention dir — a committed
+ * `.agrippa -> /work` symlink would otherwise let workspace-relative artifact
+ * paths escape to the shared store. Registry skills and the artifact dir are
+ * re-created fresh afterwards (docs/design/03 §Sandboxing).
  */
-const REPO_CONFIG_TO_STRIP = [".claude", ".mcp.json"];
+const REPO_CONFIG_TO_STRIP = [".claude", ".mcp.json", ".agrippa"];
 
 async function sanitizeWorkspace(dir: string): Promise<void> {
   for (const entry of REPO_CONFIG_TO_STRIP) {
@@ -108,13 +110,6 @@ export class GitWorkspaceManager implements WorkspaceManager {
     } catch {
       return "";
     }
-  }
-
-  async clearArtifacts(runId: string): Promise<void> {
-    await rm(path.join(this.dirFor(runId), ".agrippa", "artifacts"), {
-      recursive: true,
-      force: true,
-    });
   }
 
   async cleanup(runId: string): Promise<void> {

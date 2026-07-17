@@ -13,10 +13,10 @@ import {
   durationToMinutes,
   type EngineDeps,
   executeRun,
+  finalizeRun,
   findStrandedApprovalRuns,
   InProcessEventBus,
   RedisEventBus,
-  transitionRun,
 } from "@agrippa/orchestration";
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
@@ -106,17 +106,18 @@ async function scheduleApprovalExpiry(runId: string): Promise<void> {
 async function markRunFailed(runId: string, err: unknown): Promise<void> {
   const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
   if (!run || isTerminalRunStatus(run.status)) return;
-  // route through the lifecycle CAS so a concurrent transition (e.g. a cancel or
-  // a resumed worker finalizing) can't be clobbered by this retry-exhaustion path
-  await db.transaction(async (tx) => {
-    if (!(await transitionRun(tx, runId, run.status, "failed"))) return;
-    await tx
-      .update(runs)
-      .set({
-        finishedAt: new Date(),
-        error: { code: "internal", message: `retries exhausted: ${String(err).slice(0, 500)}` },
-      })
-      .where(eq(runs.id, runId));
+  // one shared finalization impl: CAS from the *current* status (so a queued run
+  // whose setup threw before it was claimed transitions queued→failed, not the
+  // illegal queued→failed of a hard-coded from), and it emits the terminal event
+  // that the old id-only update omitted
+  const error = { code: "internal", message: `retries exhausted: ${String(err).slice(0, 500)}` };
+  await finalizeRun(db, {
+    runId,
+    from: run.status,
+    to: "failed",
+    error,
+    usageTotals: {},
+    eventPayload: { error },
   });
 }
 

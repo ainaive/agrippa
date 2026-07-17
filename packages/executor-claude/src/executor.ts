@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import {
   buildScrubbedEnv,
@@ -7,6 +7,7 @@ import {
   type ExecutorEvent,
   evaluateToolCall,
   isReadTool,
+  isWithin,
   isWriteTool,
   pathArgOf,
   realContained,
@@ -174,6 +175,28 @@ function* collectArtifacts(
   }
 }
 
+/** Delete this step's expected artifact files (patch excluded) before an attempt. */
+function clearExpectedArtifacts(
+  workspaceDir: string,
+  expected: StepExecutionRequest["expectedArtifacts"],
+): void {
+  const dir = path.join(workspaceDir, ARTIFACT_DIR);
+  // refuse to touch the dir if it resolves (via a symlink an agent may have
+  // created, e.g. `.agrippa -> /work`) outside the workspace — otherwise these
+  // unlinks would reach the shared artifact store
+  let realDir: string;
+  try {
+    realDir = realpathSync(dir);
+  } catch {
+    return; // missing dir → nothing to clear
+  }
+  if (!isWithin(realpathSync(workspaceDir), realDir)) return;
+  for (const a of expected) {
+    if (a.kind === "patch") continue;
+    rmSync(path.join(dir, expectedFilename(a)), { force: true });
+  }
+}
+
 export function createClaudeExecutor(queryFn: QueryFn = sdkQuery as QueryFn): Executor {
   return {
     id: "claude-agent-sdk",
@@ -187,6 +210,11 @@ export function createClaudeExecutor(queryFn: QueryFn = sdkQuery as QueryFn): Ex
       const onAbort = () => abortController.abort();
       if (ctx.signal.aborted) onAbort();
       ctx.signal.addEventListener("abort", onAbort, { once: true });
+
+      // remove only THIS step's expected artifact files up front, so a prior
+      // attempt's stale file isn't collected as this attempt's result — without
+      // touching other steps' artifacts (or recursively deleting the dir)
+      clearExpectedArtifacts(req.workspaceDir, req.expectedArtifacts);
 
       const { prompt, options } = buildQueryArgs(req, ctx, abortController);
       let started = false;

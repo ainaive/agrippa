@@ -37,7 +37,7 @@ import {
   type TemplateStep,
 } from "../template-schema";
 import type { EngineDeps, RunOutcome } from "./deps";
-import { appendRunEvent, transitionRun } from "./run-lifecycle";
+import { appendRunEvent, finalizeRun, transitionRun } from "./run-lifecycle";
 
 type RunRow = typeof runs.$inferSelect;
 type StepRow = typeof runSteps.$inferSelect;
@@ -484,9 +484,6 @@ class RunEngine {
           await this.runSystemStep(step);
           await this.completeStep(row, "");
         } else {
-          // start each attempt from a clean artifact dir so a prior attempt's
-          // stale file isn't collected as this attempt's result
-          await this.deps.workspace.clearArtifacts(this.run.id);
           const output = await this.runAgentStep(phase, step, row, attempt);
           await this.completeStep(row, output);
         }
@@ -978,52 +975,48 @@ class RunEngine {
     error: { code: string; message: string } | null,
   ): Promise<void> {
     const snapshot = this.meter?.snapshot() ?? { costUsd: 0, tokens: 0, perPhaseCostUsd: {} };
-
-    // a cancel that landed after the last interrupt check still wins over a
-    // success — otherwise the API returns "cancel requested" but the run succeeds
+    const usageTotals = {
+      costUsd: snapshot.costUsd,
+      tokens: snapshot.tokens,
+      perPhaseCostUsd: snapshot.perPhaseCostUsd,
+    };
+    const from = this.run.status;
     let finalStatus = status;
-    let finalError = error;
-    if (status === "succeeded") {
-      const [row] = await this.db
-        .select({ cancelRequested: runs.cancelRequested })
-        .from(runs)
-        .where(eq(runs.id, this.run.id));
-      if (row?.cancelRequested) {
-        finalStatus = "cancelled";
-        finalError = { code: "cancelled", message: "run cancelled" };
-      }
-    }
-    const type = `run.${finalStatus}`;
-    const eventPayload = this.redactor.redact(finalError ? { error: finalError } : {});
+    let eventPayload = this.redactor.redact(error ? { error } : {});
 
-    // status flip + finishedAt/totals + terminal event commit together — a crash
-    // can no longer leave a terminal run with no finishedAt/totals/event that
-    // executeRun would then never repair. Publish to the bus only after commit.
-    const committed = await this.db.transaction(async (tx) => {
-      // CAS: if another path (e.g. a concurrent cancel) already finalized, bail
-      if (!(await transitionRun(tx, this.run.id, this.run.status, finalStatus))) return null;
-      this.run.status = finalStatus;
-      await tx
-        .update(runs)
-        .set({
-          finishedAt: new Date(),
-          error: finalError ?? null,
-          usageTotals: {
-            costUsd: snapshot.costUsd,
-            tokens: snapshot.tokens,
-            perPhaseCostUsd: snapshot.perPhaseCostUsd,
-          },
-        })
-        .where(eq(runs.id, this.run.id));
-      return await appendRunEvent(tx, { runId: this.run.id, type, payload: eventPayload });
+    // finalizeRun commits the status CAS + finishedAt/totals + terminal event in
+    // one tx. For a success we require cancel_requested=false so a cancel that
+    // landed after the last interrupt check wins atomically (no read/CAS gap).
+    let result = await finalizeRun(this.db, {
+      runId: this.run.id,
+      from,
+      to: status,
+      requireNotCancelled: status === "succeeded",
+      error,
+      usageTotals,
+      eventPayload,
     });
-    if (!committed) return; // another path finalized the run
+    if (result.outcome === "cancelled_instead") {
+      finalStatus = "cancelled";
+      const cancelError = { code: "cancelled", message: "run cancelled" };
+      eventPayload = this.redactor.redact({ error: cancelError });
+      result = await finalizeRun(this.db, {
+        runId: this.run.id,
+        from,
+        to: "cancelled",
+        error: cancelError,
+        usageTotals,
+        eventPayload,
+      });
+    }
+    if (result.outcome !== "finalized") return; // another path finalized the run
+    this.run.status = finalStatus;
     await this.deps.bus.publish({
       runId: this.run.id,
-      seq: committed.seq,
-      type,
+      seq: result.seq,
+      type: `run.${finalStatus}`,
       payload: eventPayload,
-      createdAt: committed.createdAt.toISOString(),
+      createdAt: result.createdAt.toISOString(),
     });
     try {
       await this.deps.workspace.cleanup(this.run.id);

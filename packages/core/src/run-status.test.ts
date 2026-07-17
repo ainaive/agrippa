@@ -12,6 +12,7 @@ describe("run state machine", () => {
   const legal: Array<[RunStatus, RunStatus]> = [
     ["queued", "running"],
     ["queued", "cancelled"],
+    ["queued", "failed"], // setup threw before the run was claimed
     ["running", "succeeded"],
     ["running", "failed"],
     ["running", "timed_out"],

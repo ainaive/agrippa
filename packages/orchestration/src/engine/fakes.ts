@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Logger, ResolvedMcpServer, ResolvedSkill } from "@agrippa/executor-core";
@@ -27,13 +27,6 @@ export class FakeWorkspaceManager implements WorkspaceManager {
 
   async diff(_runId: string): Promise<string> {
     return this.diffOutput;
-  }
-
-  readonly cleared: string[] = [];
-  async clearArtifacts(runId: string): Promise<void> {
-    this.cleared.push(runId);
-    const dir = this.dirs.get(runId);
-    if (dir) rmSync(path.join(dir, ".agrippa", "artifacts"), { recursive: true, force: true });
   }
 
   async cleanup(runId: string): Promise<void> {

@@ -7,6 +7,16 @@ import type { ArtifactStore, StoredArtifact } from "@agrippa/orchestration";
 
 const STORAGE_ROOT = process.env.ARTIFACT_STORAGE_ROOT ?? path.join(tmpdir(), "agrippa-artifacts");
 const INLINE_LIMIT = 64 * 1024;
+/** Hard cap on a single artifact so an agent can't OOM the worker (env-tunable). */
+const maxArtifactSize = (): number =>
+  Number(process.env.AGRIPPA_MAX_ARTIFACT_BYTES ?? 25 * 1024 * 1024);
+
+class ArtifactTooLargeError extends Error {
+  constructor(key: string, size: number) {
+    super(`artifact '${key}' is ${size} bytes, over the ${maxArtifactSize()}-byte limit`);
+    this.name = "ArtifactTooLargeError";
+  }
+}
 
 const EMPTY: StoredArtifact = { inline: null, storageRef: null, size: 0, mime: null };
 
@@ -54,15 +64,19 @@ export class DiskArtifactStore implements ArtifactStore {
     const file = Bun.file(real);
     if (!(await file.exists())) return EMPTY;
 
-    // `file`-kind artifacts may be binary — read raw bytes and stream them on
-    // download rather than decoding to UTF-8 (which corrupts non-text content)
-    if (kind === "file") {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      if (bytes.byteLength === 0) return EMPTY;
-      const storageRef = await this.writeToDisk(runId, key, bytes);
-      return { inline: null, storageRef, size: bytes.byteLength, mime: file.type || null };
+    // stat BEFORE reading, so a huge/sparse file is rejected without buffering it
+    const size = file.size;
+    if (size === 0) return EMPTY;
+    if (size > maxArtifactSize()) throw new ArtifactTooLargeError(key, size);
+    const mime = file.type || null;
+
+    // small text can inline in Postgres; `file`-kind (possibly binary) and any
+    // large artifact stream straight to disk byte-exact, never fully buffered
+    if (kind !== "file" && size <= INLINE_LIMIT) {
+      return this.storeText(runId, key, await file.text(), mime);
     }
-    return this.storeText(runId, key, await file.text(), file.type || null);
+    const storageRef = await this.writeToDisk(runId, key, file);
+    return { inline: null, storageRef, size, mime };
   }
 
   private async storeText(
@@ -73,6 +87,7 @@ export class DiskArtifactStore implements ArtifactStore {
   ): Promise<StoredArtifact> {
     const size = Buffer.byteLength(content);
     if (size === 0) return EMPTY;
+    if (size > maxArtifactSize()) throw new ArtifactTooLargeError(key, size);
     if (size <= INLINE_LIMIT) return { inline: content, storageRef: null, size, mime };
     const storageRef = await this.writeToDisk(runId, key, content);
     return { inline: null, storageRef, size, mime };
@@ -81,7 +96,7 @@ export class DiskArtifactStore implements ArtifactStore {
   private async writeToDisk(
     runId: string,
     key: string,
-    data: string | Uint8Array,
+    data: string | Uint8Array | Blob,
   ): Promise<string> {
     const dir = path.join(STORAGE_ROOT, runId);
     await mkdir(dir, { recursive: true });

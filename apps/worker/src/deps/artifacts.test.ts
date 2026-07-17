@@ -103,4 +103,20 @@ describe("DiskArtifactStore path containment", () => {
     const round = new Uint8Array(await Bun.file(stored.storageRef as string).arrayBuffer());
     expect([...round]).toEqual([...bytes]); // byte-exact, no UTF-8 corruption
   });
+
+  it("rejects an artifact over the size cap without buffering it", async () => {
+    const ws = freshWorkspace();
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    writeFileSync(path.join(ws, ".agrippa/artifacts/big.md"), "0123456789AB"); // 12 bytes
+    const prev = process.env.AGRIPPA_MAX_ARTIFACT_BYTES;
+    process.env.AGRIPPA_MAX_ARTIFACT_BYTES = "8";
+    try {
+      await expect(
+        store.store("run-1", "big", "markdown", { path: ".agrippa/artifacts/big.md" }, ws),
+      ).rejects.toThrow(/over the .* limit/);
+    } finally {
+      if (prev === undefined) delete process.env.AGRIPPA_MAX_ARTIFACT_BYTES;
+      else process.env.AGRIPPA_MAX_ARTIFACT_BYTES = prev;
+    }
+  });
 });

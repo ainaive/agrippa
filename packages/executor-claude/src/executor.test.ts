@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
@@ -47,13 +47,20 @@ function makeRequest(overrides: Partial<StepExecutionRequest> = {}): StepExecuti
 
 const sdk = (message: unknown) => message as SDKMessage;
 
-function scriptedQuery(messages: unknown[], capture?: { options?: Options; prompt?: string }) {
+function scriptedQuery(
+  messages: unknown[],
+  capture?: { options?: Options; prompt?: string },
+  onStart?: () => void,
+) {
   return (params: { prompt: string; options?: Options }) => {
     if (capture) {
       capture.options = params.options;
       capture.prompt = params.prompt;
     }
     return (async function* () {
+      // runs after the executor has cleared expected artifacts — this is where a
+      // real agent would write its files
+      onStart?.();
       for (const message of messages) yield sdk(message);
     })();
   };
@@ -165,10 +172,12 @@ describe("claude executor option mapping (docs/design/03)", () => {
 describe("claude executor event stream", () => {
   it("translates SDK messages into normalized executor events", async () => {
     const req = makeRequest();
-    // agent wrote an artifact into the convention directory
     const artifactDir = path.join(req.workspaceDir, ".agrippa/artifacts");
-    mkdirSync(artifactDir, { recursive: true });
-    writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
+    // the agent writes its artifact during the run (after the executor clears)
+    const writeArtifact = () => {
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
+    };
 
     const messages = [
       { type: "system", subtype: "init", session_id: "sess-1" },
@@ -201,7 +210,7 @@ describe("claude executor event stream", () => {
       { type: "result", subtype: "success", result: "All done.", is_error: false },
     ];
 
-    const executor = createClaudeExecutor(scriptedQuery(messages));
+    const executor = createClaudeExecutor(scriptedQuery(messages, undefined, writeArtifact));
     const events = await collect(executor.executeStep(req, makeCtx()));
 
     expect(events[0]).toEqual({ type: "step.started", sessionId: "sess-1" });
@@ -249,10 +258,11 @@ describe("claude executor event stream", () => {
     });
     const artifactDir = path.join(req.workspaceDir, ".agrippa/artifacts");
     mkdirSync(artifactDir, { recursive: true });
-    writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
-    // the agent also wrote the patch (engine generates it) and a stray file
+    // stray files that already exist (the patch, which the engine generates, and
+    // a scratch file); the agent writes fix-report during the run
     writeFileSync(path.join(artifactDir, "patch"), "diff --git a/x b/x");
     writeFileSync(path.join(artifactDir, "scratch.txt"), "junk");
+    const writeReport = () => writeFileSync(path.join(artifactDir, "fix-report.md"), "# fixed");
 
     // patch instructions must not tell the agent to author the patch file
     const { prompt } = buildQueryArgs(req, makeCtx(), new AbortController());
@@ -260,10 +270,14 @@ describe("claude executor event stream", () => {
     expect(prompt).not.toContain(".agrippa/artifacts/patch");
 
     const executor = createClaudeExecutor(
-      scriptedQuery([
-        { type: "system", subtype: "init", session_id: "s" },
-        { type: "result", subtype: "success", result: "done", is_error: false },
-      ]),
+      scriptedQuery(
+        [
+          { type: "system", subtype: "init", session_id: "s" },
+          { type: "result", subtype: "success", result: "done", is_error: false },
+        ],
+        undefined,
+        writeReport,
+      ),
     );
     const events = await collect(executor.executeStep(req, makeCtx()));
     const artifacts = events.filter((e) => e.type === "artifact");
@@ -275,6 +289,43 @@ describe("claude executor event stream", () => {
         path: ".agrippa/artifacts/fix-report.md",
       },
     ]);
+  });
+
+  it("clears a stale expected artifact before the attempt runs", async () => {
+    const req = makeRequest(); // expects fix-report (markdown)
+    const artifactDir = path.join(req.workspaceDir, ".agrippa/artifacts");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(path.join(artifactDir, "fix-report.md"), "# stale from attempt 1");
+
+    // this attempt's agent produces nothing
+    const executor = createClaudeExecutor(
+      scriptedQuery([
+        { type: "system", subtype: "init", session_id: "s" },
+        { type: "result", subtype: "success", result: "done", is_error: false },
+      ]),
+    );
+    const events = await collect(executor.executeStep(req, makeCtx()));
+    expect(events.filter((e) => e.type === "artifact")).toEqual([]);
+    expect(existsSync(path.join(artifactDir, "fix-report.md"))).toBe(false);
+  });
+
+  it("does not clear through a .agrippa symlink that escapes the workspace", async () => {
+    const req = makeRequest();
+    // an agent pointed .agrippa at a shared store holding another run's artifact
+    const shared = mkdtempSync(path.join(tmpdir(), "shared-store-"));
+    mkdirSync(path.join(shared, "artifacts"), { recursive: true });
+    const victim = path.join(shared, "artifacts", "fix-report.md");
+    writeFileSync(victim, "another run's artifact");
+    symlinkSync(shared, path.join(req.workspaceDir, ".agrippa"));
+
+    const executor = createClaudeExecutor(
+      scriptedQuery([
+        { type: "system", subtype: "init", session_id: "s" },
+        { type: "result", subtype: "success", result: "done", is_error: false },
+      ]),
+    );
+    await collect(executor.executeStep(req, makeCtx()));
+    expect(existsSync(victim)).toBe(true); // shared store untouched
   });
 
   it("maps SDK errors and aborts to step.failed", async () => {

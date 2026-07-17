@@ -38,6 +38,7 @@ import {
 import {
   appendRunEvent,
   decideApproval,
+  finalizeRun,
   findStrandedApprovalRuns,
   transitionRun,
 } from "./run-lifecycle";
@@ -605,14 +606,6 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(seen).toContain("approval.required");
   });
 
-  it("clears the artifact dir before each agent step attempt", async () => {
-    const { runId, makeDeps, workspace } = await setupFixture();
-    await executeRun(makeDeps(HAPPY_SCRIPT), runId);
-    // agent steps ran → clearArtifacts was invoked (so a stale attempt file
-    // can't be re-collected as a later attempt's result)
-    expect(workspace.cleared).toContain(runId);
-  });
-
   it("redacts known secret values from persisted events", async () => {
     const secret = "sk-ant-supersecretvalue-1234567890";
     const prev = process.env.ANTHROPIC_API_KEY;
@@ -703,6 +696,57 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     // cp-1 decided too → now every approval is decided → stranded, re-enqueue
     await decideApproval(db, a1?.id as string, { status: "approved" });
     expect(await findStrandedApprovalRuns(db)).toContain(runId);
+  });
+
+  it("finalizeRun lets a late cancel win over a success (atomic, no read/CAS gap)", async () => {
+    const { db, runId } = await setupFixture();
+    await transitionRun(db, runId, "queued", "running");
+    await db.update(runs).set({ cancelRequested: true }).where(eq(runs.id, runId));
+    // a success that requires no pending cancel is refused, leaving status running
+    const r = await finalizeRun(db, {
+      runId,
+      from: "running",
+      to: "succeeded",
+      requireNotCancelled: true,
+      error: null,
+      usageTotals: {},
+      eventPayload: {},
+    });
+    expect(r.outcome).toBe("cancelled_instead");
+    const [row] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("running");
+    // re-finalizing as cancelled commits
+    const c = await finalizeRun(db, {
+      runId,
+      from: "running",
+      to: "cancelled",
+      error: null,
+      usageTotals: {},
+      eventPayload: {},
+    });
+    expect(c.outcome).toBe("finalized");
+  });
+
+  it("finalizeRun fails a still-queued run and emits the terminal event", async () => {
+    const { db, runId } = await setupFixture();
+    const err = { code: "internal", message: "boom" };
+    const r = await finalizeRun(db, {
+      runId,
+      from: "queued",
+      to: "failed",
+      error: err,
+      usageTotals: {},
+      eventPayload: { error: err },
+    });
+    expect(r.outcome).toBe("finalized");
+    const [run] = await db
+      .select({ status: runs.status, finishedAt: runs.finishedAt })
+      .from(runs)
+      .where(eq(runs.id, runId));
+    expect(run?.status).toBe("failed");
+    expect(run?.finishedAt).not.toBeNull();
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.some((e) => e.type === "run.failed")).toBe(true);
   });
 
   it("decideApproval is a compare-and-swap on pending", async () => {
