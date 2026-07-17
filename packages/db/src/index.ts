@@ -1,2 +1,5 @@
-// @agrippa/db — Drizzle schema, migrations, and seeds. Lands in M1.1 (docs/plan/m1-plan.md).
-export {};
+export * from "./client";
+export * from "./migrate";
+export * as schema from "./schema";
+export * from "./schema";
+export * from "./secrets";
