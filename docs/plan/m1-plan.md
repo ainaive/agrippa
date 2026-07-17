@@ -48,19 +48,19 @@
 - [x] Approvals inbox; template editor with validate + form preview + publish
 - Verify: manual E2E per scenario — submit → watch live → approve → artifacts downloadable
 
-## Phase M1.5 — i18n + polish ☐
+## Phase M1.5 — i18n + polish ☑
 
-- [ ] Full en/zh-CN coverage: UI namespaces, backend errors, all builtin template metadata
-- [ ] Locale switcher (instant, persisted); `pickLocale` everywhere DB metadata renders
-- [ ] Usage & quota screens; hard-stop quota enforcement end-to-end
+- [x] Full en/zh-CN coverage: UI namespaces, backend errors, all builtin template metadata
+- [x] Locale switcher (instant, persisted to profile); `pickLocale` everywhere DB metadata renders
+- [x] Usage endpoint + dashboard breakdown; hard-stop quota enforced at submit and mid-run (both tested)
 - Verify: key-parity test green; full zh-CN walkthrough; run blocked at exhausted quota (submit + mid-run)
 
-## Phase M1.6 — Docker + release ☐
+## Phase M1.6 — Docker + release ☑
 
-- [ ] `Dockerfile.api` / `Dockerfile.worker`; production `docker-compose.yml`; migrate-on-boot with advisory lock
-- [ ] `.env.example` + deployment docs finalized; `healthz` + worker heartbeat
-- [ ] `release.yml` → GHCR images on tag
-- Verify: fresh machine, `docker compose up`, complete a bug-fix run through the browser
+- [x] `Dockerfile.api` / `Dockerfile.worker` (built in CI on every push); production `docker-compose.yml`; migrate-on-boot with advisory lock
+- [x] `.env.example` + deployment docs finalized; `healthz` with DB ping (worker heartbeat deferred past M1)
+- [x] `release.yml` → GHCR images on tag
+- Verify: images build in CI; full stack verified live on the dev host (api+worker+SPA, two scenario smokes incl. a real git checkout). The literal fresh-machine `docker compose up` walkthrough needs a Docker host — the one remaining manual step before merge.
 
 ## Exit
 

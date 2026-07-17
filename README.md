@@ -14,7 +14,33 @@ Projects are the resource scope and billing boundary: enabled Skills/MCP/models,
 
 ## Status
 
-Design phase — see the design documents. Implementation follows the [M1 plan](docs/plan/m1-plan.md).
+M1 implemented — all three layers work end to end. See the [M1 plan](docs/plan/m1-plan.md) for what shipped.
+
+## Getting started
+
+**Development** (Bun ≥ 1.3, Postgres running locally):
+
+```sh
+bun install
+docker compose -f infra/docker-compose.dev.yml up -d   # postgres + redis (or use local installs)
+export DATABASE_URL=postgres://localhost:5432/agrippa
+export AGRIPPA_SECRET_KEY=$(openssl rand -base64 32)
+export AGRIPPA_EXECUTOR=fake                            # token-free demo executor
+bun apps/api/src/index.ts      # api :3000 (migrates + seeds on boot)
+bun apps/worker/src/index.ts   # worker
+cd apps/web && bun run dev     # SPA :5173 (proxies /api → :3000)
+```
+
+Sign up (the first user becomes org admin), create a project, grant models/skills under Settings → Resources, then submit a task from the catalog. Set `AGRIPPA_EXECUTOR=claude-agent-sdk` and `ANTHROPIC_API_KEY` for real runs.
+
+**Self-hosted** (Docker):
+
+```sh
+cp infra/env/.env.example infra/env/.env    # fill in the secrets
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+```
+
+**Quality gate**: `bun run check && bun test` (same commands CI runs).
 
 ## Documentation
 

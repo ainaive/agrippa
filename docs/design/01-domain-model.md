@@ -50,7 +50,7 @@ api_keys  (id pk, org_id fk, project_id fk null,              -- null = org-wide
 
 secrets   (id pk, org_id fk, kind text,                       -- 'mcp_auth' | 'git_credential' | ...
            ciphertext bytea, created_by fk, created_at, rotated_at)
-           -- libsodium sealed box; key from AGRIPPA_SECRET_KEY env
+           -- AES-256-GCM via node:crypto; key from AGRIPPA_SECRET_KEY env
 ```
 
 ### Projects

@@ -28,7 +28,7 @@ infra/docker-compose.yml
 | `DATABASE_URL` | Postgres connection |
 | `REDIS_URL` | Redis pubsub |
 | `AGRIPPA_BASE_URL` | Public URL (links in emails/PRs) |
-| `AGRIPPA_SECRET_KEY` | libsodium key encrypting the `secrets` table — **back this up; losing it orphans stored credentials** |
+| `AGRIPPA_SECRET_KEY` | AES-256-GCM key encrypting the `secrets` table — **back this up; losing it orphans stored credentials** |
 | `BETTER_AUTH_SECRET` | session signing |
 | `ANTHROPIC_API_KEY` | Claude executor (worker only) |
 | `WORKER_SLOTS` | run concurrency per worker (default 2) |
@@ -43,7 +43,7 @@ Secrets policy: provider API keys and the master key live only in `api`/`worker`
 - **Backup**: Postgres volume (pg_dump schedule is the operator's choice) + `ARTIFACT_STORAGE_ROOT` volume + the `AGRIPPA_SECRET_KEY`. Redis is disposable.
 - **Upgrade**: pull images → `docker compose up -d` → api entrypoint migrates. Workers drain gracefully (in-flight runs resume on new workers via step-granular resume — see [04](04-execution-runtime.md)).
 - **TLS / ingress**: out of scope; operators front the stack with their own reverse proxy. SSE requires the proxy to disable response buffering for `/api/v1/runs/*/events`.
-- **Health**: `GET /healthz` (api: DB+Redis ping) and a worker heartbeat table row per worker for the admin UI.
+- **Health**: `GET /healthz` (api: DB ping). A per-worker heartbeat row for the admin UI is deferred past M1.
 
 ## Release Pipeline
 
