@@ -1,14 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDownIcon, ScrollTextIcon, SearchIcon } from "lucide-react";
+import { ChevronDownIcon, ScrollTextIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { SearchInput } from "@/components/SearchInput";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -112,15 +112,12 @@ export function AuditLogPage() {
             ))}
           </SelectContent>
         </Select>
-        <div className="relative">
-          <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={action}
-            onChange={(e) => setAction(e.target.value)}
-            placeholder={t("admin:audit.actionFilter")}
-            className="w-64 pl-8 font-mono text-xs"
-          />
-        </div>
+        <SearchInput
+          value={action}
+          onChange={(e) => setAction(e.target.value)}
+          placeholder={t("admin:audit.actionFilter")}
+          className="w-64 font-mono text-xs"
+        />
       </div>
 
       {logs.isLoading ? (

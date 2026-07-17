@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { StatCard } from "@/components/StatCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
@@ -176,41 +177,32 @@ export function UsagePage() {
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Card>
-              <CardHeader className="flex-row items-center justify-between pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  {t("usage:totalCost")}
-                </CardTitle>
-                <CircleDollarSignIcon className="size-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent className="space-y-2">
-                <p className="text-2xl font-semibold">
+            <StatCard
+              title={t("usage:totalCost")}
+              icon={CircleDollarSignIcon}
+              value={
+                <>
                   {formatCost(data.costUsd)}
                   {costLimit ? (
                     <span className="ml-1 text-sm font-normal text-muted-foreground">
                       / {formatCost(costLimit)}
                     </span>
                   ) : null}
-                </p>
-                {costLimit ? (
-                  <Progress
-                    value={Math.min(100, (data.costUsd / costLimit) * 100)}
-                    className="h-1.5"
-                  />
-                ) : null}
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader className="flex-row items-center justify-between pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  {t("usage:totalTokens")}
-                </CardTitle>
-                <CoinsIcon className="size-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent className="text-2xl font-semibold">
-                {data.tokens.toLocaleString()}
-              </CardContent>
-            </Card>
+                </>
+              }
+            >
+              {costLimit ? (
+                <Progress
+                  value={Math.min(100, (data.costUsd / costLimit) * 100)}
+                  className="h-1.5"
+                />
+              ) : null}
+            </StatCard>
+            <StatCard
+              title={t("usage:totalTokens")}
+              icon={CoinsIcon}
+              value={data.tokens.toLocaleString()}
+            />
           </div>
 
           <Card>

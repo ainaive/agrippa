@@ -21,8 +21,9 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { lt } from "@/lib/format";
+import { toastApiError } from "@/lib/toast";
 import type { SkillRow } from "@/lib/types";
-import { FormDialog, toastApiError } from "./shared";
+import { FormDialog } from "./shared";
 
 function NewSkillDialog({
   open,
@@ -175,7 +176,7 @@ export function SkillsPage() {
         <div className="grid gap-3 sm:grid-cols-2">
           {(skills.data ?? []).map((skill) => (
             <Card key={skill.id}>
-              <CardHeader className="flex-row items-start justify-between pb-2">
+              <CardHeader className="flex flex-row items-start justify-between pb-2">
                 <CardTitle className="text-sm">
                   {lt(skill.nameI18n)}
                   <span className="ml-1.5 font-mono text-xs font-normal text-muted-foreground">

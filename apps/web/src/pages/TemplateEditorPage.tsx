@@ -23,6 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { defaultParams, TaskParamsForm } from "../components/TaskParamsForm";
 import { ApiError, api } from "../lib/api";
 import { lt } from "../lib/format";
+import { toastApiError } from "../lib/toast";
 import type { TemplateInputSpec } from "../lib/types";
 import { cn } from "../lib/utils";
 
@@ -193,7 +194,7 @@ export function TemplateEditorPage() {
       setSelected(created.version);
       setEdited(null);
     },
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : String(err)),
+    onError: toastApiError,
   });
 
   const transition = useMutation({
@@ -203,7 +204,7 @@ export function TemplateEditorPage() {
       toast.success(t("common:feedback.saved"));
       void queryClient.invalidateQueries({ queryKey: ["template", templateId] });
     },
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : String(err)),
+    onError: toastApiError,
   });
 
   if (!template.data) return <DetailSkeleton />;
@@ -228,7 +229,7 @@ export function TemplateEditorPage() {
 
       <div className="grid items-start gap-4 lg:grid-cols-[1fr_320px]">
         <Card>
-          <CardHeader className="flex-row items-center justify-between">
+          <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-base">{t("admin:editor.source")}</CardTitle>
             <div className="flex gap-2">
               <Button

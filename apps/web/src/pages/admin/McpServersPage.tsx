@@ -8,6 +8,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
 import { LocalizedTextFields } from "@/components/LocalizedTextFields";
 import { PageHeader } from "@/components/PageHeader";
+import { StatusBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,8 +24,9 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { lt } from "@/lib/format";
+import { toastApiError } from "@/lib/toast";
 import type { McpServerRow } from "@/lib/types";
-import { FormDialog, toastApiError } from "./shared";
+import { FormDialog } from "./shared";
 
 type McpDetail = McpServerRow & { config?: Record<string, unknown> };
 
@@ -211,9 +213,7 @@ export function McpServersPage() {
                   {server.slug} · {server.transport}
                 </p>
               </div>
-              {server.status !== "active" ? (
-                <Badge variant="outline">{t("admin:crud.disabled")}</Badge>
-              ) : null}
+              {server.status !== "active" ? <StatusBadge status={server.status} /> : null}
               <Badge variant={server.hasAuth ? "secondary" : "outline"}>
                 {server.hasAuth ? t("admin:mcp.authed") : t("admin:mcp.noAuth")}
               </Badge>

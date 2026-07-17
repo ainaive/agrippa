@@ -29,8 +29,9 @@ import {
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { lt } from "@/lib/format";
+import { toastApiError } from "@/lib/toast";
 import type { Scenario, TemplateRow } from "@/lib/types";
-import { FormDialog, toastApiError } from "./shared";
+import { FormDialog } from "./shared";
 
 function NewTemplateDialog({
   open,

@@ -1,5 +1,4 @@
 import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -9,7 +8,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { ApiError } from "@/lib/api";
 
 /** One dialog-form pattern for every registry resource — resist bespoke layouts. */
 export function FormDialog({
@@ -58,8 +56,4 @@ export function FormDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-export function toastApiError(error: unknown) {
-  toast.error(error instanceof ApiError ? error.message : String(error));
 }

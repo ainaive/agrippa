@@ -4,10 +4,11 @@ import { PencilIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { FaberAvatar } from "@/components/FaberAvatar";
 import { CardGridSkeleton } from "@/components/LoadingSkeletons";
 import { LocalizedTextFields } from "@/components/LocalizedTextFields";
 import { PageHeader } from "@/components/PageHeader";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -22,8 +23,9 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { lt } from "@/lib/format";
+import { toastApiError } from "@/lib/toast";
 import type { Faber } from "@/lib/types";
-import { FormDialog, toastApiError } from "./shared";
+import { FormDialog } from "./shared";
 
 type FaberDetail = Faber & { systemPrompt?: string };
 
@@ -164,14 +166,9 @@ export function FabriPage() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {(fabri.data ?? []).map((faber) => (
             <Card key={faber.id}>
-              <CardHeader className="flex-row items-start justify-between pb-2">
+              <CardHeader className="flex flex-row items-start justify-between pb-2">
                 <CardTitle className="flex items-center gap-2 text-sm">
-                  <span
-                    aria-hidden
-                    className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-base"
-                  >
-                    {faber.avatar}
-                  </span>
+                  <FaberAvatar avatar={faber.avatar} />
                   <span>
                     {lt(faber.nameI18n)}
                     <span className="ml-1.5 font-mono text-xs font-normal text-muted-foreground">
@@ -187,9 +184,7 @@ export function FabriPage() {
                 <p className="line-clamp-3 text-xs text-muted-foreground">
                   {lt(faber.personaI18n)}
                 </p>
-                {faber.status !== "active" ? (
-                  <Badge variant="outline">{t("admin:crud.disabled")}</Badge>
-                ) : null}
+                {faber.status !== "active" ? <StatusBadge status={faber.status} /> : null}
               </CardContent>
             </Card>
           ))}

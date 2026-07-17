@@ -1,13 +1,14 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { SearchIcon, SearchXIcon } from "lucide-react";
+import { SearchXIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
+import { FaberAvatar } from "@/components/FaberAvatar";
 import { CardGridSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { SearchInput } from "@/components/SearchInput";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { api } from "../lib/api";
 import { lt } from "../lib/format";
 import type { Scenario, TaskTypeSummary } from "../lib/types";
@@ -29,12 +30,7 @@ function TaskTypeCard({ taskType, projectId }: { taskType: TaskTypeSummary; proj
       <Card className="h-full transition-all hover:border-primary/40 hover:shadow-sm">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-sm">
-            <span
-              aria-hidden
-              className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10"
-            >
-              {taskType.faberAvatar ?? "🤖"}
-            </span>
+            <FaberAvatar avatar={taskType.faberAvatar} size="sm" />
             {lt(taskType.nameI18n)}
           </CardTitle>
         </CardHeader>
@@ -80,15 +76,11 @@ export function CatalogPage() {
         title={t("common:nav.catalog")}
         description={t("catalog:hint")}
         actions={
-          <div className="relative">
-            <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t("catalog:search")}
-              className="w-56 pl-8"
-            />
-          </div>
+          <SearchInput
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("catalog:search")}
+          />
         }
       />
       {loading ? (

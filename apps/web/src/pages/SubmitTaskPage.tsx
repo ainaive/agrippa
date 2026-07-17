@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
+import { FaberAvatar } from "@/components/FaberAvatar";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,8 +15,9 @@ import {
   type ParamsValue,
   TaskParamsForm,
 } from "../components/TaskParamsForm";
-import { ApiError, api } from "../lib/api";
+import { api } from "../lib/api";
 import { formatCost, lt } from "../lib/format";
+import { toastApiError } from "../lib/toast";
 import type { TaskTypeDetail } from "../lib/types";
 
 export function SubmitTaskPage() {
@@ -49,9 +50,7 @@ export function SubmitTaskPage() {
         params: { projectId, runId: result.runId },
       });
     },
-    onError: (error) => {
-      toast.error(error instanceof ApiError ? `${error.code}: ${error.message}` : String(error));
-    },
+    onError: toastApiError,
   });
 
   if (taskType.isLoading) return <DetailSkeleton />;
@@ -97,12 +96,7 @@ export function SubmitTaskPage() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <div className="flex items-center gap-2.5">
-            <span
-              aria-hidden
-              className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-lg"
-            >
-              {detail.faber?.avatar ?? "🤖"}
-            </span>
+            <FaberAvatar avatar={detail.faber?.avatar} size="lg" />
             <div className="min-w-0">
               <p className="truncate font-medium">{lt(detail.faber?.nameI18n)}</p>
               <p className="truncate text-xs text-muted-foreground">

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import {
   ActivityIcon,
+  ArrowRightIcon,
   CircleDollarSignIcon,
   CirclePauseIcon,
   InboxIcon,
@@ -12,6 +13,7 @@ import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { StatCard } from "@/components/StatCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -77,76 +79,53 @@ export function DashboardPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Card>
-          <CardHeader className="flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              {t("runs:dashboard.openTasks")}
-            </CardTitle>
-            <ActivityIcon className="size-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent className="text-2xl font-semibold">{active.length}</CardContent>
-        </Card>
+        <StatCard title={t("runs:dashboard.openTasks")} icon={ActivityIcon} value={active.length} />
 
-        <Card>
-          <CardHeader className="flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              {t("runs:dashboard.pendingApprovals")}
-            </CardTitle>
-            <CirclePauseIcon className="size-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <p className="text-2xl font-semibold">{waiting.length}</p>
-            {waiting.length > 0 ? (
-              <Link
-                to="/approvals"
-                className="mt-1 inline-block text-xs text-primary hover:underline"
-              >
-                {t("runs:approvalsInbox.title")} →
-              </Link>
-            ) : null}
-          </CardContent>
-        </Card>
+        <StatCard
+          title={t("runs:dashboard.pendingApprovals")}
+          icon={CirclePauseIcon}
+          value={waiting.length}
+        >
+          {waiting.length > 0 ? (
+            <Link
+              to="/approvals"
+              className="inline-flex items-center gap-1 text-xs text-primary transition-colors hover:underline"
+            >
+              {t("runs:approvalsInbox.title")}
+              <ArrowRightIcon className="size-3" />
+            </Link>
+          ) : null}
+        </StatCard>
 
-        <Card>
-          <CardHeader className="flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              {t("runs:dashboard.spend")}
-            </CardTitle>
-            <CircleDollarSignIcon className="size-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <p className="text-2xl font-semibold">
+        <StatCard
+          title={t("runs:dashboard.spend")}
+          icon={CircleDollarSignIcon}
+          value={
+            <>
               {formatCost(spent)}
               {costLimit ? (
                 <span className="ml-1 text-sm font-normal text-muted-foreground">
                   / {formatCost(costLimit)}
                 </span>
               ) : null}
-            </p>
-            {quotaPct !== null ? <Progress value={quotaPct} className="h-1.5" /> : null}
-            <p className="text-xs text-muted-foreground">
-              {t("runs:dashboard.tokensCount", {
-                count: usage.data?.tokens ?? 0,
-                formattedCount: (usage.data?.tokens ?? 0).toLocaleString(),
-              })}
-            </p>
-          </CardContent>
-        </Card>
+            </>
+          }
+        >
+          {quotaPct !== null ? <Progress value={quotaPct} className="h-1.5" /> : null}
+          <p className="text-xs text-muted-foreground tabular-nums">
+            {t("runs:dashboard.tokensCount", {
+              count: usage.data?.tokens ?? 0,
+              formattedCount: (usage.data?.tokens ?? 0).toLocaleString(),
+            })}
+          </p>
+        </StatCard>
 
-        <Card>
-          <CardHeader className="flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              {t("runs:dashboard.total")}
-            </CardTitle>
-            <ListChecksIcon className="size-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent className="text-2xl font-semibold">{all.length}</CardContent>
-        </Card>
+        <StatCard title={t("runs:dashboard.total")} icon={ListChecksIcon} value={all.length} />
       </div>
 
       <div className="grid items-start gap-4 lg:grid-cols-[1fr_280px]">
         <Card>
-          <CardHeader className="flex-row items-center justify-between">
+          <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>{t("runs:dashboard.recent")}</CardTitle>
             <Button variant="ghost" size="sm" asChild>
               <Link to="/projects/$projectId/tasks" params={{ projectId }}>

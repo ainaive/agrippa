@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { StatusBadge } from "@/components/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,8 +26,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { toastApiError } from "@/lib/toast";
 import type { ModelRow } from "@/lib/types";
-import { FormDialog, toastApiError } from "./shared";
+import { FormDialog } from "./shared";
 
 const TIERS = ["strong", "balanced", "fast"];
 
@@ -231,9 +233,7 @@ export function ModelsPage() {
                     ${model.inputCostPerMtok}/M in · ${model.outputCostPerMtok}/M out
                   </TableCell>
                   <TableCell>
-                    <Badge variant={model.status === "active" ? "secondary" : "outline"}>
-                      {t(model.status === "active" ? "admin:crud.active" : "admin:crud.disabled")}
-                    </Badge>
+                    <StatusBadge status={model.status} />
                   </TableCell>
                   <TableCell>
                     <Button size="icon-sm" variant="ghost" onClick={() => openDialog(model)}>

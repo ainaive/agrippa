@@ -28,14 +28,11 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError, api } from "../lib/api";
+import { api } from "../lib/api";
 import { lt } from "../lib/format";
+import { toastApiError } from "../lib/toast";
 import type { Faber, Grant, McpServerRow, Member, ModelRow, Quota, SkillRow } from "../lib/types";
 import { cn } from "../lib/utils";
-
-function toastError(err: unknown) {
-  toast.error(err instanceof ApiError ? err.message : String(err));
-}
 
 function GeneralSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation(["settings", "common"]);
@@ -64,7 +61,7 @@ function GeneralSection({ projectId }: { projectId: string }) {
       void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
       void queryClient.invalidateQueries({ queryKey: ["me"] });
     },
-    onError: toastError,
+    onError: toastApiError,
   });
 
   const archive = useMutation({
@@ -74,7 +71,7 @@ function GeneralSection({ projectId }: { projectId: string }) {
       await queryClient.invalidateQueries({ queryKey: ["me"] });
       void navigate({ to: "/" });
     },
-    onError: toastError,
+    onError: toastApiError,
   });
 
   return (
@@ -144,7 +141,7 @@ function MembersSection({ projectId }: { projectId: string }) {
       setEmail("");
       void refresh();
     },
-    onError: toastError,
+    onError: toastApiError,
   });
   const setMemberRole = useMutation({
     mutationFn: (input: { userId: string; role: string }) =>
@@ -153,13 +150,13 @@ function MembersSection({ projectId }: { projectId: string }) {
         json: { role: input.role },
       }),
     onSuccess: () => void refresh(),
-    onError: toastError,
+    onError: toastApiError,
   });
   const remove = useMutation({
     mutationFn: (userId: string) =>
       api(`/projects/${projectId}/members/${userId}`, { method: "DELETE" }),
     onSuccess: () => void refresh(),
-    onError: toastError,
+    onError: toastApiError,
   });
 
   return (
@@ -256,7 +253,7 @@ function GrantsSection({ projectId }: { projectId: string }) {
     mutationFn: (next: Array<{ resourceType: string; resourceId: string }>) =>
       api(`/projects/${projectId}/grants`, { method: "PUT", json: next }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["grants", projectId] }),
-    onError: toastError,
+    onError: toastApiError,
   });
 
   const toggle = (resourceType: string, resourceId: string) => {
@@ -358,13 +355,13 @@ function ReposSection({ projectId }: { projectId: string }) {
       setToken("");
       void queryClient.invalidateQueries({ queryKey: ["repos", projectId] });
     },
-    onError: toastError,
+    onError: toastApiError,
   });
   const remove = useMutation({
     mutationFn: (repoId: string) =>
       api(`/projects/${projectId}/repos/${repoId}`, { method: "DELETE" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repos", projectId] }),
-    onError: toastError,
+    onError: toastApiError,
   });
 
   return (
@@ -457,7 +454,7 @@ function QuotaSection({ projectId }: { projectId: string }) {
       toast.success(t("settings:quota.saved"));
       void queryClient.invalidateQueries({ queryKey: ["quota", projectId] });
     },
-    onError: toastError,
+    onError: toastApiError,
   });
 
   return (
