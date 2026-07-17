@@ -30,6 +30,8 @@ cd apps/web && bun run dev            # :5173, proxies /api → :3000
 
 The env vars can instead live in a git-ignored `.env.local` at the repo root (Bun loads it natively; shell exports take precedence). Prefer that for anything beyond a throwaway session — `AGRIPPA_SECRET_KEY` encrypts stored dev credentials, and regenerating it per shell orphans them. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+One-command alternative: `bun run dev` at the repo root starts all three processes (api + worker in watch mode, Vite) with interleaved prefixed logs. The api/worker dev scripts pass `--env-file=../../.env.local` because `bun --filter` runs each script with its workspace as cwd, outside the root file's automatic loading; the flag is a silent no-op if the file doesn't exist, so plain shell exports keep working.
+
 **Tests need Postgres.** Integration suites hit `TEST_DATABASE_URL` (default `postgres://localhost:5432/agrippa_test`) and **skip themselves** when it's unreachable — "N tests skipped" locally is not the same as green. CI provides postgres+redis services. Redis is optional everywhere: SSE falls back to DB polling, cancellation to step-boundary flag checks.
 
 ## Monorepo map & dependency direction
