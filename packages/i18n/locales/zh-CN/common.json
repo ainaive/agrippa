@@ -11,6 +11,30 @@
     "tasks": "任务",
     "settings": "设置"
   },
+  "actions": {
+    "save": "保存",
+    "cancel": "取消",
+    "delete": "删除",
+    "create": "创建",
+    "edit": "编辑",
+    "confirm": "确认",
+    "close": "关闭",
+    "retry": "重试",
+    "copy": "复制",
+    "search": "搜索"
+  },
+  "feedback": {
+    "saved": "已保存",
+    "created": "已创建",
+    "deleted": "已删除",
+    "error": "操作失败"
+  },
+  "theme": {
+    "toggle": "主题",
+    "light": "浅色",
+    "dark": "深色",
+    "system": "跟随系统"
+  },
   "firstProject": {
     "title": "创建你的第一个项目",
     "hint": "项目是团队协作的空间——统一管理资源授权、预算与代码仓库。",

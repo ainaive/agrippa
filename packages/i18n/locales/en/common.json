@@ -11,6 +11,30 @@
     "tasks": "Tasks",
     "settings": "Settings"
   },
+  "actions": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "create": "Create",
+    "edit": "Edit",
+    "confirm": "Confirm",
+    "close": "Close",
+    "retry": "Retry",
+    "copy": "Copy",
+    "search": "Search"
+  },
+  "feedback": {
+    "saved": "Changes saved",
+    "created": "Created",
+    "deleted": "Deleted",
+    "error": "Something went wrong"
+  },
+  "theme": {
+    "toggle": "Theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
+  },
   "firstProject": {
     "title": "Create your first project",
     "hint": "Projects are where your team collaborates — they scope resources, budgets, and repositories.",
