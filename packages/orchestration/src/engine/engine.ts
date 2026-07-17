@@ -552,7 +552,12 @@ class RunEngine {
       subagents,
       skills,
       mcpServers,
-      toolPolicy: { writeRoot: this.workspaceDir },
+      // no workspace repo → scratch dir with nothing to protect (readWrite);
+      // a repo checkout carries the template's declared access (default readOnly)
+      toolPolicy: {
+        writeRoot: this.workspaceDir,
+        access: this.template.spec.workspace?.access ?? "readWrite",
+      },
       limits: { maxTurns: 50 },
       workspaceDir: this.workspaceDir,
       resumeSessionId: row.executorSessionId ?? undefined,

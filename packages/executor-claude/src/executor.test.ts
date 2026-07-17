@@ -36,7 +36,7 @@ function makeRequest(overrides: Partial<StepExecutionRequest> = {}): StepExecuti
     mcpServers: [
       { slug: "github", transport: "http", url: "https://mcp.example/", headers: { a: "b" } },
     ],
-    toolPolicy: { writeRoot: workspaceDir },
+    toolPolicy: { writeRoot: workspaceDir, access: "readWrite" },
     limits: { maxTurns: 50 },
     workspaceDir,
     priorContext: [{ stepId: "earlier", output: "earlier result", artifactKeys: [] }],
@@ -99,30 +99,58 @@ describe("claude executor option mapping (docs/design/03)", () => {
     expect(prompt).toContain(".agrippa/artifacts/fix-report.md");
   });
 
-  it("canUseTool denies writes outside the workspace and allows inside", async () => {
-    const req = makeRequest();
-    const { options } = buildQueryArgs(req, makeCtx(), new AbortController());
-    const canUseTool = options.canUseTool;
-    if (!canUseTool) throw new Error("canUseTool missing");
+  it("canUseTool contains writes and shell per the workspace policy", async () => {
+    const ctx = { signal: new AbortController().signal, suggestions: [] } as never;
+    const rwReq = makeRequest();
+    const rw = buildQueryArgs(rwReq, makeCtx(), new AbortController()).options.canUseTool;
+    if (!rw) throw new Error("canUseTool missing");
 
-    const denied = await canUseTool("Write", { file_path: "/etc/passwd" }, {
-      signal: new AbortController().signal,
-      suggestions: [],
-    } as never);
-    expect(denied?.behavior).toBe("deny");
-
-    const allowed = await canUseTool(
-      "Write",
-      { file_path: path.join(req.workspaceDir, "src/x.ts") },
-      { signal: new AbortController().signal, suggestions: [] } as never,
+    // read-write: writes inside the workspace allowed, escaping writes denied
+    expect((await rw("Write", { file_path: "/etc/passwd" }, ctx))?.behavior).toBe("deny");
+    expect(
+      (await rw("Write", { file_path: path.join(rwReq.workspaceDir, "src/x.ts") }, ctx))?.behavior,
+    ).toBe("allow");
+    // sibling-prefix directory must not pass the containment check
+    expect((await rw("Write", { file_path: `${rwReq.workspaceDir}-evil/x` }, ctx))?.behavior).toBe(
+      "deny",
     );
-    expect(allowed?.behavior).toBe("allow");
+    // read-write: shell is permitted (OS-sandboxed when available)
+    expect((await rw("Bash", { command: "ls" }, ctx))?.behavior).toBe("allow");
 
-    const bash = await canUseTool("Bash", { command: "ls" }, {
-      signal: new AbortController().signal,
-      suggestions: [],
-    } as never);
-    expect(bash?.behavior).toBe("allow");
+    // read-only: shell denied, repo writes denied, artifact writes allowed
+    const roReq = makeRequest();
+    roReq.toolPolicy = { writeRoot: roReq.workspaceDir, access: "readOnly" };
+    const ro = buildQueryArgs(roReq, makeCtx(), new AbortController()).options.canUseTool;
+    if (!ro) throw new Error("canUseTool missing");
+    expect((await ro("Bash", { command: "ls" }, ctx))?.behavior).toBe("deny");
+    expect(
+      (await ro("Write", { file_path: path.join(roReq.workspaceDir, "src/x.ts") }, ctx))?.behavior,
+    ).toBe("deny");
+    expect(
+      (
+        await ro(
+          "Write",
+          { file_path: path.join(roReq.workspaceDir, ".agrippa/artifacts/report.md") },
+          ctx,
+        )
+      )?.behavior,
+    ).toBe("allow");
+  });
+
+  it("scrubs platform secrets from the agent subprocess env", () => {
+    const req = makeRequest();
+    const prev = process.env.AGRIPPA_SECRET_KEY;
+    process.env.AGRIPPA_SECRET_KEY = "master-key";
+    try {
+      const { options } = buildQueryArgs(req, makeCtx(), new AbortController());
+      expect(options.env?.AGRIPPA_SECRET_KEY).toBeUndefined();
+      expect(options.env?.DATABASE_URL).toBeUndefined();
+      // strict MCP + no repo settings/hooks honored
+      expect(options.strictMcpConfig).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AGRIPPA_SECRET_KEY;
+      else process.env.AGRIPPA_SECRET_KEY = prev;
+    }
   });
 });
 

@@ -7,6 +7,21 @@ import { eq } from "drizzle-orm";
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? path.join(tmpdir(), "agrippa-workspaces");
 
+/**
+ * Repo-supplied agent configuration that would otherwise be honored by the SDK
+ * project setting source: hooks run shell, settings grant tool permissions, and
+ * .mcp.json wires servers. A checked-out repo is untrusted, so these are removed
+ * before any agent runs. Registry skills are re-materialized into .claude/skills
+ * afterwards (docs/design/03 §Sandboxing).
+ */
+const REPO_CONFIG_TO_STRIP = [".claude", ".mcp.json"];
+
+async function sanitizeWorkspace(dir: string): Promise<void> {
+  for (const entry of REPO_CONFIG_TO_STRIP) {
+    await rm(path.join(dir, entry), { recursive: true, force: true });
+  }
+}
+
 async function git(args: string[], cwd?: string): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
@@ -74,6 +89,7 @@ export class GitWorkspaceManager implements WorkspaceManager {
     await git(["clone", "--depth", "50", "--branch", ref, cloneUrl, dir]);
     // scrub the credential from the remote before any agent code runs
     await git(["remote", "set-url", "origin", connection.url], dir);
+    await sanitizeWorkspace(dir);
   }
 
   async diff(runId: string): Promise<string> {

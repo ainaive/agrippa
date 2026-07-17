@@ -18,4 +18,10 @@ ENV NODE_ENV=production
 ENV AGRIPPA_TEMPLATES_DIR=/app/templates
 ENV WORKSPACE_ROOT=/work/runs
 ENV ARTIFACT_STORAGE_ROOT=/work/artifacts
+
+# Run agent code as a non-root user so a shell tool call cannot reach the
+# container filesystem or other roots (docs/design/03 §Sandboxing). Chowning
+# /work here makes a freshly-created named volume inherit `bun` ownership.
+RUN mkdir -p /work/runs /work/artifacts && chown -R bun:bun /app /work
+USER bun
 CMD ["bun", "apps/worker/src/index.ts"]

@@ -1,11 +1,13 @@
 import { readdirSync } from "node:fs";
 import path from "node:path";
 import type { ArtifactKind } from "@agrippa/core";
-import type {
-  ExecutionContext,
-  Executor,
-  ExecutorEvent,
-  StepExecutionRequest,
+import {
+  buildScrubbedEnv,
+  type ExecutionContext,
+  type Executor,
+  type ExecutorEvent,
+  evaluateToolCall,
+  type StepExecutionRequest,
 } from "@agrippa/executor-core";
 import { type Options, type SDKMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
@@ -83,15 +85,27 @@ export function buildQueryArgs(
     }
   }
 
-  const writeRoot = path.resolve(req.toolPolicy.writeRoot);
+  // Only the skills we materialized are enabled — never whatever the checked-out
+  // repo happens to ship under .claude/skills (docs/design/03 §Sandboxing).
+  const skillNames = req.skills.map((s) => s.slug.split("/").pop() as string);
   const options: Options = {
     cwd: req.workspaceDir,
     model: req.model.providerModelId,
     systemPrompt: { type: "preset", preset: "claude_code", append: req.systemPrompt },
     agents: Object.keys(agents).length > 0 ? agents : undefined,
     mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-    // skills load from <workspace>/.claude/skills via project settings
+    // skills load from <workspace>/.claude/skills; 'project' also pulls CLAUDE.md.
+    // The worker strips repo-supplied .claude settings/hooks before this runs, so
+    // 'project' cannot load attacker-controlled hooks or permission overrides.
     settingSources: ["project"],
+    skills: skillNames.length > 0 ? skillNames : undefined,
+    // ignore any .mcp.json in the checked-out repo — only our resolved servers
+    strictMcpConfig: true,
+    // OS-level command isolation when the host supports it (bubblewrap); degrade
+    // gracefully elsewhere (e.g. macOS dev) rather than refusing to run
+    sandbox: { enabled: true, failIfUnavailable: false },
+    // secrets (master key, datastore URLs) must not reach the agent subprocess
+    env: buildScrubbedEnv(),
     maxTurns: req.limits.maxTurns,
     includePartialMessages: true,
     resume: req.resumeSessionId,
@@ -100,17 +114,13 @@ export function buildQueryArgs(
     abortController,
     permissionMode: "acceptEdits",
     canUseTool: async (toolName, input) => {
-      // deny writes escaping the run workspace; everything else proceeds
-      const target = (input.file_path ?? input.path ?? input.notebook_path) as string | undefined;
-      if (target && ["Write", "Edit", "NotebookEdit"].includes(toolName)) {
-        const resolved = path.resolve(req.workspaceDir, target);
-        if (!resolved.startsWith(writeRoot)) {
-          return {
-            behavior: "deny",
-            message: `writes outside the run workspace are not permitted (${target})`,
-          };
-        }
-      }
+      const decision = evaluateToolCall(
+        req.toolPolicy,
+        req.workspaceDir,
+        toolName,
+        input as Record<string, unknown>,
+      );
+      if (decision.behavior === "deny") return decision;
       return { behavior: "allow", updatedInput: input };
     },
   };
