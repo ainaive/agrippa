@@ -75,10 +75,11 @@ describe("evaluateToolCall — read-only workspace", () => {
 });
 
 describe("buildScrubbedEnv", () => {
-  it("drops platform secrets but keeps allow-listed SDK auth and system vars", () => {
+  it("allow-lists only SDK auth + system vars, dropping everything else", () => {
     const env = buildScrubbedEnv({
       PATH: "/usr/bin",
       HOME: "/home/bun",
+      LANG: "en_US.UTF-8",
       ANTHROPIC_API_KEY: "sk-ant-xxx",
       ANTHROPIC_BASE_URL: "https://api.anthropic.com",
       AGRIPPA_SECRET_KEY: "master",
@@ -87,14 +88,20 @@ describe("buildScrubbedEnv", () => {
       REDIS_URL: "redis://x",
       GITHUB_TOKEN: "ghp_x",
       SOME_PASSWORD: "p",
-      // namespaced secrets must NOT ride along just because of their prefix
       ANTHROPIC_PRIVATE_KEY: "leak",
       CLAUDE_ADMIN_TOKEN: "leak",
+      // a code-injection vector that a name-heuristic denylist would have missed
+      NODE_OPTIONS: "--require /tmp/evil.js",
+      // an arbitrary non-secret var still must not pass through
+      SOME_INTERNAL_URL: "http://internal",
     });
+    // kept: system essentials + explicit SDK auth
     expect(env.PATH).toBe("/usr/bin");
     expect(env.HOME).toBe("/home/bun");
+    expect(env.LANG).toBe("en_US.UTF-8");
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
     expect(env.ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com");
+    // dropped: secrets, namespaced secrets, NODE_OPTIONS, and any unlisted var
     expect(env.AGRIPPA_SECRET_KEY).toBeUndefined();
     expect(env.DATABASE_URL).toBeUndefined();
     expect(env.BETTER_AUTH_SECRET).toBeUndefined();
@@ -103,6 +110,8 @@ describe("buildScrubbedEnv", () => {
     expect(env.SOME_PASSWORD).toBeUndefined();
     expect(env.ANTHROPIC_PRIVATE_KEY).toBeUndefined();
     expect(env.CLAUDE_ADMIN_TOKEN).toBeUndefined();
+    expect(env.NODE_OPTIONS).toBeUndefined();
+    expect(env.SOME_INTERNAL_URL).toBeUndefined();
   });
 });
 

@@ -168,9 +168,37 @@ const SDK_AUTH_ALLOW = new Set([
 ]);
 
 /**
- * Platform secrets that must never reach the agent subprocess: leaking
- * `AGRIPPA_SECRET_KEY` decrypts every stored credential, and the datastore URLs
- * grant direct access to run/tenant data.
+ * System variables the CLI/agent legitimately needs (locale, temp dir, TLS trust
+ * roots). Notably absent: `NODE_OPTIONS`/`BUN_*`, which can inject code into the
+ * subprocess, and anything not enumerated here.
+ */
+const SYSTEM_ENV_ALLOW = new Set([
+  "PATH",
+  "HOME",
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "TERM",
+  "USER",
+  "LOGNAME",
+  "HOSTNAME",
+  "PWD",
+  "SHELL",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+  "CURL_CA_BUNDLE",
+]);
+
+/**
+ * Platform secrets whose VALUES are redacted from event payloads (below). The
+ * env allow-list already keeps these out of the subprocess; this set feeds the
+ * redactor so their values can't be echoed back through SSE either.
  */
 const SECRET_ENV_KEYS = new Set([
   "AGRIPPA_SECRET_KEY",
@@ -180,18 +208,13 @@ const SECRET_ENV_KEYS = new Set([
   "REDIS_URL",
 ]);
 
-/** Heuristic secret-name match (applied to every non-allowlisted variable). */
-function looksSecret(key: string): boolean {
-  return /(SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL|_TOKEN$|_KEY$)/i.test(key);
-}
-
 /**
- * Build the subprocess environment for the agent, dropping platform secrets.
- * The SDK's `env` option REPLACES the child environment wholesale, so we start
- * from the worker env and remove what the agent must not see, rather than
- * allow-listing (which would starve the CLI of PATH/HOME/locale it needs). The
- * SDK auth variables are kept via an explicit allowlist so the secret heuristic
- * doesn't drop them.
+ * Build the subprocess environment for the agent. The SDK's `env` option
+ * REPLACES the child environment wholesale, so we **allow-list**: only the SDK
+ * auth variables and a fixed set of system essentials pass through, and
+ * everything else — platform secrets, DSNs, `NODE_OPTIONS`, and any future
+ * variable — is dropped. (A denylist would silently forward the next injection
+ * vector or credential that doesn't match a name heuristic.)
  */
 export function buildScrubbedEnv(
   source: Record<string, string | undefined> = process.env,
@@ -199,12 +222,7 @@ export function buildScrubbedEnv(
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
-    if (SDK_AUTH_ALLOW.has(key)) {
-      out[key] = value;
-      continue;
-    }
-    if (SECRET_ENV_KEYS.has(key) || looksSecret(key)) continue;
-    out[key] = value;
+    if (SDK_AUTH_ALLOW.has(key) || SYSTEM_ENV_ALLOW.has(key)) out[key] = value;
   }
   return out;
 }

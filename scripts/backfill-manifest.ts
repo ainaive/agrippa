@@ -6,9 +6,9 @@ import { eq } from "drizzle-orm";
 /**
  * Backfill runs.resource_manifest for runs that predate migration 0002.
  *
- * Migration 0002 defaults the manifest to `{}`; because the engine resolves
- * skills/MCP only from the manifest, a run queued or in flight before the
- * migration would silently lose its resources. This recomputes each such
+ * Migration 0002 backfilled the manifest to an empty `{mcpServers:[],skills:[]}`;
+ * because the engine resolves skills/MCP only from the manifest, a run queued or
+ * in flight before the migration would silently lose its resources. This recomputes each such
  * (non-terminal) run's manifest **from the project's grants** — exactly what
  * `authorizeResources` produces at submit — rather than granting every template
  * resource. That makes it correct for a legacy row and idempotent for a valid
@@ -40,8 +40,9 @@ let backfilled = 0;
 let skipped = 0;
 for (const run of rows) {
   if (isTerminalRunStatus(run.status as RunStatus)) continue;
-  if (run.resourceManifest.mcpServers.length > 0 || run.resourceManifest.skills.length > 0)
-    continue;
+  // defensive against a hand-set `{}` row: an already-populated manifest is left alone
+  const manifest = run.resourceManifest ?? { mcpServers: [], skills: [] };
+  if ((manifest.mcpServers?.length ?? 0) > 0 || (manifest.skills?.length ?? 0) > 0) continue;
 
   const [version] = await db
     .select({ compiled: templateVersions.compiled })
