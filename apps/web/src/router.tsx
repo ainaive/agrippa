@@ -1,7 +1,17 @@
-import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
-import { AdminPage } from "./pages/AdminPage";
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  redirect,
+} from "@tanstack/react-router";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AdminLayout } from "./pages/admin/AdminLayout";
+import { FabriPage } from "./pages/admin/FabriPage";
+import { McpServersPage } from "./pages/admin/McpServersPage";
+import { ModelsPage } from "./pages/admin/ModelsPage";
+import { SkillsPage } from "./pages/admin/SkillsPage";
+import { TemplatesListPage } from "./pages/admin/TemplatesListPage";
 import { CatalogPage } from "./pages/CatalogPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { HomeRedirect } from "./pages/HomeRedirect";
@@ -51,7 +61,16 @@ const adminRoute = createRoute({
 const adminIndexRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/",
-  component: AdminPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/admin/templates" });
+  },
+});
+
+const adminTemplatesRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/templates",
+  component: TemplatesListPage,
+  staticData: { crumb: "nav.templates" },
 });
 
 const templateEditorRoute = createRoute({
@@ -59,6 +78,34 @@ const templateEditorRoute = createRoute({
   path: "/templates/$templateId",
   component: TemplateEditorPage,
   staticData: { crumb: "nav.templates" },
+});
+
+const adminFabriRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/fabri",
+  component: FabriPage,
+  staticData: { crumb: "nav.fabri" },
+});
+
+const adminModelsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/models",
+  component: ModelsPage,
+  staticData: { crumb: "nav.models" },
+});
+
+const adminSkillsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/skills",
+  component: SkillsPage,
+  staticData: { crumb: "nav.skills" },
+});
+
+const adminMcpRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/mcp-servers",
+  component: McpServersPage,
+  staticData: { crumb: "nav.mcp" },
 });
 
 const projectRoute = createRoute({
@@ -114,7 +161,15 @@ const routeTree = rootRoute.addChildren([
   shellRoute.addChildren([
     homeRoute,
     approvalsRoute,
-    adminRoute.addChildren([adminIndexRoute, templateEditorRoute]),
+    adminRoute.addChildren([
+      adminIndexRoute,
+      adminTemplatesRoute,
+      templateEditorRoute,
+      adminFabriRoute,
+      adminModelsRoute,
+      adminSkillsRoute,
+      adminMcpRoute,
+    ]),
     projectRoute.addChildren([
       dashboardRoute,
       catalogRoute,

@@ -1,5 +1,13 @@
 import { Link, useMatchRoute } from "@tanstack/react-router";
-import { CircleCheckBigIcon, HammerIcon, ShieldIcon } from "lucide-react";
+import {
+  BotIcon,
+  CircleCheckBigIcon,
+  CpuIcon,
+  FileCode2Icon,
+  HammerIcon,
+  PlugIcon,
+  WrenchIcon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { projectNav } from "@/components/shell/nav";
 import { ProjectSwitcher } from "@/components/shell/ProjectSwitcher";
@@ -104,25 +112,42 @@ export function AppSidebar({ currentProjectId }: { currentProjectId: string | nu
                   </SidebarMenuBadge>
                 ) : null}
               </SidebarMenuItem>
-              {me.orgRole === "org_admin" ? (
-                <SidebarMenuItem>
-                  <SidebarMenuButton
-                    asChild
-                    tooltip={t("nav.admin")}
-                    isActive={Boolean(matchRoute({ to: "/admin", fuzzy: true }))}
-                  >
-                    <Link to="/admin">
-                      <ShieldIcon />
-                      <span>{t("nav.admin")}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ) : null}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+        {me.orgRole === "org_admin" ? (
+          <SidebarGroup>
+            <SidebarGroupLabel>{t("nav.admin")}</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {adminNav.map((item) => (
+                  <SidebarMenuItem key={item.key}>
+                    <SidebarMenuButton
+                      asChild
+                      tooltip={t(`nav.${item.key}`)}
+                      isActive={Boolean(matchRoute({ to: item.to, fuzzy: true }))}
+                    >
+                      <Link to={item.to}>
+                        <item.icon />
+                        <span>{t(`nav.${item.key}`)}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ) : null}
       </SidebarContent>
       <SidebarRail />
     </Sidebar>
   );
 }
+
+const adminNav = [
+  { key: "templates", icon: FileCode2Icon, to: "/admin/templates" },
+  { key: "fabri", icon: BotIcon, to: "/admin/fabri" },
+  { key: "models", icon: CpuIcon, to: "/admin/models" },
+  { key: "skills", icon: WrenchIcon, to: "/admin/skills" },
+  { key: "mcp", icon: PlugIcon, to: "/admin/mcp-servers" },
+];
