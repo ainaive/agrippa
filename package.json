@@ -23,8 +23,8 @@
     "@agrippa/db": "workspace:*",
     "@agrippa/orchestration": "workspace:*",
     "@biomejs/biome": "^2.0.0",
-    "@commitlint/cli": "^19.8.0",
-    "@commitlint/config-conventional": "^19.8.0",
+    "@commitlint/cli": "^21.2.1",
+    "@commitlint/config-conventional": "^21.2.0",
     "@types/bun": "^1.2.0",
     "typescript": "^5.9.0"
   }
