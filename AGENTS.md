@@ -28,6 +28,8 @@ bun apps/worker/src/index.ts          # pg-boss consumers + engine
 cd apps/web && bun run dev            # :5173, proxies /api → :3000
 ```
 
+The env vars can instead live in a git-ignored `.env.local` at the repo root (Bun loads it natively; shell exports take precedence). Prefer that for anything beyond a throwaway session — `AGRIPPA_SECRET_KEY` encrypts stored dev credentials, and regenerating it per shell orphans them. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 **Tests need Postgres.** Integration suites hit `TEST_DATABASE_URL` (default `postgres://localhost:5432/agrippa_test`) and **skip themselves** when it's unreachable — "N tests skipped" locally is not the same as green. CI provides postgres+redis services. Redis is optional everywhere: SSE falls back to DB polling, cancellation to step-boundary flag checks.
 
 ## Monorepo map & dependency direction

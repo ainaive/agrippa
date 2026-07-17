@@ -9,15 +9,19 @@ Requirements: **Bun ≥ 1.3**, **PostgreSQL ≥ 17** (local install or `docker c
 ```sh
 bun install
 createdb agrippa && createdb agrippa_test          # or let compose provide them
-export DATABASE_URL=postgres://localhost:5432/agrippa
-export AGRIPPA_SECRET_KEY=$(openssl rand -base64 32)
-export AGRIPPA_EXECUTOR=fake                        # token-free demo executor
+cat > .env.local <<EOF
+DATABASE_URL=postgres://localhost:5432/agrippa
+AGRIPPA_SECRET_KEY=$(openssl rand -base64 32)
+AGRIPPA_EXECUTOR=fake                               # token-free demo executor
+EOF
 bun apps/api/src/index.ts                           # migrates + seeds on boot
 bun apps/worker/src/index.ts
 cd apps/web && bun run dev                          # http://localhost:5173
 ```
 
-The first account you sign up becomes the org admin. Real agent runs need `AGRIPPA_EXECUTOR=claude-agent-sdk` plus `ANTHROPIC_API_KEY` on the worker.
+Bun loads `.env` / `.env.local` natively from the directory you start it in — no dotenv, no `export`s — and `.env.local` is git-ignored, so secrets can't be committed. Create it **once and keep it**: `AGRIPPA_SECRET_KEY` encrypts credentials you store in dev (repo tokens, MCP auth), and a fresh key per shell — the old `export $(openssl rand …)` workflow — silently orphans them. Plain `export`s still work if you prefer; they take precedence over the file.
+
+The first account you sign up becomes the org admin. Real agent runs need `AGRIPPA_EXECUTOR=claude-agent-sdk` plus `ANTHROPIC_API_KEY` (worker env).
 
 ## Quality gates
 
