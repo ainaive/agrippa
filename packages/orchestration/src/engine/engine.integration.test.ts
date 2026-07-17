@@ -68,6 +68,8 @@ type DepsOptions = { mcpServers?: string[] };
 type FixtureOptions = {
   params?: Record<string, unknown>;
   quota?: { costLimitUsd?: number; tokenLimit?: number };
+  /** Override the run's authorized-resource manifest (default: all template resources). */
+  resourceManifest?: { mcpServers: string[]; skills: string[] };
 };
 
 async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -166,6 +168,10 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
       executorId: "fake",
       paramsSnapshot: params,
       modelResolution,
+      resourceManifest: options.resourceManifest ?? {
+        mcpServers: template.spec.resources.mcpServers.map((m) => m.ref),
+        skills: template.spec.resources.skills.map((s) => s.ref.split("@")[0] as string),
+      },
       budget: template.spec.budgets as unknown as Record<string, unknown>,
       createdBy: user.id,
     })
@@ -503,6 +509,27 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
       .from(runSteps)
       .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "open-pr")));
     expect(rows[0]?.status).toBe("skipped");
+  });
+
+  it("skips open-pr when the optional MCP server is not authorized, even if it exists", async () => {
+    // manifest omits github: the project has no grant. The server is otherwise
+    // available (materializer has it), but an ungranted optional resource must
+    // never be resolved — else the run would receive the global GitHub token.
+    const { db, runId, makeDeps } = await setupFixture({
+      params: { autoOpenPr: true },
+      resourceManifest: { mcpServers: [], skills: [] },
+    });
+    await executeRun(makeDeps(HAPPY_SCRIPT, { mcpServers: ["github"] }), runId);
+    await approve(db, runId);
+    const deps = makeDeps(HAPPY_SCRIPT, { mcpServers: ["github"] });
+    expect(await executeRun(deps, runId)).toBe("succeeded");
+    const rows = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "open-pr")));
+    expect(rows[0]?.status).toBe("skipped");
+    // the executor never saw the github server
+    expect(deps.executor.requests.some((r) => r.stepId === "open-pr")).toBe(false);
   });
 
   it("streams live events over the bus while executing", async () => {

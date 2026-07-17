@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "resource_manifest" jsonb DEFAULT '{"mcpServers":[],"skills":[]}'::jsonb NOT NULL;

@@ -13,6 +13,8 @@ export type WorkspaceSpec = {
   repo: unknown;
   ref?: string;
   access: "readOnly" | "readWrite";
+  /** The run's project — repo connections are loaded scoped to it, never by raw id. */
+  projectId: string;
 };
 
 export interface WorkspaceManager {

@@ -18,11 +18,12 @@ import {
   templateVersions,
 } from "@agrippa/db";
 import {
+  authorizeResources,
   buildParamsValidator,
   resolveModelRoles,
   SubmitError,
   type TemplateDoc,
-  verifyResourceGrants,
+  verifyRepoRefs,
 } from "@agrippa/orchestration";
 import { and, asc, desc, eq, gt, max } from "drizzle-orm";
 import { Hono } from "hono";
@@ -108,11 +109,15 @@ export const executionRoutes = new Hono<AppEnv>()
       await assertQuotaHeadroom(db, projectId);
 
       try {
+        // every repoRef must reference a connection owned by this project
+        await verifyRepoRefs(db, projectId, compiled.spec.inputs, parsed.data);
+
         const skillRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
         const mcpRows = await db
           .select({ id: mcpServers.id, slug: mcpServers.slug })
           .from(mcpServers);
-        await verifyResourceGrants(db, projectId, compiled, {
+        // required grants enforced; optional resources pinned only when granted
+        const resourceManifest = await authorizeResources(db, projectId, compiled, {
           skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
           mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
         });
@@ -142,6 +147,7 @@ export const executionRoutes = new Hono<AppEnv>()
               executorId: DEFAULT_EXECUTOR,
               paramsSnapshot: parsed.data,
               modelResolution,
+              resourceManifest,
               budget: compiled.spec.budgets as unknown as Record<string, unknown>,
               createdBy: user.id,
             })
@@ -239,6 +245,7 @@ export const executionRoutes = new Hono<AppEnv>()
         executorId: latest.executorId,
         paramsSnapshot: latest.paramsSnapshot,
         modelResolution: latest.modelResolution,
+        resourceManifest: latest.resourceManifest,
         budget: latest.budget,
         createdBy: c.var.user.id,
       })

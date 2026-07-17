@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { type Db, decryptSecret, loadSecretKey, repoConnections, secrets } from "@agrippa/db";
 import type { WorkspaceManager, WorkspaceSpec } from "@agrippa/orchestration";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? path.join(tmpdir(), "agrippa-workspaces");
 
@@ -61,10 +61,17 @@ export class GitWorkspaceManager implements WorkspaceManager {
     const repoRef = spec.repo as { repoConnectionId?: string } | null;
     if (!repoRef?.repoConnectionId) throw new Error("workspace.checkout: repoRef missing");
 
+    // scope by project so a run can never clone another project's/tenant's repo
+    // even if its params carry a foreign repoConnectionId
     const [connection] = await this.db
       .select()
       .from(repoConnections)
-      .where(eq(repoConnections.id, repoRef.repoConnectionId));
+      .where(
+        and(
+          eq(repoConnections.id, repoRef.repoConnectionId),
+          eq(repoConnections.projectId, spec.projectId),
+        ),
+      );
     if (!connection) throw new Error("workspace.checkout: repo connection not found");
 
     let cloneUrl = connection.url;

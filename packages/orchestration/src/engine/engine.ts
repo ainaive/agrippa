@@ -368,9 +368,16 @@ class RunEngine {
       return;
     }
     if (step.requires) {
-      const { missing } = await this.deps.resources.mcpServers(step.requires.mcpServers);
-      if (missing.length > 0) {
-        await this.markSkipped(phase, step, `missing optional resources: ${missing.join(", ")}`);
+      const authorized = this.authorizedMcpRefs(step.requires.mcpServers);
+      const ungranted = step.requires.mcpServers.filter((ref) => !authorized.includes(ref));
+      const { missing } = await this.deps.resources.mcpServers(authorized);
+      const unavailable = [...ungranted, ...missing];
+      if (unavailable.length > 0) {
+        await this.markSkipped(
+          phase,
+          step,
+          `missing optional resources: ${unavailable.join(", ")}`,
+        );
         return;
       }
     }
@@ -424,7 +431,12 @@ class RunEngine {
         ? evaluateExpression(wrapped[1] as string, this.expressionContext())
         : spec.repo;
       const ref = spec.ref ? interpolate(spec.ref, this.expressionContext()) : undefined;
-      await this.deps.workspace.checkout(this.run.id, { repo, ref, access: spec.access });
+      await this.deps.workspace.checkout(this.run.id, {
+        repo,
+        ref,
+        access: spec.access,
+        projectId: this.run.projectId,
+      });
       await this.emit("workspace.ready", { ref });
     }
   }
@@ -522,8 +534,15 @@ class RunEngine {
         model: modelFor(s.model.role),
       }));
 
-    const skills = await this.deps.resources.skills(step.skills, this.workspaceDir);
-    const { resolved: mcpServers, missing } = await this.deps.resources.mcpServers(step.mcpServers);
+    // resolve only what the run is authorized for — ungranted optional
+    // resources are dropped here, never resolved from the global registry
+    const skills = await this.deps.resources.skills(
+      this.authorizedSkillRefs(step.skills),
+      this.workspaceDir,
+    );
+    const { resolved: mcpServers, missing } = await this.deps.resources.mcpServers(
+      this.authorizedMcpRefs(step.mcpServers),
+    );
     const optionalRefs = new Set(
       this.template.spec.resources.mcpServers.filter((m) => m.optional).map((m) => m.ref),
     );
@@ -567,6 +586,18 @@ class RunEngine {
         kind: this.template.spec.outputs.artifacts.find((a) => a.key === key)?.kind ?? "markdown",
       })),
     };
+  }
+
+  /** MCP refs the run is authorized to use (pinned at submit; see resolve.authorizeResources). */
+  private authorizedMcpRefs(refs: string[]): string[] {
+    const allowed = new Set(this.run.resourceManifest.mcpServers);
+    return refs.filter((ref) => allowed.has(ref));
+  }
+
+  /** Skill refs whose slug the run is authorized to use. */
+  private authorizedSkillRefs(refs: string[]): string[] {
+    const allowed = new Set(this.run.resourceManifest.skills);
+    return refs.filter((ref) => allowed.has(ref.split("@")[0] as string));
   }
 
   private expressionContext(): Record<string, unknown> {

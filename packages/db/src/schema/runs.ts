@@ -58,6 +58,12 @@ export const runs = pgTable(
     executorId: text("executor_id").notNull(),
     paramsSnapshot: jsonb("params_snapshot").$type<Record<string, unknown>>().notNull(),
     modelResolution: jsonb("model_resolution").$type<Record<string, unknown>>().notNull(),
+    // authorized skills/MCP slugs, pinned at submit from project grants; the
+    // worker resolves resources only from this set (docs/design/04, ADR-0005)
+    resourceManifest: jsonb("resource_manifest")
+      .$type<{ mcpServers: string[]; skills: string[] }>()
+      .notNull()
+      .default({ mcpServers: [], skills: [] }),
     budget: jsonb("budget").$type<Record<string, unknown>>().notNull().default({}),
     usageTotals: jsonb("usage_totals").$type<Record<string, unknown>>().notNull().default({}),
     workspaceRef: text("workspace_ref"),

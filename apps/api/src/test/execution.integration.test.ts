@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
-import { runs } from "@agrippa/db";
+import { repoConnections, runs } from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import {
   type EngineDeps,
@@ -43,6 +43,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   let admin: TestClient;
   let viewer: TestClient;
   let projectId: string;
+  let repoConnectionId: string;
   let taskTypeId: string;
   let taskId: string;
   let runId: string;
@@ -85,6 +86,13 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       json: { email: "vera@example.com", role: "viewer" },
     });
 
+    // a repo connection owned by this project — submissions must reference one
+    const [conn] = await db
+      .insert(repoConnections)
+      .values({ projectId, provider: "github", url: "https://github.com/acme/widget.git" })
+      .returning();
+    repoConnectionId = conn?.id as string;
+
     const types = await jsonOf<Array<{ id: string; slug: string }>>(
       await admin.request("/api/v1/scenarios/software-development/task-types"),
     );
@@ -96,7 +104,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     title: "Fix the widget",
     params: {
       bugReport: "It crashes",
-      repo: { repoConnectionId: Bun.randomUUIDv7() },
+      repo: { repoConnectionId },
     },
   });
 
@@ -139,6 +147,33 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       json: submitBody(),
     });
     expect(res.status).toBe(403);
+  });
+
+  it("refuses a repoConnectionId belonging to another project", async () => {
+    // a connection owned by a different project — cross-tenant IDOR attempt
+    const otherId = (
+      await jsonOf<{ id: string }>(
+        await admin.request("/api/v1/projects", {
+          method: "POST",
+          json: { slug: "other", name: "Other" },
+        }),
+      )
+    ).id;
+    const [foreign] = await db
+      .insert(repoConnections)
+      .values({ projectId: otherId, provider: "github", url: "https://github.com/acme/secret.git" })
+      .returning();
+
+    const res = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId,
+        title: "IDOR",
+        params: { bugReport: "It crashes", repo: { repoConnectionId: foreign?.id } },
+      },
+    });
+    expect(res.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(res)).code).toBe("repo_not_in_project");
   });
 
   it("accepts a valid submission and enqueues the run", async () => {
