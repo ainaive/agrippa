@@ -23,7 +23,7 @@ import {
   type StepExecutionRequest,
   type UsageDelta,
 } from "@agrippa/executor-core";
-import { and, eq, max, sql } from "drizzle-orm";
+import { and, eq, gte, max, ne, sql } from "drizzle-orm";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
 import type { ModelResolution } from "../resolve";
 import {
@@ -250,6 +250,13 @@ class RunEngine {
     this.workspaceDir = await this.deps.workspace.ensureDir(run.id);
   }
 
+  /**
+   * Remaining project quota headroom for *this* run, refreshed at each step
+   * boundary so concurrent runs see each other's spend. Counts the current
+   * month (matching the submit-time gate in apps/api usage.ts) and excludes
+   * this run's own persisted usage — the meter already carries that, so
+   * including it here would double-count on resume.
+   */
   private async quotaHeadroom(): Promise<{ costUsd?: number; tokens?: number }> {
     const [quota] = await this.db
       .select()
@@ -262,7 +269,13 @@ class RunEngine {
         tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
       })
       .from(tokenUsage)
-      .where(eq(tokenUsage.projectId, this.run.projectId));
+      .where(
+        and(
+          eq(tokenUsage.projectId, this.run.projectId),
+          ne(tokenUsage.runId, this.run.id),
+          gte(tokenUsage.occurredAt, sql`date_trunc('month', now())`),
+        ),
+      );
     const headroom: { costUsd?: number; tokens?: number } = {};
     if (quota.costLimitUsd !== null) {
       headroom.costUsd = Math.max(0, Number(quota.costLimitUsd) - Number(spent?.cost ?? 0));
@@ -300,6 +313,10 @@ class RunEngine {
           continue;
         }
         await this.checkInterrupts();
+        // re-read project quota each step so concurrent runs can't collectively
+        // overspend by each checking only a stale start-of-run snapshot
+        const quota = await this.quotaHeadroom();
+        this.meter.refreshQuota(quota.costUsd, quota.tokens);
         this.meter.check();
         await this.executeStepWithRetry(phase, step);
       }

@@ -387,6 +387,37 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect((run?.error as { code: string } | null)?.code).toBe("budget_exceeded");
   });
 
+  it("resume does not double-count the run's own spend against the quota", async () => {
+    const { runId, makeDeps } = await setupFixture({ quota: { tokenLimit: 3000 } });
+    // cheap pre-approval steps: reproduce-bug spends 1600, find-root-cause 200
+    const cheap: Record<string, FakeStepBehavior> = {
+      ...HAPPY_SCRIPT,
+      "reproduce-bug": {
+        kind: "succeed",
+        usage: { inputTokens: 1000, outputTokens: 600 },
+        events: [{ type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" }],
+        output: "reproduced",
+      },
+      "find-root-cause": {
+        kind: "succeed",
+        usage: { inputTokens: 100, outputTokens: 100 },
+        events: [
+          { type: "artifact", key: "localization-report", kind: "markdown", inline: "# RC" },
+        ],
+        output: "rc",
+      },
+    };
+    // spend 1600, then crash before the approval gate
+    await expect(
+      executeRun(makeDeps({ ...cheap, "find-root-cause": { kind: "crash" } }), runId),
+    ).rejects.toThrow("simulated worker crash");
+
+    // 1600 is already persisted. The old code subtracted it from the headroom
+    // AND seeded the meter with it, double-counting on resume and tripping the
+    // 3000 quota (1600 > 3000 - 1600). It must instead reach the approval gate.
+    expect(await executeRun(makeDeps(cheap), runId)).toBe("waiting_approval");
+  });
+
   it("crash mid-step → queue retry resumes, skips succeeded steps, never double-counts usage", async () => {
     const { db, runId, makeDeps } = await setupFixture();
     await executeRun(makeDeps(HAPPY_SCRIPT), runId);
