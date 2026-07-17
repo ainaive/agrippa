@@ -44,6 +44,8 @@ docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
 
 ## Documentation
 
+- **User manual**: [English](docs/manual/en/README.md) · [中文](docs/manual/zh-CN/README.md) — getting started, concepts, running tasks, administration, template authoring, operations
+- **For contributors**: [ARCHITECTURE.md](ARCHITECTURE.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) (agent guide) · [SECURITY.md](SECURITY.md) · [CHANGELOG.md](CHANGELOG.md)
 - Design: [overview](docs/design/00-overview.md) · [domain model](docs/design/01-domain-model.md) · [orchestration templates](docs/design/02-orchestration-template.md) · [executor abstraction](docs/design/03-executor-abstraction.md) · [execution runtime](docs/design/04-execution-runtime.md) · [API & auth](docs/design/05-api-and-auth.md) · [frontend](docs/design/06-frontend.md) · [i18n](docs/design/07-i18n.md) · [deployment](docs/design/08-deployment.md) · [testing & CI](docs/design/09-testing-and-ci.md)
 - Decisions: [ADRs](docs/adr/)
 
