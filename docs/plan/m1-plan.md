@@ -64,4 +64,4 @@
 
 ## Exit
 
-- [ ] PR marked ready; merge `feat/m1-platform` → `main`
+- [x] PR marked ready; merged `feat/m1-platform` → `main` (2026-07-17, merge commit `5079c1f`)
