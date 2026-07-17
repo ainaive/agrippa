@@ -108,7 +108,7 @@ export function PhaseTimeline({
           : undefined;
         return (
           <div key={group.id} className={cn(!started && "opacity-50")}>
-            <p className="mb-1 flex items-baseline gap-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+            <p className="mb-1 flex items-baseline gap-2 text-xs font-medium tracking-wider text-muted-foreground uppercase tabular-nums">
               <span>{String(index + 1).padStart(2, "0")}</span>
               <span className="truncate">{group.name}</span>
             </p>

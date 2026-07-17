@@ -1,10 +1,11 @@
 import type { LocalizedText } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { PlusIcon } from "lucide-react";
+import { FileCode2Icon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
 import { LocalizedTextFields } from "@/components/LocalizedTextFields";
 import { PageHeader } from "@/components/PageHeader";
@@ -121,7 +122,7 @@ export function TemplatesListPage() {
   });
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title={t("tabs.templates")}
         actions={
@@ -133,6 +134,8 @@ export function TemplatesListPage() {
       />
       {templates.isLoading ? (
         <TableSkeleton rows={5} />
+      ) : (templates.data ?? []).length === 0 ? (
+        <EmptyState icon={FileCode2Icon} title={t("common:empty.generic")} />
       ) : (
         <div className="rounded-lg border">
           <Table>
@@ -147,11 +150,11 @@ export function TemplatesListPage() {
             <TableBody>
               {(templates.data ?? []).map((template) => (
                 <TableRow key={template.id}>
-                  <TableCell>
+                  <TableCell className="max-w-80">
                     <Link
                       to="/admin/templates/$templateId"
                       params={{ templateId: template.id }}
-                      className="font-medium hover:underline"
+                      className="block truncate font-medium hover:underline"
                     >
                       {lt(template.nameI18n)}
                     </Link>

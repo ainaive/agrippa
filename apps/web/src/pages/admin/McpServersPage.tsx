@@ -5,7 +5,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { EmptyState } from "@/components/EmptyState";
-import { TableSkeleton } from "@/components/LoadingSkeletons";
+import { ListSkeleton } from "@/components/LoadingSkeletons";
 import { LocalizedTextFields } from "@/components/LocalizedTextFields";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -189,7 +189,7 @@ export function McpServersPage() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title={t("admin:tabs.mcp")}
         actions={
@@ -200,13 +200,16 @@ export function McpServersPage() {
         }
       />
       {servers.isLoading ? (
-        <TableSkeleton rows={3} />
+        <ListSkeleton rows={3} />
       ) : (servers.data ?? []).length === 0 ? (
         <EmptyState icon={PlugIcon} title={t("admin:mcp.empty")} />
       ) : (
-        <div className="divide-y rounded-lg border px-4">
+        <div className="divide-y overflow-hidden rounded-lg border">
           {(servers.data ?? []).map((server) => (
-            <div key={server.id} className="flex items-center gap-3 py-3 text-sm">
+            <div
+              key={server.id}
+              className="flex items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-muted/50"
+            >
               <div className="min-w-0 flex-1">
                 <p className="font-medium">{lt(server.nameI18n)}</p>
                 <p className="text-xs text-muted-foreground">

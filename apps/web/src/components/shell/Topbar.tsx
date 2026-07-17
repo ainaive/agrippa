@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useMatches } from "@tanstack/react-router";
 import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
@@ -14,6 +14,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { useMe } from "@/features/me";
+import { api } from "@/lib/api";
 import type { Run } from "@/lib/types";
 
 type Crumb = { label: string; to?: string; params?: Record<string, string> };
@@ -22,7 +23,17 @@ function useCrumbs(): Crumb[] {
   const { t } = useTranslation("common");
   const me = useMe();
   const matches = useMatches();
-  const queryClient = useQueryClient();
+
+  // Subscribe to the run-detail cache entry (enabled:false → never fetches
+  // itself, the page's own query owns that) so the crumb flips from the id
+  // fragment to "#N" once data arrives; a bare getQueryData never re-renders.
+  const runMatch = matches.find((m) => m.staticData.crumb === "$run");
+  const runId = (runMatch?.params as { runId?: string } | undefined)?.runId;
+  const run = useQuery({
+    queryKey: ["run", runId],
+    queryFn: () => api<Run>(`/runs/${runId}`),
+    enabled: false,
+  }).data;
 
   const crumbs: Crumb[] = [];
   for (const match of matches) {
@@ -33,7 +44,6 @@ function useCrumbs(): Crumb[] {
       const project = me.projects.find((p) => p.projectId === params.projectId);
       crumbs.push({ label: project?.name ?? "…", to: "/projects/$projectId", params });
     } else if (crumb === "$run") {
-      const run = params.runId ? queryClient.getQueryData<Run>(["run", params.runId]) : undefined;
       crumbs.push({ label: t("nav.tasks"), to: "/projects/$projectId/tasks", params });
       crumbs.push({ label: run ? `#${run.number}` : (params.runId?.slice(0, 8) ?? "…") });
     } else {

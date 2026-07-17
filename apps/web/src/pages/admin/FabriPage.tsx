@@ -1,9 +1,10 @@
 import type { LocalizedText } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { PencilIcon, PlusIcon } from "lucide-react";
+import { BotIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { EmptyState } from "@/components/EmptyState";
 import { FaberAvatar } from "@/components/FaberAvatar";
 import { CardGridSkeleton } from "@/components/LoadingSkeletons";
 import { LocalizedTextFields } from "@/components/LocalizedTextFields";
@@ -150,7 +151,7 @@ export function FabriPage() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title={t("admin:tabs.fabri")}
         actions={
@@ -162,6 +163,8 @@ export function FabriPage() {
       />
       {fabri.isLoading ? (
         <CardGridSkeleton count={3} />
+      ) : (fabri.data ?? []).length === 0 ? (
+        <EmptyState icon={BotIcon} title={t("common:empty.generic")} />
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {(fabri.data ?? []).map((faber) => (

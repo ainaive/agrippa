@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FaberAvatar } from "@/components/FaberAvatar";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -61,14 +62,11 @@ export function SubmitTaskPage() {
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[1fr_300px]">
       <div className="space-y-4">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">{lt(detail.nameI18n)}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{lt(detail.descriptionI18n)}</p>
-        </div>
+        <PageHeader title={lt(detail.nameI18n)} description={lt(detail.descriptionI18n)} />
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{t("form.parameters")}</CardTitle>
+            <CardTitle>{t("form.parameters")}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
             <div className="space-y-2">

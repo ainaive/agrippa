@@ -31,9 +31,11 @@ const themes = themeArg === "both" ? ["light", "dark"] : [themeArg];
 
 const children: Bun.Subprocess[] = [];
 const cleanup = async () => {
-  for (const child of children) child.kill();
+  // SIGKILL: a lingering child would hold DB connections (blocking the drop)
+  // and, via inherited stderr, keep this script's output pipe open forever.
+  for (const child of children) child.kill("SIGKILL");
   await Bun.sleep(500);
-  psql(`DROP DATABASE IF EXISTS ${DB_NAME}`);
+  psql(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`);
 };
 
 function psql(statement: string) {
@@ -46,7 +48,7 @@ function spawn(cmd: string[], env: Record<string, string>, cwd?: string) {
     cwd,
     env: { ...process.env, ...env },
     stdout: "ignore",
-    stderr: "inherit",
+    stderr: "ignore",
   });
   children.push(child);
   return child;

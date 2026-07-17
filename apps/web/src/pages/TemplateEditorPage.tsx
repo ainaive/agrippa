@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "@tanstack/react-router";
 import { createTwoFilesPatch } from "diff";
-import { GitCompareArrowsIcon } from "lucide-react";
+import { ArrowRightIcon, GitCompareArrowsIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { PatchView } from "@/components/artifacts/PatchView";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
+import { PageHeader } from "@/components/PageHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -103,7 +104,7 @@ function CompareDialog({
               ))}
             </SelectContent>
           </Select>
-          <span className="text-muted-foreground">→</span>
+          <ArrowRightIcon className="size-4 shrink-0 text-muted-foreground" />
           <Select
             value={to !== null ? String(to) : ""}
             onValueChange={(value) => setTo(Number(value))}
@@ -210,27 +211,24 @@ export function TemplateEditorPage() {
   if (!template.data) return <DetailSkeleton />;
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold tracking-tight">{lt(template.data.nameI18n)}</h1>
-        <span className="font-mono text-sm text-muted-foreground">{template.data.slug}</span>
-        {versions.length > 1 ? (
-          <Button
-            size="sm"
-            variant="outline"
-            className="ml-auto"
-            onClick={() => setCompareOpen(true)}
-          >
-            <GitCompareArrowsIcon />
-            {t("admin:editor.compare")}
-          </Button>
-        ) : null}
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title={lt(template.data.nameI18n)}
+        meta={<span className="font-mono text-sm text-muted-foreground">{template.data.slug}</span>}
+        actions={
+          versions.length > 1 ? (
+            <Button size="sm" variant="outline" onClick={() => setCompareOpen(true)}>
+              <GitCompareArrowsIcon />
+              {t("admin:editor.compare")}
+            </Button>
+          ) : null
+        }
+      />
 
       <div className="grid items-start gap-4 lg:grid-cols-[1fr_320px]">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle className="text-base">{t("admin:editor.source")}</CardTitle>
+            <CardTitle>{t("admin:editor.source")}</CardTitle>
             <div className="flex gap-2">
               <Button
                 size="sm"
@@ -262,9 +260,9 @@ export function TemplateEditorPage() {
               spellCheck={false}
             />
             {validation && !validation.valid && (
-              <ul className="space-y-1 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+              <ul className="list-disc space-y-1 rounded-md border border-destructive/40 bg-destructive/5 py-3 pr-3 pl-7 text-xs text-destructive">
                 {(validation.issues ?? []).map((issue) => (
-                  <li key={issue}>• {issue}</li>
+                  <li key={issue}>{issue}</li>
                 ))}
               </ul>
             )}
@@ -277,7 +275,7 @@ export function TemplateEditorPage() {
         <div className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">{t("admin:editor.versions")}</CardTitle>
+              <CardTitle>{t("admin:editor.versions")}</CardTitle>
             </CardHeader>
             <CardContent>
               <ul className="space-y-1">
@@ -336,7 +334,7 @@ export function TemplateEditorPage() {
           {validation?.valid && validation.inputs && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">{t("admin:editor.formPreview")}</CardTitle>
+                <CardTitle>{t("admin:editor.formPreview")}</CardTitle>
               </CardHeader>
               <CardContent>
                 <TaskParamsForm

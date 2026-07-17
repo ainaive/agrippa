@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { PencilIcon, PlusIcon } from "lucide-react";
+import { CpuIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -193,7 +194,7 @@ export function ModelsPage() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title={t("admin:tabs.models")}
         actions={
@@ -205,6 +206,8 @@ export function ModelsPage() {
       />
       {models.isLoading ? (
         <TableSkeleton rows={4} />
+      ) : (models.data ?? []).length === 0 ? (
+        <EmptyState icon={CpuIcon} title={t("common:empty.generic")} />
       ) : (
         <div className="rounded-lg border">
           <Table>
@@ -220,11 +223,13 @@ export function ModelsPage() {
             <TableBody>
               {(models.data ?? []).map((model) => (
                 <TableRow key={model.id}>
-                  <TableCell>
-                    <span className="font-medium">{model.displayName}</span>
-                    <span className="ml-2 font-mono text-xs text-muted-foreground">
-                      {model.providerModelId}
-                    </span>
+                  <TableCell className="max-w-96">
+                    <div className="flex min-w-0 items-baseline gap-2">
+                      <span className="truncate font-medium">{model.displayName}</span>
+                      <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                        {model.providerModelId}
+                      </span>
+                    </div>
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">{model.tier}</Badge>

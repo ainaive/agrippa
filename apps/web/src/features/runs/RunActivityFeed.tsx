@@ -124,7 +124,7 @@ export function RunActivityFeed({ events }: { events: RunEvent[] }) {
         <li key={item.seq} className="flex items-center gap-2 rounded px-1 py-1 text-sm">
           <item.icon
             className={cn(
-              "size-3.5 shrink-0 text-muted-foreground",
+              "size-4 shrink-0 text-muted-foreground",
               item.tone && TONE_CLASS[item.tone],
             )}
           />
@@ -132,7 +132,7 @@ export function RunActivityFeed({ events }: { events: RunEvent[] }) {
             {item.label}
           </span>
           {item.stepId ? (
-            <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            <span className="ml-auto shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
               {item.stepId}
             </span>
           ) : null}

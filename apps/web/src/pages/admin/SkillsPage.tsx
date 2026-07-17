@@ -1,10 +1,11 @@
 import type { LocalizedText } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { PlusIcon } from "lucide-react";
+import { PlusIcon, WrenchIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { TableSkeleton } from "@/components/LoadingSkeletons";
+import { EmptyState } from "@/components/EmptyState";
+import { CardGridSkeleton } from "@/components/LoadingSkeletons";
 import { LocalizedTextFields } from "@/components/LocalizedTextFields";
 import { PageHeader } from "@/components/PageHeader";
 import { Badge } from "@/components/ui/badge";
@@ -160,7 +161,7 @@ export function SkillsPage() {
   const [versionFor, setVersionFor] = useState<SkillRow | null>(null);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title={t("admin:tabs.skills")}
         actions={
@@ -171,7 +172,9 @@ export function SkillsPage() {
         }
       />
       {skills.isLoading ? (
-        <TableSkeleton rows={3} />
+        <CardGridSkeleton count={4} />
+      ) : (skills.data ?? []).length === 0 ? (
+        <EmptyState icon={WrenchIcon} title={t("common:empty.generic")} />
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           {(skills.data ?? []).map((skill) => (

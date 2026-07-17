@@ -38,7 +38,7 @@ function AuditRowItem({ row, projectName }: { row: AuditRow; projectName?: strin
   const hasPayload = Object.keys(row.payload ?? {}).length > 0;
   return (
     <Collapsible>
-      <div className="flex items-center gap-3 py-2.5 text-sm">
+      <div className="flex items-center gap-3 px-4 py-3 text-sm transition-colors hover:bg-muted/50">
         <div className="min-w-0 flex-1">
           <p className="truncate">
             <span className="font-medium">{row.actorName ?? row.actorEmail ?? "—"}</span>
@@ -62,7 +62,7 @@ function AuditRowItem({ row, projectName }: { row: AuditRow; projectName?: strin
         ) : null}
       </div>
       {hasPayload ? (
-        <CollapsibleContent className="pb-2.5">
+        <CollapsibleContent className="px-4 pb-3">
           <pre className="overflow-auto rounded-md bg-muted/40 p-3 font-mono text-xs">
             {JSON.stringify(row.payload, null, 2)}
           </pre>
@@ -95,7 +95,7 @@ export function AuditLogPage() {
   const projectNames = new Map((projects.data ?? []).map((p) => [p.id, p.name]));
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader title={t("admin:audit.title")} description={t("admin:audit.hint")} />
 
       <div className="flex flex-wrap items-center gap-2">
@@ -125,7 +125,7 @@ export function AuditLogPage() {
       ) : (logs.data ?? []).length === 0 ? (
         <EmptyState icon={ScrollTextIcon} title={t("admin:audit.empty")} />
       ) : (
-        <div className="divide-y rounded-lg border px-4">
+        <div className="divide-y overflow-hidden rounded-lg border">
           {(logs.data ?? []).map((row) => (
             <AuditRowItem
               key={row.id}

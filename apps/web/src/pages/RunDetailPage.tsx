@@ -6,6 +6,7 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { ArtifactPreview, isPreviewable } from "@/components/artifacts/ArtifactPreview";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
+import { PageHeader } from "@/components/PageHeader";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -124,29 +125,26 @@ export function RunDetailPage() {
   ];
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold tracking-tight">
-          {t("run")} #{current.number}
-        </h1>
-        <RunStatusBadge status={current.status} />
-        <span className="text-sm text-muted-foreground">
-          {formatCost(current.usageTotals?.costUsd)} ·{" "}
-          {formatDuration(current.startedAt, current.finishedAt)}
-        </span>
-        <div className="ml-auto flex gap-2">
-          {!isTerminalRunStatus(current.status) && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={cancel.isPending}
-              onClick={() => cancel.mutate()}
-            >
-              <XIcon />
-              {t("actions.cancel")}
-            </Button>
-          )}
-          {isTerminalRunStatus(current.status) && (
+    <div className="space-y-6">
+      <PageHeader
+        title={
+          <span className="tabular-nums">
+            {t("run")} #{current.number}
+          </span>
+        }
+        meta={
+          <>
+            <RunStatusBadge status={current.status} />
+            <span className="text-sm text-muted-foreground tabular-nums">
+              {current.usageTotals?.costUsd != null
+                ? `${formatCost(current.usageTotals.costUsd)} · `
+                : ""}
+              {formatDuration(current.startedAt, current.finishedAt)}
+            </span>
+          </>
+        }
+        actions={
+          isTerminalRunStatus(current.status) ? (
             <Button
               size="sm"
               variant="outline"
@@ -156,9 +154,19 @@ export function RunDetailPage() {
               <RotateCcwIcon />
               {t("actions.retry")}
             </Button>
-          )}
-        </div>
-      </div>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={cancel.isPending}
+              onClick={() => cancel.mutate()}
+            >
+              <XIcon />
+              {t("actions.cancel")}
+            </Button>
+          )
+        }
+      />
 
       {current.error && (
         <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
@@ -174,7 +182,7 @@ export function RunDetailPage() {
         <div className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">{t("timeline")}</CardTitle>
+              <CardTitle>{t("timeline")}</CardTitle>
             </CardHeader>
             <CardContent>
               <PhaseTimeline
@@ -186,7 +194,7 @@ export function RunDetailPage() {
           </Card>
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">{t("budget.title")}</CardTitle>
+              <CardTitle>{t("budget.title")}</CardTitle>
             </CardHeader>
             <CardContent>
               <BudgetMeter run={current} />
@@ -194,7 +202,7 @@ export function RunDetailPage() {
           </Card>
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">{t("meta.title")}</CardTitle>
+              <CardTitle>{t("meta.title")}</CardTitle>
             </CardHeader>
             <CardContent>
               <RunMetaCard run={current} />
@@ -213,14 +221,14 @@ export function RunDetailPage() {
           </TabsList>
           <TabsContent value="activity">
             <Card>
-              <CardContent className="pt-4">
+              <CardContent>
                 <RunActivityFeed events={events} />
               </CardContent>
             </Card>
           </TabsContent>
           <TabsContent value="output">
             <Card>
-              <CardContent className="pt-4">
+              <CardContent>
                 <pre className="max-h-96 min-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs">
                   {streamText ||
                     latestSteps
@@ -234,7 +242,7 @@ export function RunDetailPage() {
           </TabsContent>
           <TabsContent value="artifacts">
             <Card>
-              <CardContent className="pt-4">
+              <CardContent>
                 {(artifacts.data ?? []).length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t("noArtifacts")}</p>
                 ) : (
@@ -249,7 +257,7 @@ export function RunDetailPage() {
           </TabsContent>
           <TabsContent value="params">
             <Card>
-              <CardContent className="pt-4">
+              <CardContent>
                 <pre className="overflow-auto rounded-md bg-muted/50 p-3 text-xs">
                   {JSON.stringify(current.paramsSnapshot, null, 2)}
                 </pre>

@@ -162,17 +162,17 @@ export function DashboardPage() {
                 <TableBody>
                   {recent.map((task) => (
                     <TableRow key={task.id}>
-                      <TableCell>
+                      <TableCell className="max-w-96">
                         {task.latestRunId ? (
                           <Link
                             to="/projects/$projectId/runs/$runId"
                             params={{ projectId, runId: task.latestRunId }}
-                            className="font-medium hover:underline"
+                            className="block truncate font-medium hover:underline"
                           >
                             {task.title}
                           </Link>
                         ) : (
-                          task.title
+                          <span className="block truncate">{task.title}</span>
                         )}
                       </TableCell>
                       <TableCell>

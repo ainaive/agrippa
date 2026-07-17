@@ -55,6 +55,9 @@
     "deleted": "已删除",
     "error": "操作失败"
   },
+  "empty": {
+    "generic": "暂无内容。"
+  },
   "theme": {
     "toggle": "主题",
     "light": "浅色",

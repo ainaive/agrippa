@@ -14,6 +14,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -185,9 +186,12 @@ function MembersSection({ projectId }: { projectId: string }) {
           {t("members.add")}
         </Button>
       </div>
-      <ul className="divide-y">
+      <ul className="space-y-0.5">
         {(members.data ?? []).map((member) => (
-          <li key={member.userId} className="flex items-center justify-between gap-3 py-2 text-sm">
+          <li
+            key={member.userId}
+            className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-2 text-sm transition-colors hover:bg-muted/40"
+          >
             <div>
               <p className="font-medium">{member.name}</p>
               <p className="text-xs text-muted-foreground">{member.email}</p>
@@ -276,7 +280,7 @@ function GrantsSection({ projectId }: { projectId: string }) {
         {rows.map((row) => (
           <li
             key={row.id}
-            className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
+            className="flex items-center justify-between rounded-md border px-3 py-2 text-sm transition-colors hover:bg-muted/40"
           >
             <div>
               <span className="font-medium">{row.label}</span>
@@ -393,9 +397,15 @@ function ReposSection({ projectId }: { projectId: string }) {
           {t("repos.add")}
         </Button>
       </div>
-      <ul className="divide-y">
+      {repos.data?.length === 0 ? (
+        <EmptyState icon={GitBranchIcon} title={t("repos.empty")} />
+      ) : null}
+      <ul className="space-y-0.5">
         {(repos.data ?? []).map((repo) => (
-          <li key={repo.id} className="flex items-center justify-between py-2 text-sm">
+          <li
+            key={repo.id}
+            className="-mx-2 flex items-center justify-between rounded-md px-2 py-2 text-sm transition-colors hover:bg-muted/40"
+          >
             <div>
               <p className="font-medium">{repo.url}</p>
               <p className="text-xs text-muted-foreground">
@@ -524,7 +534,7 @@ export function SettingsPage() {
           ))}
         </nav>
         <Card>
-          <CardContent className="pt-5">
+          <CardContent>
             {section === "general" && <GeneralSection projectId={projectId} />}
             {section === "members" && <MembersSection projectId={projectId} />}
             {section === "grants" && <GrantsSection projectId={projectId} />}

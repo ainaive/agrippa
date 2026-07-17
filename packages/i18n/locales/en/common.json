@@ -55,6 +55,9 @@
     "deleted": "Deleted",
     "error": "Something went wrong"
   },
+  "empty": {
+    "generic": "Nothing here yet."
+  },
   "theme": {
     "toggle": "Theme",
     "light": "Light",

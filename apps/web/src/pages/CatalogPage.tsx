@@ -71,7 +71,7 @@ export function CatalogPage() {
   const noResults = !loading && query !== "" && sections.every((s) => s.taskTypes.length === 0);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <PageHeader
         title={t("common:nav.catalog")}
         description={t("catalog:hint")}

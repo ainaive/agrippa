@@ -2,7 +2,9 @@
 
 > Status: living document · Last updated: 2026-07-17
 
-`apps/web`: Vite + React SPA. Routing: **TanStack Router** (code-first route tree in `src/router.tsx`, type-safe params). Data: **TanStack Query**. UI: **shadcn/ui** on Tailwind v4 (`@tailwindcss/vite` plugin + `@/` path alias; components vendored into `src/components/ui/`, exempted from strict lint via a scoped biome override). Visual identity: indigo/violet primary over cool-tinted neutrals, defined as OKLCH tokens in `src/index.css` (light + dark), plus semantic `status-*` tokens for run/step states. Icons: lucide-react.
+`apps/web`: Vite + React SPA. Routing: **TanStack Router** (code-first route tree in `src/router.tsx`, type-safe params). Data: **TanStack Query**. UI: **shadcn/ui** on Tailwind v4 (`@tailwindcss/vite` plugin + `@/` path alias; components vendored into `src/components/ui/`, exempted from strict lint via a scoped biome override and carrying a few deliberate theme divergences: quiet muted table headers with `tabular-nums` cells, eased sidebar/input transitions, `shadow-2xs` on cards and `shadow-lg` on dialogs). Visual identity: indigo/violet primary over cool-tinted neutrals, defined as OKLCH tokens in `src/index.css` (light + dark) — light mode uses the gray-canvas/white-card surface model (canvas 0.975, sidebar 0.962, cards white) for three-level depth — plus semantic `status-*` tokens for run/step states. Typography: Geist Variable + Geist Mono Variable, globally antialiased, primary-tinted selection, thin scrollbars. Icons: lucide-react.
+
+Visual verification is not left to code review: `scripts/screenshot.ts` (dev tool, Playwright) boots the stack on a throwaway database with the fake executor, seeds fixture runs, and captures every page in light and dark, failing on any browser console error.
 
 ## Structure
 

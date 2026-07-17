@@ -39,6 +39,7 @@
     "add": "添加",
     "remove": "移除",
     "removeConfirm": "移除仓库 {{url}}？",
+    "empty": "尚未关联代码仓库。",
     "private": "已配置凭证",
     "public": "公开"
   },

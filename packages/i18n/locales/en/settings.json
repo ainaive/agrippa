@@ -39,6 +39,7 @@
     "add": "Add",
     "remove": "Remove",
     "removeConfirm": "Remove the repository {{url}}?",
+    "empty": "No repositories connected yet.",
     "private": "credentialed",
     "public": "public"
   },

@@ -60,7 +60,7 @@ export function TasksPage() {
   const filtered = query !== "" || status !== "all";
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <PageHeader
         title={t("common:nav.tasks")}
         actions={
@@ -125,17 +125,17 @@ export function TasksPage() {
             <TableBody>
               {visible.map((task) => (
                 <TableRow key={task.id}>
-                  <TableCell>
+                  <TableCell className="max-w-96">
                     {task.latestRunId ? (
                       <Link
                         to="/projects/$projectId/runs/$runId"
                         params={{ projectId, runId: task.latestRunId }}
-                        className="font-medium hover:underline"
+                        className="block truncate font-medium hover:underline"
                       >
                         {task.title}
                       </Link>
                     ) : (
-                      task.title
+                      <span className="block truncate">{task.title}</span>
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">#{task.runNumber ?? "—"}</TableCell>

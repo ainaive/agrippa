@@ -55,7 +55,7 @@ export function ApprovalPanel({
   return (
     <Card className="border-status-warning/40 bg-status-warning/5">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
+        <CardTitle className="flex items-center gap-2">
           <CirclePauseIcon className="size-4 text-status-warning" />
           {approval.payload.title ? lt(approval.payload.title) : approval.checkpointId}
         </CardTitle>
@@ -64,7 +64,7 @@ export function ApprovalPanel({
         <p className="text-sm text-muted-foreground">{t("runs:approval.hint")}</p>
         {presented.length > 0 ? (
           <div className="space-y-3">
-            <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
               {t("runs:approval.presented")}
             </p>
             {presented.map((artifact) => (

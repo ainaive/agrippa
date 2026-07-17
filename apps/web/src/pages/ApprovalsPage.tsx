@@ -37,11 +37,11 @@ function InboxRow({ item }: { item: PendingApproval }) {
   const canDecide = projectRoleAtLeast(item.projectRole, "member");
   return (
     <Collapsible>
-      <div className="flex items-center gap-3 py-3">
+      <div className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/50">
         <div className="min-w-0 flex-1">
           <p className="truncate font-medium">
             {item.taskTitle}
-            <span className="ml-1.5 text-sm font-normal text-muted-foreground">
+            <span className="ml-1.5 text-sm font-normal text-muted-foreground tabular-nums">
               #{item.runNumber}
             </span>
           </p>
@@ -69,7 +69,7 @@ function InboxRow({ item }: { item: PendingApproval }) {
           </CollapsibleTrigger>
         ) : null}
       </div>
-      <CollapsibleContent className="pb-3">
+      <CollapsibleContent className="px-4 pb-3">
         <InlineDecision item={item} />
       </CollapsibleContent>
     </Collapsible>
@@ -97,10 +97,10 @@ export function ApprovalsPage() {
       ) : (
         [...byProject.entries()].map(([projectId, group]) => (
           <section key={projectId}>
-            <h2 className="mb-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+            <h2 className="mb-1.5 text-xs font-medium tracking-wider text-muted-foreground uppercase">
               {group.projectName}
             </h2>
-            <div className="divide-y rounded-lg border px-4">
+            <div className="divide-y overflow-hidden rounded-lg border">
               {group.items.map((item) => (
                 <InboxRow key={item.id} item={item} />
               ))}
