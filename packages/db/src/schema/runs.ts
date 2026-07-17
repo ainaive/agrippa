@@ -91,6 +91,7 @@ export const runSteps = pgTable(
     agentRef: text("agent_ref"),
     modelId: uuid("model_id"),
     executorSessionId: text("executor_session_id"), // engine resume handle
+    output: text("output"), // step.completed output — feeds steps.<id>.outputs.result + priorContext
     usage: jsonb("usage").$type<Record<string, unknown>>().notNull().default({}),
     error: jsonb("error").$type<Record<string, unknown>>(),
     startedAt: tstz("started_at"),

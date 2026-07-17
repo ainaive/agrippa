@@ -12,11 +12,17 @@ const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates")
 export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 
+// one pool for all API suites — a pool per call exhausts max_connections
+let sharedDb: Db | null = null;
+function testDb(): Db {
+  sharedDb ??= createDb(TEST_DATABASE_URL);
+  return sharedDb;
+}
+
 /** True when the test database is reachable; suites skip themselves otherwise. */
 export async function postgresAvailable(): Promise<boolean> {
   try {
-    const db = createDb(TEST_DATABASE_URL);
-    await db.execute(sql`select 1`);
+    await testDb().execute(sql`select 1`);
     return true;
   } catch {
     console.warn(
@@ -28,7 +34,7 @@ export async function postgresAvailable(): Promise<boolean> {
 
 /** Fresh schema per test run: drop everything, migrate, seed builtins. */
 export async function freshTestDb(): Promise<Db> {
-  const db = createDb(TEST_DATABASE_URL);
+  const db = testDb();
   await db.execute(sql`drop schema public cascade`);
   await db.execute(sql`create schema public`);
   // the migrator journals into its own "drizzle" schema — reset it too,
