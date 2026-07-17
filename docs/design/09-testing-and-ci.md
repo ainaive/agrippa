@@ -21,7 +21,10 @@ Runs against `docker-compose.dev.yml` Postgres. Scenarios, each asserting both `
 - happy path: all phases → `succeeded`, contract artifacts present, usage totals correct;
 - approval: pause (job completes, slot freed) → approve → resume; reject → `failed`; expire → per-template `onTimeout`;
 - budget: run-level and per-phase `maxCostUsd` abort; duration timeout → `timed_out`; project hard-stop quota mid-run;
-- crash-resume: kill mid-step → retry skips succeeded steps → resumes/restarts correct attempt → **no double-counted usage**;
+- crash-resume: kill mid-step → retry skips succeeded steps → resumes/restarts correct attempt → **no double-counted usage**; a **no-retry** step crash re-executes (not silently skipped) and resumes its session;
+- run lifecycle: `transitionRun` compare-and-swap, database-allocated event seq (no collision under concurrent append), `decideApproval` CAS on `pending`;
+- authorization: an ungranted optional MCP server is not resolved even when it exists in the registry;
+- budget: run-level and per-phase `maxCostUsd` abort; duration timeout → `timed_out`; project hard-stop quota mid-run; resume does not double-count the run's own spend against the quota;
 - cancellation: mid-step abort latency, queued/waiting cancellation via API path;
 - `when:` false and unmet optional `requires:` → `skipped`;
 - required-artifact missing → `failed` with `contract_violation`.
@@ -30,17 +33,21 @@ This suite doubles as the executor compliance spec (any future executor must pas
 
 ### API integration (Hono `app.request()` × real Postgres/Redis)
 
-Auth flows, RBAC allow/deny matrix per role × endpoint class, transactional task submission (run + job atomicity), SSE replay from `Last-Event-ID`, grants gating submission, quota rejection at submit, audit rows on every mutation.
+Auth flows, RBAC allow/deny matrix per role × endpoint class, transactional task submission (run + job atomicity), SSE replay from `Last-Event-ID` (deduped, strictly increasing seq), a cross-project `repoConnectionId` refused at submit, grants gating submission, quota rejection at submit, audit rows on every mutation.
 
 ### Claude executor
 
-- Unit: mocked SDK `query()` asserting the full option-mapping table from [03](03-executor-abstraction.md) (subagents, skills materialization path, MCP config, tool policy, resume).
+- Unit: mocked SDK `query()` asserting the full option-mapping table from [03](03-executor-abstraction.md) (subagents, skills materialization path, MCP config, resume); the isolation policy (`evaluateToolCall` — Bash and write containment, read-only enforcement, boundary-safe check) and env scrubbing; contract-scoped artifact collection (patch and uncontracted files skipped).
 - One live smoke test behind `ANTHROPIC_API_KEY`, excluded from CI, run manually before releases.
+
+### Worker adapters
+
+- `DiskArtifactStore` path containment: normal file stored, escaping symlink rejected, missing source is not a zero-byte artifact. (The production workspace/resource adapters remain higher-risk untested surface — follow-up work.)
 
 ### Frontend
 
-- Component tests for `TaskParamsForm` (schema → widgets → zod validation, both locales) and the run timeline reducer (event stream → UI state).
-- Full-browser E2E is deferred to M1.4 exit criteria as a manual scripted walkthrough (automating with Playwright is a stretch goal, not a gate).
+- No automated frontend tests yet (the `TaskParamsForm` and run-timeline reducer component tests described in earlier plans are not implemented — a known gap).
+- Full-browser E2E is deferred as a manual scripted walkthrough (automating with Playwright is a stretch goal, not a gate).
 
 ### Cross-cutting guards
 

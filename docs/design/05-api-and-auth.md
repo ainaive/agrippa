@@ -71,6 +71,8 @@ GET  /runs/:id/approvals                  POST /runs/:id/approvals/:approvalId  
 GET  /runs/:id/artifacts                  GET /artifacts/:id/download
 ```
 
+Submission authorizes the resources a task references before persisting: a `repoRef` param must name a repo connection **owned by the project** (else `400 {code: "repo_not_in_project"}`), and the run's authorized skills/MCP are pinned into a resource manifest (see [04](04-execution-runtime.md) and [ADR-0009](../adr/0009-security-correctness-deep-modules.md)). Approval decisions are a compare-and-swap on the pending status: a decision that lost the race (already decided, or expired) returns `409 {code: "already_decided"}`.
+
 ### Resource layer (org_admin writes; members read)
 ```
 CRUD /fabri
