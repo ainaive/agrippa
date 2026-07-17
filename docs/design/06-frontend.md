@@ -55,7 +55,12 @@ The page (`pages/RunDetailPage.tsx` composing `features/runs/*`):
 - **BudgetMeter** — cost vs. `maxCostUsd` and elapsed vs. `maxDurationMinutes` as progress meters (danger tint past 90%), plus per-phase caps.
 - **RunMetaCard** — pinned `slug@vN`, executor, and the frozen model resolution (role → provider model + tier).
 - **Streaming pane** — `message.delta` events accumulate into the output tab; step outputs are the fallback once the stream ends.
-- Approval banner with Approve/Reject + comment; cancel while running; retry (navigates to the new pinned run) once terminal.
+- **Activity tab** (`features/runs/RunActivityFeed.tsx`) — the run's tool calls (error-tinted when the tool errored), subagent spawns, workspace checkout, step transitions, and approval requests, rebuilt from the SSE event stream.
+- **Artifact previews** (`components/artifacts/ArtifactPreview.tsx`) — markdown rendered inline (react-markdown + GFM, styled by the `.markdown-body` component layer), patches colorized by the hand-rolled `PatchView`, JSON pretty-printed, links clickable; anything over 256 KB (or of kind `file`) is download-only.
+- **ApprovalPanel** (`features/runs/ApprovalPanel.tsx`) — renders the checkpoint's `present:` artifacts inline with previews, plus Approve/Reject + comment with toast feedback; shared with the approvals inbox.
+- Cancel while running; retry (navigates to the new pinned run) once terminal.
+
+`useRunEvents` keeps one `EventSource` per run for the run's whole lifetime: the run status is read through a ref, not the effect deps, so status transitions don't tear down the stream (recreating it wiped accumulated activity mid-run); terminal `run.*` events still close it.
 
 ## Screens
 

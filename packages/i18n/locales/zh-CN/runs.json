@@ -18,8 +18,23 @@
   },
   "tabs": {
     "output": "输出",
+    "activity": "活动",
     "artifacts": "产出物",
     "params": "参数"
+  },
+  "activity": {
+    "empty": "暂无活动。",
+    "workspaceReady": "工作区就绪",
+    "stepStarted": "步骤开始",
+    "stepCompleted": "步骤完成",
+    "stepFailed": "步骤失败",
+    "stepRetrying": "步骤重试中",
+    "subagent": "子智能体",
+    "approvalRequired": "等待审批"
+  },
+  "artifact": {
+    "preview": "预览",
+    "tooLarge": "内容过大，无法预览——请下载查看。"
   },
   "actions": {
     "cancel": "取消执行",
@@ -30,7 +45,8 @@
     "hint": "执行已在检查点暂停。请审阅产出物后批准或驳回。",
     "commentPlaceholder": "备注（可选）…",
     "approve": "批准",
-    "reject": "驳回"
+    "reject": "驳回",
+    "presented": "呈现的产出物"
   },
   "approvalsInbox": {
     "title": "待办审批",

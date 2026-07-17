@@ -1,68 +1,57 @@
 import { isTerminalRunStatus } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { CirclePauseIcon, RotateCcwIcon, XIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ChevronDownIcon, RotateCcwIcon, XIcon } from "lucide-react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { ArtifactPreview, isPreviewable } from "@/components/artifacts/ArtifactPreview";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
+import { ApprovalPanel } from "@/features/runs/ApprovalPanel";
 import { BudgetMeter } from "@/features/runs/BudgetMeter";
 import { PhaseTimeline } from "@/features/runs/PhaseTimeline";
+import { RunActivityFeed } from "@/features/runs/RunActivityFeed";
 import { RunMetaCard } from "@/features/runs/RunMetaCard";
 import { useRunEvents } from "../features/useRunEvents";
 import { api } from "../lib/api";
-import { formatCost, formatDuration, formatTime, lt } from "../lib/format";
+import { formatCost, formatDuration, formatTime } from "../lib/format";
 import type { Approval, Artifact, Run, RunStep } from "../lib/types";
 
-function ApprovalBanner({ runId, approval }: { runId: string; approval: Approval }) {
+function ArtifactRow({ artifact }: { artifact: Artifact }) {
   const { t } = useTranslation("runs");
-  const queryClient = useQueryClient();
-  const [comment, setComment] = useState("");
-
-  const decide = useMutation({
-    mutationFn: (decision: "approved" | "rejected") =>
-      api(`/runs/${runId}/approvals/${approval.id}`, {
-        method: "POST",
-        json: { decision, comment: comment || undefined },
-      }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["run", runId] }),
-  });
-
   return (
-    <Card className="border-status-warning/40 bg-status-warning/5">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <CirclePauseIcon className="size-4 text-status-warning" />
-          {approval.payload.title ? lt(approval.payload.title) : approval.checkpointId}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">{t("approval.hint")}</p>
-        <Textarea
-          rows={2}
-          placeholder={t("approval.commentPlaceholder")}
-          value={comment}
-          onChange={(e) => setComment(e.target.value)}
-        />
-        <div className="flex gap-2">
-          <Button size="sm" disabled={decide.isPending} onClick={() => decide.mutate("approved")}>
-            {t("approval.approve")}
-          </Button>
-          <Button
-            size="sm"
-            variant="destructive"
-            disabled={decide.isPending}
-            onClick={() => decide.mutate("rejected")}
-          >
-            {t("approval.reject")}
+    <Collapsible>
+      <div className="flex items-center justify-between gap-2 py-2 text-sm">
+        <div className="min-w-0">
+          <p className="truncate font-medium">{artifact.artifactKey}</p>
+          <p className="text-xs text-muted-foreground">
+            {artifact.kind} · {artifact.size ?? 0} B · {formatTime(artifact.createdAt)}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-1.5">
+          {isPreviewable(artifact) ? (
+            <CollapsibleTrigger asChild>
+              <Button size="sm" variant="ghost" className="group/trigger">
+                {t("artifact.preview")}
+                <ChevronDownIcon className="transition-transform group-data-[state=open]/trigger:rotate-180" />
+              </Button>
+            </CollapsibleTrigger>
+          ) : null}
+          <Button size="sm" variant="outline" asChild>
+            <a href={`/api/v1/artifacts/${artifact.id}/download`} target="_blank" rel="noreferrer">
+              {t("actions.download")}
+            </a>
           </Button>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+      <CollapsibleContent className="pb-3">
+        <ArtifactPreview artifact={artifact} />
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -177,7 +166,9 @@ export function RunDetailPage() {
         </p>
       )}
 
-      {pendingApproval && <ApprovalBanner runId={runId} approval={pendingApproval} />}
+      {pendingApproval && (
+        <ApprovalPanel runId={runId} approval={pendingApproval} artifacts={artifacts.data ?? []} />
+      )}
 
       <div className="grid items-start gap-4 lg:grid-cols-[340px_1fr]">
         <div className="space-y-4">
@@ -214,11 +205,19 @@ export function RunDetailPage() {
         <Tabs defaultValue="output">
           <TabsList>
             <TabsTrigger value="output">{t("tabs.output")}</TabsTrigger>
+            <TabsTrigger value="activity">{t("tabs.activity")}</TabsTrigger>
             <TabsTrigger value="artifacts">
               {t("tabs.artifacts")} ({artifacts.data?.length ?? 0})
             </TabsTrigger>
             <TabsTrigger value="params">{t("tabs.params")}</TabsTrigger>
           </TabsList>
+          <TabsContent value="activity">
+            <Card>
+              <CardContent className="pt-4">
+                <RunActivityFeed events={events} />
+              </CardContent>
+            </Card>
+          </TabsContent>
           <TabsContent value="output">
             <Card>
               <CardContent className="pt-4">
@@ -239,31 +238,11 @@ export function RunDetailPage() {
                 {(artifacts.data ?? []).length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t("noArtifacts")}</p>
                 ) : (
-                  <ul className="divide-y">
+                  <div className="divide-y">
                     {(artifacts.data ?? []).map((artifact) => (
-                      <li
-                        key={artifact.id}
-                        className="flex items-center justify-between py-2 text-sm"
-                      >
-                        <div>
-                          <p className="font-medium">{artifact.artifactKey}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {artifact.kind} · {artifact.size ?? 0} B ·{" "}
-                            {formatTime(artifact.createdAt)}
-                          </p>
-                        </div>
-                        <Button size="sm" variant="outline" asChild>
-                          <a
-                            href={`/api/v1/artifacts/${artifact.id}/download`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {t("actions.download")}
-                          </a>
-                        </Button>
-                      </li>
+                      <ArtifactRow key={artifact.id} artifact={artifact} />
                     ))}
-                  </ul>
+                  </div>
                 )}
               </CardContent>
             </Card>

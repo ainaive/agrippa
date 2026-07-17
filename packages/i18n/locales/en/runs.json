@@ -18,8 +18,23 @@
   },
   "tabs": {
     "output": "Output",
+    "activity": "Activity",
     "artifacts": "Artifacts",
     "params": "Parameters"
+  },
+  "activity": {
+    "empty": "No activity yet.",
+    "workspaceReady": "Workspace ready",
+    "stepStarted": "Step started",
+    "stepCompleted": "Step completed",
+    "stepFailed": "Step failed",
+    "stepRetrying": "Retrying step",
+    "subagent": "Subagent",
+    "approvalRequired": "Approval required"
+  },
+  "artifact": {
+    "preview": "Preview",
+    "tooLarge": "Too large to preview — download instead."
   },
   "actions": {
     "cancel": "Cancel run",
@@ -30,7 +45,8 @@
     "hint": "This run is paused at a checkpoint. Review the artifacts, then approve or reject.",
     "commentPlaceholder": "Optional comment…",
     "approve": "Approve",
-    "reject": "Reject"
+    "reject": "Reject",
+    "presented": "Presented artifacts"
   },
   "approvalsInbox": {
     "title": "Pending approvals",

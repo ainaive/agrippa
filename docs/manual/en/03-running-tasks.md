@@ -14,7 +14,8 @@ Submitting lands you on the **run detail** page, which updates live:
 - **Budget** panel: live meters of cost against the cost limit and elapsed time against the time limit, plus any per-phase caps.
 - **Details** panel: the pinned template version, the executor, and the frozen model resolution (which concrete model serves each role).
 - **Output** tab: the agent's streaming text while a step executes; after completion, each step's final output.
-- **Artifacts** tab: deliverables appear as they're produced; download any of them (reports as Markdown, code changes as patches, links as URLs).
+- **Activity** tab: the run's live event feed — tool calls, subagent spawns, workspace checkout, retries.
+- **Artifacts** tab: deliverables appear as they're produced and preview inline — Markdown rendered, patches colorized, JSON pretty-printed, links clickable; anything can also be downloaded.
 - **Parameters** tab: the exact input snapshot the run executes with.
 - The header shows live **cost** and total duration.
 

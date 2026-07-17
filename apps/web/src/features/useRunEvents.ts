@@ -17,6 +17,10 @@ export function useRunEvents(runId: string, status: RunStatus | undefined) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const queryClient = useQueryClient();
   const sourceRef = useRef<EventSource | null>(null);
+  // Read through a ref so a status transition doesn't tear down the stream
+  // (recreating the EventSource wiped accumulated events on every transition).
+  const statusRef = useRef(status);
+  statusRef.current = status;
 
   useEffect(() => {
     setEvents([]);
@@ -86,11 +90,12 @@ export function useRunEvents(runId: string, status: RunStatus | undefined) {
     for (const type of types) source.addEventListener(type, onAnyEvent);
     source.onmessage = onAnyEvent;
     source.onerror = () => {
-      if (status && isTerminalRunStatus(status)) source.close();
+      const current = statusRef.current;
+      if (current && isTerminalRunStatus(current)) source.close();
     };
 
     return () => source.close();
-  }, [runId, queryClient, status]);
+  }, [runId, queryClient]);
 
   return events;
 }
