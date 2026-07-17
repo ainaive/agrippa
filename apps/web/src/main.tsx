@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./lib/i18n";
 import "./index.css";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "./features/theme";
 import { ApiError } from "./lib/api";
 import { router } from "./router";
@@ -27,7 +28,10 @@ createRoot(root).render(
   <StrictMode>
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} />
+        {/* radix Tooltip requires a provider; the sidebar's rail tooltips render one per button */}
+        <TooltipProvider>
+          <RouterProvider router={router} />
+        </TooltipProvider>
       </QueryClientProvider>
     </ThemeProvider>
   </StrictMode>,
