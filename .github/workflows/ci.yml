@@ -66,3 +66,12 @@ jobs:
 
       - name: Build
         run: bun run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build api image
+        run: docker build -f infra/Dockerfile.api -t agrippa-api:ci .
+      - name: Build worker image
+        run: docker build -f infra/Dockerfile.worker -t agrippa-worker:ci .

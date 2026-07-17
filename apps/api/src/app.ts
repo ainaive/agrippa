@@ -1,7 +1,9 @@
 import type { RunQueue } from "@agrippa/core";
 import type { Db } from "@agrippa/db";
 import type { RunEventBus } from "@agrippa/orchestration";
+import { sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { serveStatic } from "hono/bun";
 import { type Auth, createAuth } from "./auth";
 import type { AppEnv } from "./context";
 import { requireSession } from "./middleware/auth";
@@ -34,7 +36,14 @@ export function createApp(deps: {
     await next();
   });
 
-  app.get("/healthz", (c) => c.json({ status: "ok" }));
+  app.get("/healthz", async (c) => {
+    try {
+      await deps.db.execute(sql`select 1`);
+      return c.json({ status: "ok" });
+    } catch {
+      return c.json({ status: "degraded", db: "unreachable" }, 503);
+    }
+  });
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
   const v1 = new Hono<AppEnv>();
@@ -47,6 +56,13 @@ export function createApp(deps: {
   v1.route("/projects", projectRoutes);
   v1.route("/", executionRoutes);
   app.route("/api/v1", v1);
+
+  // production: serve the built SPA from the same origin (no CORS, ADR-0001)
+  const webDist = process.env.AGRIPPA_WEB_DIST;
+  if (webDist) {
+    app.use("/assets/*", serveStatic({ root: webDist }));
+    app.get("*", serveStatic({ root: webDist, path: "index.html" }));
+  }
 
   app.onError(errorHandler);
   return app;

@@ -1,0 +1,76 @@
+# Agrippa production stack (docs/design/08-deployment.md).
+# Usage:
+#   cp infra/env/.env.example infra/env/.env   # fill in the secrets
+#   docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    image: ghcr.io/ainaive/agrippa-api:${AGRIPPA_VERSION:-latest}
+    ports:
+      - "${AGRIPPA_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:-agrippa}@postgres:5432/agrippa
+      REDIS_URL: redis://redis:6379
+      AGRIPPA_BASE_URL: ${AGRIPPA_BASE_URL:-http://localhost:3000}
+      AGRIPPA_SECRET_KEY: ${AGRIPPA_SECRET_KEY:?set AGRIPPA_SECRET_KEY (openssl rand -base64 32)}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET (openssl rand -base64 32)}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      # the bun image has no curl; bun itself makes the probe
+      test:
+        [
+          "CMD-SHELL",
+          "bun -e \"fetch('http://localhost:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.worker
+    image: ghcr.io/ainaive/agrippa-worker:${AGRIPPA_VERSION:-latest}
+    environment:
+      DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:-agrippa}@postgres:5432/agrippa
+      REDIS_URL: redis://redis:6379
+      AGRIPPA_SECRET_KEY: ${AGRIPPA_SECRET_KEY:?set AGRIPPA_SECRET_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
+      WORKER_SLOTS: ${WORKER_SLOTS:-2}
+    volumes:
+      - workdata:/work
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: agrippa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agrippa}
+      POSTGRES_DB: agrippa
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agrippa"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+
+volumes:
+  pgdata:
+  workdata:
