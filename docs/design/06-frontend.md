@@ -64,15 +64,16 @@ The page (`pages/RunDetailPage.tsx` composing `features/runs/*`):
 
 ## Screens
 
-1. **Project dashboard** — recent runs (status, cost), usage vs. quota gauge, pending approvals, quick-submit shortcuts.
-2. **Scenario catalog** — 3 scenario sections × task-type cards (localized names/descriptions, default Faber avatar).
-3. **Task submission** — auto-generated form + budget preview (template `budgets` + current quota headroom) + submit → redirects to run detail.
-4. **Run detail** — as above; also params snapshot, pinned template version, model resolution, retry button.
-5. **Approvals inbox** — pending approvals across the user's projects; decide inline.
-6. **Resource admin** — registries for fabri / skills / MCP servers / models: list, status, versions, create/edit; secrets write-only masked.
+1. **Project dashboard** — stat tiles (active runs, pending approvals with an inbox link, spend with a quota progress meter, totals), recent-tasks card, spend-by-model panel.
+2. **Scenario catalog** — scenario sections × task-type cards (localized names/descriptions, Faber avatar chips), searchable across both locales' text.
+3. **Task submission** — auto-generated form beside a sticky summary card (Faber, pinned template version, budgets) with the submit action; errors toast.
+4. **Run detail** — see "Live Run Detail" above.
+5. **Approvals inbox** — `GET /approvals/pending`, grouped by project; rows expand into the shared ApprovalPanel with presented-artifact previews and inline decide (viewers get read-only rows); sidebar badge carries the live count.
+6. **Resource admin** — per-resource pages (`pages/admin/`) with a shared dialog-form pattern: fabri / models / skills+versions / MCP servers, full create/edit, disable-without-delete, write-only masked secrets with an explicit clear affordance.
 7. **Template editor** — monospace YAML textarea (CodeMirror deliberately out of scope for now), `validate` (dry-run compile with inline errors), rendered **form preview** from compiled inputs, version browser (open any version; edits fork into the next draft), client-side diff between any two versions (`diff` + the shared PatchView), publish and deprecate with confirmation.
-8. **Project settings** — members & roles, resource grants (checkbox matrix per resource type), repos, quota.
-9. **Usage & audit** — token/cost charts (per model / task type / member / period), audit log table with filters.
+8. **Project settings** — vertical section nav: General (rename/description + archive danger zone), members & roles, resource grants (toggle matrix per resource type), repos, quota; destructive actions confirm.
+9. **Usage** — per-project page: spend vs. quota, total tokens, daily-spend SVG bars, byModel/byTaskType proportion bars (all from `GET /projects/:id/usage`).
+10. **Audit log** — org-admin page over `GET /audit-logs`: actor/action/resource rows with project + action filters and expandable payloads.
 
 ## i18n in the SPA
 
