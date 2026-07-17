@@ -7,6 +7,9 @@ import type { AppEnv } from "../context";
 export const requireSession = createMiddleware<AppEnv>(async (c, next) => {
   const session = await c.var.auth.api.getSession({ headers: c.req.raw.headers });
   if (!session) throw AppError.unauthorized();
-  c.set("user", session.user as unknown as SessionUser);
+  const user = session.user as unknown as SessionUser;
+  c.set("user", user);
+  // profile locale wins unless the request pins ?lang explicitly
+  if (!c.req.query("lang") && user.locale) c.set("locale", user.locale);
   await next();
 });

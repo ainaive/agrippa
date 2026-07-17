@@ -27,6 +27,10 @@ export function createApp(deps: {
     c.set("auth", auth);
     c.set("queue", deps.queue ?? null);
     c.set("bus", deps.bus ?? null);
+    // pre-auth locale: ?lang → Accept-Language → en (requireSession refines)
+    const lang = c.req.query("lang");
+    const header = c.req.header("accept-language") ?? "";
+    c.set("locale", lang ?? (header.toLowerCase().startsWith("zh") ? "zh-CN" : "en"));
     await next();
   });
 

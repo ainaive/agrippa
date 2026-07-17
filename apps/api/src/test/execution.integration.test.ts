@@ -241,6 +241,57 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(await executeRun(engineDeps(), cancelRunId)).toBe("cancelled");
   });
 
+  it("localizes error messages by ?lang and profile locale", async () => {
+    // ?lang pins the response language regardless of profile
+    const zh = await admin.request(`/api/v1/runs/${Bun.randomUUIDv7()}?lang=zh-CN`);
+    expect(zh.status).toBe(404);
+    expect((await jsonOf<{ message: string }>(zh)).message).toBe("资源不存在");
+
+    // profile locale drives it when no ?lang is given
+    await admin.request("/api/v1/me", { method: "PATCH", json: { locale: "zh-CN" } });
+    const profile = await admin.request(`/api/v1/runs/${Bun.randomUUIDv7()}`);
+    expect((await jsonOf<{ message: string }>(profile)).message).toBe("资源不存在");
+    await admin.request("/api/v1/me", { method: "PATCH", json: { locale: "en" } });
+  });
+
+  it("usage reports current-period totals and hard-stop quota blocks new submissions", async () => {
+    const usage = await jsonOf<{
+      costUsd: number;
+      tokens: number;
+      byModel: Array<{ model: string }>;
+    }>(await admin.request(`/api/v1/projects/${projectId}/usage`));
+    expect(usage.tokens).toBeGreaterThan(0); // the succeeded run recorded usage
+    expect(usage.byModel.length).toBeGreaterThan(0);
+
+    // exhaust the quota below current spend → submit rejected before persisting
+    await admin.request(`/api/v1/projects/${projectId}/quota`, {
+      method: "PUT",
+      json: { tokenLimit: 1, hardStop: true },
+    });
+    const blocked = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: submitBody(),
+    });
+    expect(blocked.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(blocked)).code).toBe("quota_exhausted");
+
+    // soft quotas do not block
+    await admin.request(`/api/v1/projects/${projectId}/quota`, {
+      method: "PUT",
+      json: { tokenLimit: 1, hardStop: false },
+    });
+    const allowed = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: submitBody(),
+    });
+    expect(allowed.status).toBe(202);
+    // restore for later tests
+    await admin.request(`/api/v1/projects/${projectId}/quota`, {
+      method: "PUT",
+      json: { tokenLimit: null, hardStop: true },
+    });
+  });
+
   it("retry creates run #2 pinned to the same template version", async () => {
     const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
     expect(res.status).toBe(202);

@@ -30,6 +30,7 @@ import { and, count, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
+import { projectUsage } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { requireProjectRole } from "../middleware/rbac";
 
@@ -385,6 +386,11 @@ export const projectRoutes = new Hono<AppEnv>()
       return c.json(rows);
     },
   )
+
+  // ── Usage ──────────────────────────────────────────────────────────────────
+  .get("/:projectId/usage", requireProjectRole("viewer"), async (c) => {
+    return c.json(await projectUsage(c.var.db, c.req.param("projectId")));
+  })
 
   // ── Quota ──────────────────────────────────────────────────────────────────
   .get("/:projectId/quota", requireProjectRole("viewer"), async (c) => {

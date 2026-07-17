@@ -14,5 +14,7 @@ export type AppEnv = {
     queue: RunQueue | null;
     /** Live-event fan-out; SSE falls back to DB polling when null. */
     bus: RunEventBus | null;
+    /** Response locale: ?lang → user profile → Accept-Language → en. */
+    locale: string;
   };
 };

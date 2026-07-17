@@ -30,10 +30,12 @@ export function DashboardPage() {
   });
   const usage = useQuery({
     queryKey: ["usage", projectId],
-    queryFn: () => api<{ costUsd: number; tokens: number }>(`/projects/${projectId}/usage`),
-    retry: false,
-    // usage endpoint lands in M1.5 — treat 404 as empty
-    throwOnError: false,
+    queryFn: () =>
+      api<{
+        costUsd: number;
+        tokens: number;
+        byModel: Array<{ model: string; costUsd: number; tokens: number }>;
+      }>(`/projects/${projectId}/usage`),
   });
 
   const recent = (tasks.data ?? []).slice(0, 8);
@@ -61,13 +63,23 @@ export function DashboardPage() {
           <CardHeader className="pb-2">
             <CardTitle className="text-sm text-muted-foreground">{t("dashboard.spend")}</CardTitle>
           </CardHeader>
-          <CardContent className="text-2xl font-semibold">
-            {formatCost(usage.data?.costUsd)}
-            {quota.data?.costLimitUsd && (
-              <span className="ml-1 text-sm font-normal text-muted-foreground">
-                / {formatCost(Number(quota.data.costLimitUsd))}
-              </span>
-            )}
+          <CardContent>
+            <p className="text-2xl font-semibold">
+              {formatCost(usage.data?.costUsd)}
+              {quota.data?.costLimitUsd && (
+                <span className="ml-1 text-sm font-normal text-muted-foreground">
+                  / {formatCost(Number(quota.data.costLimitUsd))}
+                </span>
+              )}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {(usage.data?.tokens ?? 0).toLocaleString()} tokens
+            </p>
+            {(usage.data?.byModel ?? []).map((row) => (
+              <p key={row.model} className="text-xs text-muted-foreground">
+                {row.model}: {formatCost(row.costUsd)}
+              </p>
+            ))}
           </CardContent>
         </Card>
         <Card>

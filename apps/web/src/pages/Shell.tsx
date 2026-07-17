@@ -10,7 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { MeContext, useMeQuery } from "../features/me";
-import { authApi } from "../lib/api";
+import { api, authApi } from "../lib/api";
 import { setLocale } from "../lib/i18n";
 
 export function Shell() {
@@ -80,7 +80,11 @@ export function Shell() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setLocale(i18n.language === "en" ? "zh-CN" : "en")}
+                onClick={() => {
+                  const next = i18n.language === "en" ? "zh-CN" : "en";
+                  setLocale(next);
+                  void api("/me", { method: "PATCH", json: { locale: next } }).catch(() => {});
+                }}
               >
                 {i18n.language === "en" ? "中文" : "EN"}
               </Button>

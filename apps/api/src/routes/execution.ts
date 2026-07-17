@@ -29,6 +29,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
+import { assertQuotaHeadroom } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
 
@@ -102,6 +103,9 @@ export const executionRoutes = new Hono<AppEnv>()
       // params validated against the same compiled schema the SPA renders from
       const parsed = buildParamsValidator(compiled.spec.inputs).safeParse(input.params);
       if (!parsed.success) throw AppError.validation(parsed.error.issues);
+
+      // hard-stop quotas reject new work before anything persists
+      await assertQuotaHeadroom(db, projectId);
 
       try {
         const skillRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
