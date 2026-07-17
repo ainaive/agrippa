@@ -11,6 +11,8 @@
     "@agrippa/db": "workspace:*",
     "@agrippa/executor-core": "workspace:*",
     "drizzle-orm": "^0.45.2",
+    "ioredis": "^5.11.1",
+    "pg-boss": "^12.26.1",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   }
