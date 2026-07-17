@@ -64,7 +64,8 @@ GET /task-types/:id                       # includes compiled input schema → f
 POST /projects/:id/tasks                  # {taskTypeId, title, params} → 202 {taskId, runId}
 GET  /projects/:id/tasks?status=&taskType=
 GET  /tasks/:id                           POST /tasks/:id/retry     # → new run
-GET  /runs/:id                            GET /runs/:id/steps
+GET  /runs/:id                            # embeds a viewer-scoped template plan (phases/budgets/modelRoles — no prompts)
+GET  /runs/:id/steps                      # each row carries usage {costUsd, tokens} aggregated from token_usage
 GET  /runs/:id/events                     # SSE; Last-Event-ID replay (see 04)
 POST /runs/:id/cancel
 GET  /runs/:id/approvals                  POST /runs/:id/approvals/:approvalId  # {decision, comment}

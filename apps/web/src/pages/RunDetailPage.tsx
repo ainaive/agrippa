@@ -1,13 +1,18 @@
 import { isTerminalRunStatus } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import { CirclePauseIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DetailSkeleton } from "@/components/LoadingSkeletons";
+import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { RunStatusBadge } from "../components/RunStatusBadge";
+import { BudgetMeter } from "@/features/runs/BudgetMeter";
+import { PhaseTimeline } from "@/features/runs/PhaseTimeline";
+import { RunMetaCard } from "@/features/runs/RunMetaCard";
 import { useRunEvents } from "../features/useRunEvents";
 import { api } from "../lib/api";
 import { formatCost, formatDuration, formatTime, lt } from "../lib/format";
@@ -28,10 +33,11 @@ function ApprovalBanner({ runId, approval }: { runId: string; approval: Approval
   });
 
   return (
-    <Card className="border-amber-400/60 bg-amber-50/50 dark:bg-amber-950/20">
+    <Card className="border-status-warning/40 bg-status-warning/5">
       <CardHeader>
-        <CardTitle className="text-base">
-          ⏸ {approval.payload.title ? lt(approval.payload.title) : approval.checkpointId}
+        <CardTitle className="flex items-center gap-2 text-base">
+          <CirclePauseIcon className="size-4 text-status-warning" />
+          {approval.payload.title ? lt(approval.payload.title) : approval.checkpointId}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -62,6 +68,7 @@ function ApprovalBanner({ runId, approval }: { runId: string; approval: Approval
 
 export function RunDetailPage() {
   const { t } = useTranslation("runs");
+  const navigate = useNavigate();
   const { projectId, runId } = useParams({ strict: false }) as {
     projectId: string;
     runId: string;
@@ -106,27 +113,33 @@ export function RunDetailPage() {
   const retry = useMutation({
     mutationFn: () =>
       api<{ runId: string }>(`/tasks/${run.data?.taskId}/retry`, { method: "POST" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tasks", projectId] }),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["tasks", projectId] });
+      void navigate({
+        to: "/projects/$projectId/runs/$runId",
+        params: { projectId, runId: result.runId },
+      });
+    },
   });
 
-  if (!run.data) return <p className="text-muted-foreground">…</p>;
+  if (!run.data) return <DetailSkeleton />;
   const current = run.data;
   const pendingApproval = (approvals.data ?? []).find((a) => a.status === "pending");
 
-  // latest attempt per step, in seq order
-  const stepRows = [...(steps.data ?? [])]
-    .sort((a, b) => a.seq - b.seq || a.attempt - b.attempt)
-    .reduce((acc, row) => {
-      acc.set(row.stepId, row);
-      return acc;
-    }, new Map<string, RunStep>());
+  // latest attempt per step, in seq order — for the output fallback
+  const latestSteps = [
+    ...[...(steps.data ?? [])]
+      .sort((a, b) => a.seq - b.seq || a.attempt - b.attempt)
+      .reduce((acc, row) => acc.set(row.stepId, row), new Map<string, RunStep>())
+      .values(),
+  ];
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-3">
-        <h2 className="text-lg font-semibold">
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-xl font-semibold tracking-tight">
           {t("run")} #{current.number}
-        </h2>
+        </h1>
         <RunStatusBadge status={current.status} />
         <span className="text-sm text-muted-foreground">
           {formatCost(current.usageTotals?.costUsd)} ·{" "}
@@ -140,6 +153,7 @@ export function RunDetailPage() {
               disabled={cancel.isPending}
               onClick={() => cancel.mutate()}
             >
+              <XIcon />
               {t("actions.cancel")}
             </Button>
           )}
@@ -150,6 +164,7 @@ export function RunDetailPage() {
               disabled={retry.isPending}
               onClick={() => retry.mutate()}
             >
+              <RotateCcwIcon />
               {t("actions.retry")}
             </Button>
           )}
@@ -164,34 +179,37 @@ export function RunDetailPage() {
 
       {pendingApproval && <ApprovalBanner runId={runId} approval={pendingApproval} />}
 
-      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t("timeline")}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ol className="space-y-2">
-              {[...stepRows.values()].map((step) => (
-                <li key={step.id} className="flex items-center justify-between gap-2 text-sm">
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">{step.stepId}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {step.phaseId}
-                      {step.attempt > 1 ? ` · ${t("attempt")} ${step.attempt}` : ""}
-                      {step.startedAt
-                        ? ` · ${formatDuration(step.startedAt, step.finishedAt)}`
-                        : ""}
-                    </p>
-                  </div>
-                  <RunStatusBadge status={step.status} />
-                </li>
-              ))}
-              {stepRows.size === 0 && (
-                <p className="text-sm text-muted-foreground">{t("noSteps")}</p>
-              )}
-            </ol>
-          </CardContent>
-        </Card>
+      <div className="grid items-start gap-4 lg:grid-cols-[340px_1fr]">
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t("timeline")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <PhaseTimeline
+                template={current.template}
+                steps={steps.data ?? []}
+                approvals={approvals.data ?? []}
+              />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t("budget.title")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <BudgetMeter run={current} />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t("meta.title")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <RunMetaCard run={current} />
+            </CardContent>
+          </Card>
+        </div>
 
         <Tabs defaultValue="output">
           <TabsList>
@@ -206,7 +224,7 @@ export function RunDetailPage() {
               <CardContent className="pt-4">
                 <pre className="max-h-96 min-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs">
                   {streamText ||
-                    [...stepRows.values()]
+                    latestSteps
                       .filter((s) => s.output)
                       .map((s) => `── ${s.stepId} ──\n${s.output}`)
                       .join("\n\n") ||

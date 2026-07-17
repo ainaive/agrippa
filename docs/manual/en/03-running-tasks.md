@@ -10,11 +10,13 @@ Submission can be rejected up front with a specific reason: a required skill or 
 
 Submitting lands you on the **run detail** page, which updates live:
 
-- **Timeline** (left): every step with its phase, status, attempt count, and duration. Steps can be *skipped* (a condition was false or an optional integration is unavailable) — that's normal, not an error.
+- **Timeline** (left): steps grouped by the template's **phases**, each with status, duration, cost, attempt count, and the model role that executed it; approval checkpoints appear inline in their phase. Steps can be *skipped* (a condition was false or an optional integration is unavailable) — that's normal, not an error.
+- **Budget** panel: live meters of cost against the cost limit and elapsed time against the time limit, plus any per-phase caps.
+- **Details** panel: the pinned template version, the executor, and the frozen model resolution (which concrete model serves each role).
 - **Output** tab: the agent's streaming text while a step executes; after completion, each step's final output.
 - **Artifacts** tab: deliverables appear as they're produced; download any of them (reports as Markdown, code changes as patches, links as URLs).
 - **Parameters** tab: the exact input snapshot the run executes with.
-- The header shows live **cost** against the budget and total duration.
+- The header shows live **cost** and total duration.
 
 If you close the page, nothing is lost — reopening replays the full event history and re-attaches to the live stream.
 

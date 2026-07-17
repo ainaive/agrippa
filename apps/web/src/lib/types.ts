@@ -67,18 +67,52 @@ export type TaskRow = {
   runNumber: number | null;
 };
 
+export type ModelResolutionEntry = {
+  role: string;
+  tier: string;
+  modelId: string;
+  provider: string;
+  providerModelId: string;
+};
+
+export type RunBudgets = {
+  maxCostUsd?: number;
+  maxDurationMinutes?: number;
+  perPhase?: Record<string, { maxCostUsd: number }>;
+};
+
+export type RunTemplate = {
+  slug: string;
+  version: number;
+  phases: Array<{
+    id: string;
+    name: LocalizedText;
+    stepIds: string[];
+    approval: { checkpoint: string; title: LocalizedText; present: string[] } | null;
+  }>;
+  budgets: RunBudgets;
+  modelRoles: Record<string, { tier: string; fallback: string[] }>;
+};
+
 export type Run = {
   id: string;
   taskId: string;
   projectId: string;
   number: number;
   status: RunStatus;
+  templateVersionId: string;
+  faberId: string;
+  executorId: string;
   paramsSnapshot: Record<string, unknown>;
+  modelResolution: Record<string, ModelResolutionEntry>;
+  budget: RunBudgets;
   usageTotals: { costUsd?: number; tokens?: number };
+  workspaceRef: string | null;
   error: { code: string; message: string } | null;
   queuedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  template: RunTemplate | null;
 };
 
 export type RunStep = {
@@ -88,7 +122,9 @@ export type RunStep = {
   attempt: number;
   seq: number;
   status: StepStatus;
+  agentRef: string | null;
   output: string | null;
+  usage: { costUsd?: number; tokens?: number };
   startedAt: string | null;
   finishedAt: string | null;
 };

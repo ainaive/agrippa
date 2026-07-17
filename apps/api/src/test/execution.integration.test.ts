@@ -187,11 +187,36 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     runId = body.runId;
     expect(enqueued).toContain(runId);
 
-    const run = await jsonOf<{ status: string; executorId: string }>(
-      await admin.request(`/api/v1/runs/${runId}`),
-    );
+    const run = await jsonOf<{
+      status: string;
+      executorId: string;
+      template: {
+        slug: string;
+        version: number;
+        phases: Array<Record<string, unknown>>;
+        budgets: Record<string, unknown>;
+        modelRoles: Record<string, unknown>;
+      };
+    }>(await viewer.request(`/api/v1/runs/${runId}`));
     expect(run.status).toBe("queued");
     expect(run.executorId).toBe("claude-agent-sdk");
+
+    // template plan embed: structure + i18n names only. The key allowlist is a
+    // leak guard — a phase must never carry step instructions or prompts.
+    expect(run.template.slug).toBe("swdev.bug-localize-fix");
+    expect(run.template.version).toBeGreaterThanOrEqual(1);
+    expect(run.template.phases.length).toBeGreaterThan(0);
+    for (const phase of run.template.phases) {
+      expect(Object.keys(phase).sort()).toEqual(["approval", "id", "name", "stepIds"]);
+      expect(Array.isArray(phase.stepIds)).toBe(true);
+    }
+    const withApproval = run.template.phases.find((p) => p.approval !== null);
+    expect(withApproval).toBeDefined();
+    expect(Object.keys(withApproval?.approval as Record<string, unknown>).sort()).toEqual([
+      "checkpoint",
+      "present",
+      "title",
+    ]);
   });
 
   it("worker leg 1 pauses at the approval; the API decides; leg 2 succeeds", async () => {
@@ -223,10 +248,13 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   });
 
   it("exposes steps and downloadable artifacts", async () => {
-    const steps = await jsonOf<Array<{ stepId: string; status: string }>>(
-      await viewer.request(`/api/v1/runs/${runId}/steps`),
-    );
-    expect(steps.find((s) => s.stepId === "find-root-cause")?.status).toBe("succeeded");
+    const steps = await jsonOf<
+      Array<{ stepId: string; status: string; usage: { costUsd?: number; tokens?: number } }>
+    >(await viewer.request(`/api/v1/runs/${runId}/steps`));
+    const rootCause = steps.find((s) => s.stepId === "find-root-cause");
+    expect(rootCause?.status).toBe("succeeded");
+    // per-step spend is aggregated from token_usage into the response
+    expect(typeof rootCause?.usage.costUsd).toBe("number");
 
     const artifacts = await jsonOf<Array<{ id: string; artifactKey: string }>>(
       await viewer.request(`/api/v1/runs/${runId}/artifacts`),

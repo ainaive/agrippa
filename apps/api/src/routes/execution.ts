@@ -16,6 +16,7 @@ import {
   tasks,
   taskTypes,
   templateVersions,
+  tokenUsage,
 } from "@agrippa/db";
 import {
   appendRunEvent as allocateRunEvent,
@@ -27,7 +28,7 @@ import {
   type TemplateDoc,
   verifyRepoRefs,
 } from "@agrippa/orchestration";
-import { and, asc, desc, eq, gt } from "drizzle-orm";
+import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
@@ -245,7 +246,46 @@ export const executionRoutes = new Hono<AppEnv>()
   // ── Runs ────────────────────────────────────────────────────────────────────
   .get("/runs/:id", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
-    return c.json(run);
+    // Embed the pinned template's plan so the UI can group steps by phase.
+    // Viewer-scoped projection: structure + i18n names only — never
+    // instructions, prompts, or resource references.
+    let template: Record<string, unknown> | null = null;
+    if (run.templateVersionId) {
+      const [row] = await c.var.db
+        .select({
+          version: templateVersions.version,
+          compiled: templateVersions.compiled,
+          slug: orchestrationTemplates.slug,
+        })
+        .from(templateVersions)
+        .innerJoin(
+          orchestrationTemplates,
+          eq(orchestrationTemplates.id, templateVersions.templateId),
+        )
+        .where(eq(templateVersions.id, run.templateVersionId));
+      const spec = (row?.compiled as TemplateDoc | undefined)?.spec;
+      if (row && spec) {
+        template = {
+          slug: row.slug,
+          version: row.version,
+          phases: spec.phases.map((phase) => ({
+            id: phase.id,
+            name: phase.name,
+            stepIds: phase.steps.map((step) => step.id),
+            approval: phase.approval
+              ? {
+                  checkpoint: phase.approval.checkpoint,
+                  title: phase.approval.title,
+                  present: phase.approval.present,
+                }
+              : null,
+          })),
+          budgets: spec.budgets,
+          modelRoles: spec.models.roles,
+        };
+      }
+    }
+    return c.json({ ...run, template });
   })
   .get("/runs/:id/steps", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
@@ -254,7 +294,21 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(runSteps)
       .where(eq(runSteps.runId, run.id))
       .orderBy(asc(runSteps.seq), asc(runSteps.attempt));
-    return c.json(rows);
+    // per-step spend lives in token_usage (per attempt); aggregate it into the
+    // response so the timeline can show cost without an N+1 from the SPA
+    const usageRows = await c.var.db
+      .select({
+        stepId: tokenUsage.stepId,
+        costUsd: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+        tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
+      })
+      .from(tokenUsage)
+      .where(eq(tokenUsage.runId, run.id))
+      .groupBy(tokenUsage.stepId);
+    const usageByStep = new Map(
+      usageRows.map((u) => [u.stepId, { costUsd: Number(u.costUsd), tokens: Number(u.tokens) }]),
+    );
+    return c.json(rows.map((row) => ({ ...row, usage: usageByStep.get(row.id) ?? row.usage })));
   })
   .post("/runs/:id/cancel", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "member");

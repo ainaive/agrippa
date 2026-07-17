@@ -36,6 +36,25 @@
     "title": "Pending approvals",
     "empty": "Nothing is waiting for your approval."
   },
+  "phases": {
+    "checkpoint": "Approval checkpoint",
+    "notStarted": "Not started yet"
+  },
+  "steps": {
+    "attempts": "{{count}} attempts"
+  },
+  "budget": {
+    "title": "Budget",
+    "cost": "Cost",
+    "duration": "Duration",
+    "perPhase": "Per-phase caps"
+  },
+  "meta": {
+    "title": "Details",
+    "template": "Template",
+    "executor": "Executor",
+    "models": "Model roles"
+  },
   "dashboard": {
     "openTasks": "Active runs",
     "pendingApprovals": "Pending approvals",

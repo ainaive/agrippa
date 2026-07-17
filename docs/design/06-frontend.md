@@ -47,15 +47,15 @@ This is the contract that makes "add a task type without frontend work" true: pu
 
 ## Live Run Detail
 
-`useRunEvents(runId)` opens the SSE stream (`/runs/:id/events`, browser `EventSource` handles `Last-Event-ID` reconnection) and patches the TanStack Query cache:
+`GET /runs/:id` embeds a **viewer-scoped projection of the pinned template plan** (`template: { slug, version, phases[{id, name, stepIds, approval}], budgets, modelRoles }` — structure and i18n names only, never step instructions or prompts), and `GET /runs/:id/steps` aggregates per-step spend from `token_usage` into each row's `usage`. On top of that, `useRunEvents(runId)` opens the SSE stream (`/runs/:id/events`, browser `EventSource` handles `Last-Event-ID` reconnection) and invalidates the run queries (debounced) as events arrive; the run also polls at 3–5 s while non-terminal as a fallback.
 
-- step/phase events → update the run-steps query → **phase/step timeline** re-renders (pending/running/succeeded/failed/skipped badges, per-step duration & cost).
-- `message.delta` → append to the streaming output pane for the active step.
-- `usage` → live cost/token meter vs. budget.
-- `artifact` → artifacts tab (markdown rendered inline; patch viewer with syntax highlighting; download for files).
-- `approval.required` → approval banner: presents the `present:` artifacts inline with Approve/Reject + comment.
+The page (`pages/RunDetailPage.tsx` composing `features/runs/*`):
 
-Terminal states close the stream and invalidate queries once — no polling.
+- **PhaseTimeline** — steps grouped under the template's phases (numbered, localized names; unstarted phases dimmed; runs without an embed fall back to grouping by `phaseId`), each step with status icon, duration, cost, attempt count, and its model-role chip; approval checkpoints render inline in their phase with their decision state.
+- **BudgetMeter** — cost vs. `maxCostUsd` and elapsed vs. `maxDurationMinutes` as progress meters (danger tint past 90%), plus per-phase caps.
+- **RunMetaCard** — pinned `slug@vN`, executor, and the frozen model resolution (role → provider model + tier).
+- **Streaming pane** — `message.delta` events accumulate into the output tab; step outputs are the fallback once the stream ends.
+- Approval banner with Approve/Reject + comment; cancel while running; retry (navigates to the new pinned run) once terminal.
 
 ## Screens
 
