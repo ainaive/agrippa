@@ -445,7 +445,7 @@ export const executionRoutes = new Hono<AppEnv>()
       if (bus) {
         const queue: Array<() => Promise<void>> = [];
         let notify: (() => void) | null = null;
-        const unsubscribe = bus.subscribe(run.id, (event) => {
+        const subscription = bus.subscribe(run.id, (event) => {
           queue.push(async () => {
             if (event.seq > cursor) {
               await sendRow({ ...event, createdAt: event.createdAt });
@@ -454,7 +454,13 @@ export const executionRoutes = new Hono<AppEnv>()
           notify?.();
         });
         try {
-          await replay(); // history first; the subscription is already buffering
+          // wait until the subscription is actually live, THEN replay history,
+          // so nothing published in between is dropped (ADR-0007)
+          await subscription.ready;
+          await replay();
+          // periodically re-replay from Postgres so a dropped pub/sub message is
+          // recovered mid-run, not only when the run becomes terminal
+          let sinceReplay = 0;
           while (!closed) {
             while (queue.length > 0) {
               const job = queue.shift();
@@ -464,6 +470,10 @@ export const executionRoutes = new Hono<AppEnv>()
               await replay(); // drain anything raced between bus and DB
               break;
             }
+            if (++sinceReplay >= 5) {
+              sinceReplay = 0;
+              await replay();
+            }
             await new Promise<void>((resolve) => {
               notify = resolve;
               setTimeout(resolve, 2000);
@@ -471,7 +481,7 @@ export const executionRoutes = new Hono<AppEnv>()
             notify = null;
           }
         } finally {
-          unsubscribe();
+          subscription.unsubscribe();
         }
       } else {
         await replay();

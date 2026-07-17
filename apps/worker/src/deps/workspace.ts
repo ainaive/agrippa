@@ -110,6 +110,13 @@ export class GitWorkspaceManager implements WorkspaceManager {
     }
   }
 
+  async clearArtifacts(runId: string): Promise<void> {
+    await rm(path.join(this.dirFor(runId), ".agrippa", "artifacts"), {
+      recursive: true,
+      force: true,
+    });
+  }
+
   async cleanup(runId: string): Promise<void> {
     if (process.env.AGRIPPA_KEEP_WORKSPACES === "1") return;
     await rm(this.dirFor(runId), { recursive: true, force: true });

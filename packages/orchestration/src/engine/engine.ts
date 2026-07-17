@@ -250,6 +250,18 @@ class RunEngine {
       })
       .from(tokenUsage)
       .where(eq(tokenUsage.runId, run.id));
+    // per-phase spend, rebuilt by phase so per-phase budgets survive a resume
+    // (usage rows carry a step id; run_steps carries the phase)
+    const perPhaseRows = await db
+      .select({
+        phaseId: runSteps.phaseId,
+        cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+      })
+      .from(tokenUsage)
+      .innerJoin(runSteps, eq(tokenUsage.stepId, runSteps.id))
+      .where(eq(tokenUsage.runId, run.id))
+      .groupBy(runSteps.phaseId);
+    const perPhaseSpent = Object.fromEntries(perPhaseRows.map((r) => [r.phaseId, Number(r.cost)]));
     const budgets = this.template.spec.budgets;
     const quota = await this.quotaHeadroom();
     this.meter = new BudgetMeter(
@@ -261,7 +273,11 @@ class RunEngine {
         quotaCostUsd: quota.costUsd,
         quotaTokens: quota.tokens,
       },
-      { costUsd: Number(usageTotals?.cost ?? 0), tokens: Number(usageTotals?.tokens ?? 0) },
+      {
+        costUsd: Number(usageTotals?.cost ?? 0),
+        tokens: Number(usageTotals?.tokens ?? 0),
+        perPhaseCostUsd: perPhaseSpent,
+      },
     );
 
     // duration budget survives resume: deadline anchors to the original start
@@ -439,10 +455,14 @@ class RunEngine {
       return;
     }
     if (step.requires) {
-      const authorized = this.authorizedMcpRefs(step.requires.mcpServers);
-      const ungranted = step.requires.mcpServers.filter((ref) => !authorized.includes(ref));
-      const { missing } = await this.deps.resources.mcpServers(authorized);
-      const unavailable = [...ungranted, ...missing];
+      const authorizedMcp = this.authorizedMcpRefs(step.requires.mcpServers);
+      const ungrantedMcp = step.requires.mcpServers.filter((ref) => !authorizedMcp.includes(ref));
+      const { missing } = await this.deps.resources.mcpServers(authorizedMcp);
+      // a required skill the run isn't authorized for is also unmet — otherwise
+      // the step would run without the skill it declared it needs
+      const authorizedSkills = this.authorizedSkillRefs(step.requires.skills);
+      const ungrantedSkills = step.requires.skills.filter((ref) => !authorizedSkills.includes(ref));
+      const unavailable = [...ungrantedMcp, ...missing, ...ungrantedSkills];
       if (unavailable.length > 0) {
         await this.markSkipped(
           phase,
@@ -464,6 +484,9 @@ class RunEngine {
           await this.runSystemStep(step);
           await this.completeStep(row, "");
         } else {
+          // start each attempt from a clean artifact dir so a prior attempt's
+          // stale file isn't collected as this attempt's result
+          await this.deps.workspace.clearArtifacts(this.run.id);
           const output = await this.runAgentStep(phase, step, row, attempt);
           await this.completeStep(row, output);
         }
@@ -743,9 +766,10 @@ class RunEngine {
       { inline: event.inline, path: event.path },
       this.workspaceDir,
     );
-    // a missing/empty source produced no bytes — don't create a zero-byte row
-    // (and don't mark the key produced, so a required artifact still fails)
-    if (stored.inline === null && stored.storageRef === null) return;
+    // a missing OR empty source produced no bytes — don't create a zero-byte row
+    // (and don't mark the key produced, so a required-but-empty artifact still
+    // fails the contract rather than passing it)
+    if (stored.size === 0 && stored.storageRef === null) return;
     await this.db.insert(artifacts).values({
       runId: this.run.id,
       stepId: row.id,

@@ -24,6 +24,9 @@ export interface WorkspaceManager {
   checkout(runId: string, spec: WorkspaceSpec): Promise<void>;
   /** git diff against the checkout base — engine-side patch artifacts. */
   diff(runId: string): Promise<string>;
+  /** Empty the artifact convention dir before an attempt, so a failed attempt's
+   *  stale file can't be re-collected by a later successful attempt. */
+  clearArtifacts(runId: string): Promise<void>;
   cleanup(runId: string): Promise<void>;
 }
 

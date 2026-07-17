@@ -40,31 +40,53 @@ export class DiskArtifactStore implements ArtifactStore {
     source: { inline?: unknown; path?: string },
     workspaceDir: string,
   ): Promise<StoredArtifact> {
-    let content: string | null = null;
-    let mime: string | null = null;
-
+    // engine-provided inline content (patch diffs, links) is always text
     if (source.inline !== undefined) {
-      content = typeof source.inline === "string" ? source.inline : JSON.stringify(source.inline);
-      mime = kind === "json" ? "application/json" : "text/markdown";
-    } else if (source.path) {
-      const real = await resolveContainedPath(workspaceDir, source.path);
-      if (real === null) return EMPTY;
-      const file = Bun.file(real);
-      if (await file.exists()) {
-        content = await file.text();
-        mime = file.type || null;
-      }
+      const content =
+        typeof source.inline === "string" ? source.inline : JSON.stringify(source.inline);
+      const mime = kind === "json" ? "application/json" : "text/markdown";
+      return this.storeText(runId, key, content, mime);
     }
-    if (content === null) return EMPTY;
+    if (!source.path) return EMPTY;
 
-    const size = Buffer.byteLength(content);
-    if (size <= INLINE_LIMIT) {
-      return { inline: content, storageRef: null, size, mime };
+    const real = await resolveContainedPath(workspaceDir, source.path);
+    if (real === null) return EMPTY;
+    const file = Bun.file(real);
+    if (!(await file.exists())) return EMPTY;
+
+    // `file`-kind artifacts may be binary — read raw bytes and stream them on
+    // download rather than decoding to UTF-8 (which corrupts non-text content)
+    if (kind === "file") {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (bytes.byteLength === 0) return EMPTY;
+      const storageRef = await this.writeToDisk(runId, key, bytes);
+      return { inline: null, storageRef, size: bytes.byteLength, mime: file.type || null };
     }
+    return this.storeText(runId, key, await file.text(), file.type || null);
+  }
+
+  private async storeText(
+    runId: string,
+    key: string,
+    content: string,
+    mime: string | null,
+  ): Promise<StoredArtifact> {
+    const size = Buffer.byteLength(content);
+    if (size === 0) return EMPTY;
+    if (size <= INLINE_LIMIT) return { inline: content, storageRef: null, size, mime };
+    const storageRef = await this.writeToDisk(runId, key, content);
+    return { inline: null, storageRef, size, mime };
+  }
+
+  private async writeToDisk(
+    runId: string,
+    key: string,
+    data: string | Uint8Array,
+  ): Promise<string> {
     const dir = path.join(STORAGE_ROOT, runId);
     await mkdir(dir, { recursive: true });
     const storageRef = path.join(dir, key);
-    await Bun.write(storageRef, content);
-    return { inline: null, storageRef, size, mime };
+    await Bun.write(storageRef, data);
+    return storageRef;
   }
 }

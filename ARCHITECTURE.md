@@ -52,8 +52,8 @@ Dependency direction is enforced by `scripts/check-deps.ts` (runtime deps only).
 3. **Steps are the idempotency unit** — restart-safe by template rule, resumable by session id where the executor supports it.
 4. **Usage rows are keyed `(run, step, attempt)`** so retries re-incur cost without ever double-counting.
 5. **Executors are stateless I/O**: all inputs in the request, all outputs as events; they never touch the database.
-6. **Secrets never leave as plaintext**: encrypted at rest (AES-256-GCM), write-only in the API, scrubbed from git remotes before agent code runs, and stripped from the agent subprocess environment (the master key and datastore URLs never reach a tool call).
-7. **Containment goes through one seam**: every tool call and the subprocess env are decided by `packages/executor-core/isolation.ts`; the adapter never reimplements it (ADR-0009).
+6. **Secrets never leave as plaintext**: encrypted at rest (AES-256-GCM), write-only in the API, scrubbed from git remotes before agent code runs, stripped from the agent subprocess environment (the master key and datastore URLs never reach a tool call), and redacted from event payloads before they persist or stream.
+7. **Containment goes through one seam**: every tool call (reads and writes confined to the workspace) and the subprocess env are decided by `packages/executor-core/isolation.ts`; the adapter never reimplements it (ADR-0009). OS-level isolation between runs and keeping the provider key out of the subprocess are deferred to the container layer.
 8. **The worker trusts only the pinned manifest**: repos are project-scoped and skills/MCP resolve solely from `runs.resource_manifest`, never the mutable global registry.
 9. **Lifecycle mutations are atomic**: run status transitions are compare-and-swap on the expected status and event `seq` is allocated by the database, so concurrent writers can't clobber a status or collide on a seq (`run-lifecycle.ts`).
 

@@ -16,6 +16,11 @@ services:
       AGRIPPA_BASE_URL: ${AGRIPPA_BASE_URL:-http://localhost:3000}
       AGRIPPA_SECRET_KEY: ${AGRIPPA_SECRET_KEY:?set AGRIPPA_SECRET_KEY (openssl rand -base64 32)}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET (openssl rand -base64 32)}
+      # the API chooses the executor at submit, so it must see the same setting
+      AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
+    volumes:
+      # the API serves artifact downloads, incl. large ones stored on the volume
+      - workdata:/work
     depends_on:
       postgres:
         condition: service_healthy

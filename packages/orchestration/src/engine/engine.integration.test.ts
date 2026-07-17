@@ -596,13 +596,21 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
   it("streams live events over the bus while executing", async () => {
     const { runId, makeDeps, bus } = await setupFixture();
     const seen: string[] = [];
-    const unsubscribe = bus.subscribe(runId, (event) => seen.push(event.type));
+    const subscription = bus.subscribe(runId, (event) => seen.push(event.type));
     await executeRun(makeDeps(HAPPY_SCRIPT), runId);
-    unsubscribe();
+    subscription.unsubscribe();
     expect(seen[0]).toBe("run.started");
     expect(seen).toContain("step.started");
     expect(seen).toContain("usage");
     expect(seen).toContain("approval.required");
+  });
+
+  it("clears the artifact dir before each agent step attempt", async () => {
+    const { runId, makeDeps, workspace } = await setupFixture();
+    await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+    // agent steps ran → clearArtifacts was invoked (so a stale attempt file
+    // can't be re-collected as a later attempt's result)
+    expect(workspace.cleared).toContain(runId);
   });
 
   it("redacts known secret values from persisted events", async () => {

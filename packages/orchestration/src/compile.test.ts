@@ -94,6 +94,13 @@ describe("template compiler", () => {
     );
   });
 
+  it("rejects a requires.skills reference to an unknown skill", () => {
+    const source = mutate((doc) => {
+      doc.spec.phases[1].steps[0].requires = { skills: ["nonexistent-skill"] };
+    });
+    expect(issuesOf(source).join()).toContain("requires unknown skill 'nonexistent-skill'");
+  });
+
   it("rejects references to steps that are not defined earlier", () => {
     const source = mutate((doc) => {
       doc.spec.phases[0].steps[1].instructions = "look at ${steps.summarize.outputs.x}";

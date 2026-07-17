@@ -67,4 +67,40 @@ describe("DiskArtifactStore path containment", () => {
     expect(stored.storageRef).toBeNull();
     expect(stored.size).toBe(0);
   });
+
+  it("treats an existing but empty file as no content", async () => {
+    const ws = freshWorkspace();
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    writeFileSync(path.join(ws, ".agrippa/artifacts/empty.md"), "");
+    const stored = await store.store(
+      "run-1",
+      "empty",
+      "markdown",
+      { path: ".agrippa/artifacts/empty.md" },
+      ws,
+    );
+    expect(stored.inline).toBeNull();
+    expect(stored.storageRef).toBeNull();
+    expect(stored.size).toBe(0);
+  });
+
+  it("stores a binary file-kind artifact byte-exact on disk, not decoded as text", async () => {
+    const ws = freshWorkspace();
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x01]); // PNG-ish + nulls
+    writeFileSync(path.join(ws, ".agrippa/artifacts/blob"), bytes);
+
+    const stored = await store.store(
+      "run-1",
+      "blob",
+      "file",
+      { path: ".agrippa/artifacts/blob" },
+      ws,
+    );
+    expect(stored.inline).toBeNull();
+    expect(stored.storageRef).not.toBeNull();
+    expect(stored.size).toBe(8);
+    const round = new Uint8Array(await Bun.file(stored.storageRef as string).arrayBuffer());
+    expect([...round]).toEqual([...bytes]); // byte-exact, no UTF-8 corruption
+  });
 });

@@ -17,7 +17,7 @@ The enqueue is a post-commit send, so a narrow dual-write window exists (a crash
 
 ## Run State Machine
 
-Pure function in `@agrippa/core` (`transition(state, event) → state | error`); every transition is persisted and audited. The persist step is a **compare-and-swap** on the expected `from` status (`run-lifecycle.transitionRun`), so a late worker finalize can't overwrite a status another path (e.g. a concurrent cancel) already moved on from — the loser of the race simply doesn't write.
+Pure function in `@agrippa/core` (`transition(state, event) → state | error`); every transition is persisted and audited. The persist step is a **compare-and-swap** on the expected `from` status (`run-lifecycle.transitionRun`), so a late worker finalize can't overwrite a status another path (e.g. a concurrent cancel) already moved on from — the loser of the race simply doesn't write. Finalization commits the status change, `finishedAt`/`usageTotals`, and the terminal event in **one transaction** (publishing to the bus only after commit), so a crash can't leave a terminal run missing its totals or event; the retry-exhaustion path also goes through the CAS.
 
 ```
                     ┌────────────────────────────┐
@@ -98,7 +98,7 @@ Two independent layers, both enforced:
 
 ## Live Progress (SSE)
 
-Ordering rule: the engine writes `run_events` **first** — the per-run monotonic `seq` is allocated by the database inside the INSERT (`run-lifecycle.appendRunEvent`), not from an in-memory `max+1` that a concurrent writer could collide with — then publishes the same event to Redis `run:{id}:events`.
+Ordering rule: the engine writes `run_events` **first** — the per-run monotonic `seq` comes from an atomic counter (`runs.next_event_seq`, allocated by `UPDATE … RETURNING` in `run-lifecycle.appendRunEvent`), so it is collision-free and works inside a caller's transaction (the approval decision, which appends its event in the same tx as the decision) — then publishes the same event to Redis `run:{id}:events`.
 
 `GET /runs/:id/events` (SSE):
 
@@ -107,4 +107,4 @@ Ordering rule: the engine writes `run_events` **first** — the per-run monotoni
 3. flush the buffer, deduplicating by `seq` against the replay,
 4. emit each as `id: <seq>\nevent: <type>\ndata: <payload>`.
 
-Subscribing **before** replaying is what makes reconnection gap-free by construction: an event committed and published in the window between replay and subscribe would otherwise be delivered only at the terminal replay. Redis is optional: with a bus, live events push instantly; without one, the stream falls back to periodic DB replay, which preserves correctness (just with a small latency). Either way, if Redis is briefly down, clients reconnect and replay from Postgres.
+Subscribing (and **awaiting** the subscription is live — for Redis, the SUBSCRIBE ack) **before** replaying is what makes reconnection gap-free: an event committed and published in the window between replay and subscribe would otherwise be delivered only at the terminal replay. The bus branch also re-replays Postgres periodically, not only at terminal, so a dropped pub/sub message is recovered mid-run. Redis is optional: with a bus, live events push instantly; without one, the stream falls back to periodic DB replay, which preserves correctness (just with a small latency). Either way, if Redis is briefly down, clients reconnect and replay from Postgres.
