@@ -1,13 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "../client";
-import {
-  fabri,
-  models,
-  orchestrationTemplates,
-  orgs,
-  scenarios,
-  taskTypes,
-} from "../schema";
+import { fabri, models, orchestrationTemplates, orgs, scenarios, taskTypes } from "../schema";
 
 /**
  * Idempotent seed of builtin resources: the default org, the three scenarios,
@@ -113,12 +106,36 @@ export async function seed(db: Db): Promise<void> {
 
   // ── Template heads (versions land in M1.2 from templates/*.yaml) ──────────
   const templateRows = [
-    { slug: "pm.status-report", scenario: "project-management", nameI18n: { en: "Status Report", "zh-CN": "状态报告" } },
-    { slug: "pm.plan-breakdown", scenario: "project-management", nameI18n: { en: "Plan Breakdown", "zh-CN": "计划拆解" } },
-    { slug: "swdev.requirements-dev", scenario: "software-development", nameI18n: { en: "Requirements Development", "zh-CN": "需求开发" } },
-    { slug: "swdev.bug-localize-fix", scenario: "software-development", nameI18n: { en: "Bug Localization & Fix", "zh-CN": "缺陷定位与修复" } },
-    { slug: "test.test-plan", scenario: "test-verification", nameI18n: { en: "Test Plan", "zh-CN": "测试计划" } },
-    { slug: "test.regression-verify", scenario: "test-verification", nameI18n: { en: "Regression Verification", "zh-CN": "回归验证" } },
+    {
+      slug: "pm.status-report",
+      scenario: "project-management",
+      nameI18n: { en: "Status Report", "zh-CN": "状态报告" },
+    },
+    {
+      slug: "pm.plan-breakdown",
+      scenario: "project-management",
+      nameI18n: { en: "Plan Breakdown", "zh-CN": "计划拆解" },
+    },
+    {
+      slug: "swdev.requirements-dev",
+      scenario: "software-development",
+      nameI18n: { en: "Requirements Development", "zh-CN": "需求开发" },
+    },
+    {
+      slug: "swdev.bug-localize-fix",
+      scenario: "software-development",
+      nameI18n: { en: "Bug Localization & Fix", "zh-CN": "缺陷定位与修复" },
+    },
+    {
+      slug: "test.test-plan",
+      scenario: "test-verification",
+      nameI18n: { en: "Test Plan", "zh-CN": "测试计划" },
+    },
+    {
+      slug: "test.regression-verify",
+      scenario: "test-verification",
+      nameI18n: { en: "Regression Verification", "zh-CN": "回归验证" },
+    },
   ];
   for (const row of templateRows) {
     const scenario = scenarioBySlug.get(row.scenario);

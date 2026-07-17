@@ -3,3 +3,4 @@ export * from "./migrate";
 export * as schema from "./schema";
 export * from "./schema";
 export * from "./secrets";
+export * from "./seed";
