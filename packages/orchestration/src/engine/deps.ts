@@ -28,8 +28,11 @@ export interface WorkspaceManager {
 }
 
 export interface ResourceMaterializer {
-  /** Materialize the step's skills into the workspace; returns their disk locations. */
-  skills(refs: string[], workspaceDir: string): Promise<ResolvedSkill[]>;
+  /** Materialize the step's skills into the workspace; missing = unregistered or no active version. */
+  skills(
+    refs: string[],
+    workspaceDir: string,
+  ): Promise<{ resolved: ResolvedSkill[]; missing: string[] }>;
   /** Resolve step MCP refs against the registry + secrets; missing = unregistered/disabled. */
   mcpServers(refs: string[]): Promise<{ resolved: ResolvedMcpServer[]; missing: string[] }>;
 }

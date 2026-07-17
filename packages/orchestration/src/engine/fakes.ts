@@ -38,12 +38,26 @@ export class FakeWorkspaceManager implements WorkspaceManager {
 export class FakeResourceMaterializer implements ResourceMaterializer {
   constructor(private readonly available: { skills?: string[]; mcpServers?: string[] } = {}) {}
 
-  async skills(refs: string[], workspaceDir: string): Promise<ResolvedSkill[]> {
-    return refs.map((ref) => ({
-      slug: ref.split("@")[0] as string,
-      version: "1.0.0",
-      localPath: path.join(workspaceDir, ".claude/skills", ref.split("@")[0] as string),
-    }));
+  async skills(
+    refs: string[],
+    workspaceDir: string,
+  ): Promise<{ resolved: ResolvedSkill[]; missing: string[] }> {
+    const allowed = this.available.skills; // undefined = all available
+    const resolved: ResolvedSkill[] = [];
+    const missing: string[] = [];
+    for (const ref of refs) {
+      const slug = ref.split("@")[0] as string;
+      if (allowed === undefined || allowed.includes(slug) || allowed.includes(ref)) {
+        resolved.push({
+          slug,
+          version: "1.0.0",
+          localPath: path.join(workspaceDir, ".claude/skills", slug),
+        });
+      } else {
+        missing.push(ref);
+      }
+    }
+    return { resolved, missing };
   }
 
   async mcpServers(refs: string[]): Promise<{ resolved: ResolvedMcpServer[]; missing: string[] }> {

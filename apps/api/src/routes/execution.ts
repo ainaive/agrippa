@@ -437,48 +437,31 @@ export const executionRoutes = new Hono<AppEnv>()
         return row ? isTerminalRunStatus(row.status) : true;
       };
 
-      // Live: bridge the bus when present, else poll the DB. With a bus we must
-      // subscribe BEFORE replaying Postgres — an event committed and published
-      // in the window between replay and subscribe would otherwise be delivered
-      // only at the terminal replay, contradicting ADR-0007's gap-free
-      // guarantee. Buffered live events dedupe against the replay by seq.
+      // Live: bridge the bus when present, else poll the DB. The bus is only a
+      // WAKE-UP — every event is delivered by an ordered `replay()` from
+      // Postgres, so the cursor advances contiguously. Sending bus events
+      // directly would advance a high-water cursor past a dropped seq, and that
+      // gap would then be skipped forever (even on Last-Event-ID reconnect).
       if (bus) {
-        const queue: Array<() => Promise<void>> = [];
         let notify: (() => void) | null = null;
-        const subscription = bus.subscribe(run.id, (event) => {
-          queue.push(async () => {
-            if (event.seq > cursor) {
-              await sendRow({ ...event, createdAt: event.createdAt });
-            }
-          });
-          notify?.();
-        });
+        const subscription = bus.subscribe(run.id, () => notify?.());
         try {
           // wait until the subscription is actually live, THEN replay history,
           // so nothing published in between is dropped (ADR-0007)
           await subscription.ready;
           await replay();
-          // periodically re-replay from Postgres so a dropped pub/sub message is
-          // recovered mid-run, not only when the run becomes terminal
-          let sinceReplay = 0;
           while (!closed) {
-            while (queue.length > 0) {
-              const job = queue.shift();
-              if (job) await job();
-            }
             if (await isTerminal()) {
-              await replay(); // drain anything raced between bus and DB
+              await replay(); // final ordered drain
               break;
             }
-            if (++sinceReplay >= 5) {
-              sinceReplay = 0;
-              await replay();
-            }
+            // sleep until woken by the bus (or a 2 s safety tick), then replay
             await new Promise<void>((resolve) => {
               notify = resolve;
               setTimeout(resolve, 2000);
             });
             notify = null;
+            await replay();
           }
         } finally {
           subscription.unsubscribe();

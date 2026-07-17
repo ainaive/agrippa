@@ -19,8 +19,10 @@ services:
       # the API chooses the executor at submit, so it must see the same setting
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
     volumes:
-      # the API serves artifact downloads, incl. large ones stored on the volume
-      - workdata:/work
+      # the API serves artifact downloads; it only needs the shared artifact
+      # store (not run workspaces). Both images run as the `bun` user and chown
+      # this dir, so the volume is bun-owned whichever container initializes it.
+      - artifacts:/work/artifacts
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,7 +52,8 @@ services:
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
       WORKER_SLOTS: ${WORKER_SLOTS:-2}
     volumes:
-      - workdata:/work
+      - workspaces:/work/runs # throwaway per-run checkouts (worker only)
+      - artifacts:/work/artifacts # shared with the API for downloads
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,4 +81,5 @@ services:
 
 volumes:
   pgdata:
-  workdata:
+  workspaces: # per-run checkouts, worker-only
+  artifacts: # artifact store, shared worker↔api (both run as bun)

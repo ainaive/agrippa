@@ -70,7 +70,7 @@ type Fixture = {
   };
 };
 
-type DepsOptions = { mcpServers?: string[] };
+type DepsOptions = { mcpServers?: string[]; skills?: string[] };
 
 type FixtureOptions = {
   params?: Record<string, unknown>;
@@ -196,7 +196,10 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
       executor,
       bus,
       workspace,
-      resources: new FakeResourceMaterializer({ mcpServers: opts.mcpServers ?? [] }),
+      resources: new FakeResourceMaterializer({
+        mcpServers: opts.mcpServers ?? [],
+        ...(opts.skills !== undefined ? { skills: opts.skills } : {}),
+      }),
       artifacts: new InMemoryArtifactStore(),
       logger: silentLogger,
     };
@@ -592,6 +595,18 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(rows[0]?.status).toBe("skipped");
     // the executor never saw the github server
     expect(deps.executor.requests.some((r) => r.stepId === "open-pr")).toBe(false);
+  });
+
+  it("fails a step whose required skill has no available version", async () => {
+    const { db, runId, makeDeps } = await setupFixture();
+    await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+    await approve(db, runId);
+    // no skills resolve — implement-fix's required builtin/git-workflow is missing
+    expect(await executeRun(makeDeps(HAPPY_SCRIPT, { skills: [] }), runId)).toBe("failed");
+    const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect((run?.error as { message?: string } | null)?.message).toContain(
+      "required resources unavailable",
+    );
   });
 
   it("streams live events over the bus while executing", async () => {

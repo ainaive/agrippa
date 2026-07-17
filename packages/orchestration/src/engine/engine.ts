@@ -457,12 +457,16 @@ class RunEngine {
     if (step.requires) {
       const authorizedMcp = this.authorizedMcpRefs(step.requires.mcpServers);
       const ungrantedMcp = step.requires.mcpServers.filter((ref) => !authorizedMcp.includes(ref));
-      const { missing } = await this.deps.resources.mcpServers(authorizedMcp);
-      // a required skill the run isn't authorized for is also unmet — otherwise
-      // the step would run without the skill it declared it needs
+      const { missing: missingMcp } = await this.deps.resources.mcpServers(authorizedMcp);
+      // a required skill must be BOTH authorized (in the manifest) and available
+      // (has an active version) — otherwise the step runs without what it needs
       const authorizedSkills = this.authorizedSkillRefs(step.requires.skills);
       const ungrantedSkills = step.requires.skills.filter((ref) => !authorizedSkills.includes(ref));
-      const unavailable = [...ungrantedMcp, ...missing, ...ungrantedSkills];
+      const { missing: missingSkills } = await this.deps.resources.skills(
+        authorizedSkills,
+        this.workspaceDir,
+      );
+      const unavailable = [...ungrantedMcp, ...missingMcp, ...ungrantedSkills, ...missingSkills];
       if (unavailable.length > 0) {
         await this.markSkipped(
           phase,
@@ -629,23 +633,32 @@ class RunEngine {
 
     // resolve only what the run is authorized for — ungranted optional
     // resources are dropped here, never resolved from the global registry
-    const skills = await this.deps.resources.skills(
+    const { resolved: skills, missing: missingSkills } = await this.deps.resources.skills(
       this.authorizedSkillRefs(step.skills),
       this.workspaceDir,
     );
-    const { resolved: mcpServers, missing } = await this.deps.resources.mcpServers(
+    const { resolved: mcpServers, missing: missingMcp } = await this.deps.resources.mcpServers(
       this.authorizedMcpRefs(step.mcpServers),
     );
     // register the resolved MCP credentials so they're redacted from any event
     this.redactor.add(mcpServers.flatMap(mcpSecretValues));
-    const optionalRefs = new Set(
+    // an unavailable *required* resource fails the step; optional ones are dropped
+    const optionalMcp = new Set(
       this.template.spec.resources.mcpServers.filter((m) => m.optional).map((m) => m.ref),
     );
-    const hardMissing = missing.filter((ref) => !optionalRefs.has(ref));
+    const optionalSkill = new Set(
+      this.template.spec.resources.skills
+        .filter((s) => s.optional)
+        .map((s) => s.ref.split("@")[0] as string),
+    );
+    const hardMissing = [
+      ...missingMcp.filter((ref) => !optionalMcp.has(ref)),
+      ...missingSkills.filter((ref) => !optionalSkill.has(ref.split("@")[0] as string)),
+    ];
     if (hardMissing.length > 0) {
-      throw new StepFailed(`required MCP servers unavailable: ${hardMissing.join(", ")}`, {
+      throw new StepFailed(`required resources unavailable: ${hardMissing.join(", ")}`, {
         code: "tool_error",
-        message: `required MCP servers unavailable: ${hardMissing.join(", ")}`,
+        message: `required resources unavailable: ${hardMissing.join(", ")}`,
       });
     }
 

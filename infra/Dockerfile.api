@@ -15,5 +15,11 @@ COPY --from=build /app /app
 ENV NODE_ENV=production
 ENV AGRIPPA_WEB_DIST=/app/apps/web/dist
 ENV AGRIPPA_TEMPLATES_DIR=/app/templates
+
+# Run as the non-root `bun` user, and own the shared artifact store so a freshly
+# created `artifacts` volume is bun-owned whichever service initializes it first
+# (the worker writes it, the API reads it). /app stays root-owned.
+RUN mkdir -p /work/artifacts && chown -R bun:bun /work
+USER bun
 EXPOSE 3000
 CMD ["bun", "apps/api/src/index.ts"]
