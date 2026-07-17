@@ -1,10 +1,14 @@
 {
   "hint": "选择任务类型并填写参数，平台将在后台自动执行。",
   "notFound": "任务类型不存在",
+  "search": "搜索任务类型…",
+  "noResults": "没有符合搜索条件的任务类型。",
   "form": {
     "parameters": "参数",
     "title": "任务标题",
+    "summary": "任务概要",
     "budget": "预算",
+    "duration": "时长上限",
     "minutes": "分钟",
     "submit": "提交任务",
     "submitting": "提交中…",

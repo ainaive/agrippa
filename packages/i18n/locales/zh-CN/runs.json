@@ -38,16 +38,23 @@
   },
   "dashboard": {
     "openTasks": "进行中",
+    "pendingApprovals": "待办审批",
     "spend": "花费",
     "total": "任务总数",
     "recent": "最近任务",
     "newTask": "新建任务",
+    "viewAll": "查看全部",
+    "byModel": "按模型花费",
+    "noSpend": "本月尚无花费。",
+    "tokensCount": "{{formattedCount}} 个 Token",
     "empty": "还没有任务——去任务目录选择一个吧。"
   },
   "table": {
     "title": "标题",
     "status": "状态",
     "created": "创建时间",
-    "run": "执行"
+    "run": "执行",
+    "allStatuses": "全部状态",
+    "noMatches": "没有符合筛选条件的任务。"
   }
 }

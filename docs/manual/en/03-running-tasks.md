@@ -2,7 +2,7 @@
 
 ## Submitting
 
-Open your project's **Catalog** tab, pick a task type, and fill in the form. The form is generated from the template's parameter schema — text fields, selects, switches, and repository pickers appear exactly as the template author declared them; required fields are marked `*`. Below the form you'll see the run's **budget preview** (max cost and duration) and the exact template version that will execute.
+Open **Catalog** in the project sidebar — task types are grouped by scenario and searchable. Pick one and fill in the form. The form is generated from the template's parameter schema — text fields, selects, switches, and repository pickers appear exactly as the template author declared them; required fields are marked `*`. The **summary panel** beside the form shows who will execute the task (the Faber), the exact template version, and the run's **budget** (max cost and duration) — review it before submitting.
 
 Submission can be rejected up front with a specific reason: a required skill or MCP server isn't granted to the project, no granted model satisfies a required tier, parameters fail validation, or a hard-stop quota is exhausted. Fix the cause under Settings and resubmit — nothing is persisted on a rejected submission.
 

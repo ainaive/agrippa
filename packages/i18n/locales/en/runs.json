@@ -38,16 +38,23 @@
   },
   "dashboard": {
     "openTasks": "Active runs",
+    "pendingApprovals": "Pending approvals",
     "spend": "Spend",
     "total": "Total tasks",
     "recent": "Recent tasks",
     "newTask": "New task",
+    "viewAll": "View all",
+    "byModel": "Spend by model",
+    "noSpend": "No spend this month yet.",
+    "tokensCount": "{{formattedCount}} tokens",
     "empty": "No tasks yet — pick one from the catalog."
   },
   "table": {
     "title": "Title",
     "status": "Status",
     "created": "Created",
-    "run": "Run"
+    "run": "Run",
+    "allStatuses": "All statuses",
+    "noMatches": "No tasks match the current filters."
   }
 }
