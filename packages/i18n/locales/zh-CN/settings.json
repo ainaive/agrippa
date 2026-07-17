@@ -1,13 +1,25 @@
 {
   "tabs": {
+    "general": "常规",
     "members": "成员",
     "grants": "资源授权",
     "repos": "代码仓库",
     "quota": "配额"
   },
+  "general": {
+    "name": "项目名称",
+    "description": "描述",
+    "dangerZone": "危险操作",
+    "archive": "归档项目",
+    "archiveHint": "归档会隐藏项目并停止新的任务提交。历史执行与数据将保留。",
+    "archiveConfirm": "归档「{{name}}」？",
+    "archived": "项目已归档"
+  },
   "members": {
     "email": "已注册用户的邮箱",
-    "add": "添加成员"
+    "add": "添加成员",
+    "remove": "移除",
+    "removeConfirm": "将 {{name}} 移出项目？"
   },
   "roles": {
     "admin": "管理员",
@@ -25,6 +37,8 @@
     "branch": "默认分支",
     "token": "访问令牌（可选）",
     "add": "添加",
+    "remove": "移除",
+    "removeConfirm": "移除仓库 {{url}}？",
     "private": "已配置凭证",
     "public": "公开"
   },
@@ -33,6 +47,6 @@
     "tokenLimit": "每月 Token 上限",
     "hardStop": "超限后强制停止",
     "save": "保存配额",
-    "saved": "已保存。"
+    "saved": "配额已保存"
   }
 }

@@ -1,9 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import {
+  ArchiveIcon,
+  FolderCogIcon,
+  GaugeIcon,
+  GitBranchIcon,
+  type LucideIcon,
+  ShieldCheckIcon,
+  UsersIcon,
+  XIcon,
+} from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -14,12 +27,105 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { ApiError, api } from "../lib/api";
 import { lt } from "../lib/format";
 import type { Faber, Grant, McpServerRow, Member, ModelRow, Quota, SkillRow } from "../lib/types";
+import { cn } from "../lib/utils";
 
-function MembersTab({ projectId }: { projectId: string }) {
+function toastError(err: unknown) {
+  toast.error(err instanceof ApiError ? err.message : String(err));
+}
+
+function GeneralSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation(["settings", "common"]);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const project = useQuery({
+    queryKey: ["project", projectId],
+    queryFn: () =>
+      api<{ id: string; name: string; description: string | null; status: string }>(
+        `/projects/${projectId}`,
+      ),
+  });
+  const [name, setName] = useState<string | null>(null);
+  const [description, setDescription] = useState<string | null>(null);
+  const nameValue = name ?? project.data?.name ?? "";
+  const descriptionValue = description ?? project.data?.description ?? "";
+
+  const save = useMutation({
+    mutationFn: () =>
+      api(`/projects/${projectId}`, {
+        method: "PATCH",
+        json: { name: nameValue, description: descriptionValue || null },
+      }),
+    onSuccess: () => {
+      toast.success(t("common:feedback.saved"));
+      void queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+    },
+    onError: toastError,
+  });
+
+  const archive = useMutation({
+    mutationFn: () => api(`/projects/${projectId}`, { method: "DELETE" }),
+    onSuccess: async () => {
+      toast.success(t("settings:general.archived"));
+      await queryClient.invalidateQueries({ queryKey: ["me"] });
+      void navigate({ to: "/" });
+    },
+    onError: toastError,
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="max-w-md space-y-4">
+        <div className="space-y-1">
+          <Label htmlFor="project-name">{t("settings:general.name")}</Label>
+          <Input id="project-name" value={nameValue} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="project-desc">{t("settings:general.description")}</Label>
+          <Textarea
+            id="project-desc"
+            value={descriptionValue}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+          />
+        </div>
+        <Button disabled={!nameValue || save.isPending} onClick={() => save.mutate()}>
+          {t("common:actions.save")}
+        </Button>
+      </div>
+
+      <Card className="border-destructive/40">
+        <CardHeader>
+          <CardTitle className="text-sm text-destructive">
+            {t("settings:general.dangerZone")}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">{t("settings:general.archiveHint")}</p>
+          <ConfirmDialog
+            trigger={
+              <Button variant="destructive" disabled={archive.isPending}>
+                <ArchiveIcon />
+                {t("settings:general.archive")}
+              </Button>
+            }
+            title={t("settings:general.archiveConfirm", { name: project.data?.name ?? "" })}
+            description={t("settings:general.archiveHint")}
+            confirmLabel={t("settings:general.archive")}
+            destructive
+            onConfirm={() => archive.mutate()}
+          />
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function MembersSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation("settings");
   const queryClient = useQueryClient();
   const members = useQuery({
@@ -28,7 +134,7 @@ function MembersTab({ projectId }: { projectId: string }) {
   });
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("member");
-  const [error, setError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<Member | null>(null);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["members", projectId] });
   const add = useMutation({
@@ -36,10 +142,9 @@ function MembersTab({ projectId }: { projectId: string }) {
       api(`/projects/${projectId}/members`, { method: "POST", json: { email, role } }),
     onSuccess: () => {
       setEmail("");
-      setError(null);
       void refresh();
     },
-    onError: (err) => setError(err instanceof ApiError ? err.message : String(err)),
+    onError: toastError,
   });
   const setMemberRole = useMutation({
     mutationFn: (input: { userId: string; role: string }) =>
@@ -48,13 +153,13 @@ function MembersTab({ projectId }: { projectId: string }) {
         json: { role: input.role },
       }),
     onSuccess: () => void refresh(),
-    onError: (err) => setError(err instanceof ApiError ? err.message : String(err)),
+    onError: toastError,
   });
   const remove = useMutation({
     mutationFn: (userId: string) =>
       api(`/projects/${projectId}/members/${userId}`, { method: "DELETE" }),
     onSuccess: () => void refresh(),
-    onError: (err) => setError(err instanceof ApiError ? err.message : String(err)),
+    onError: toastError,
   });
 
   return (
@@ -83,7 +188,6 @@ function MembersTab({ projectId }: { projectId: string }) {
           {t("members.add")}
         </Button>
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
       <ul className="divide-y">
         {(members.data ?? []).map((member) => (
           <li key={member.userId} className="flex items-center justify-between gap-3 py-2 text-sm">
@@ -107,18 +211,31 @@ function MembersTab({ projectId }: { projectId: string }) {
                   <SelectItem value="viewer">{t("roles.viewer")}</SelectItem>
                 </SelectContent>
               </Select>
-              <Button size="sm" variant="ghost" onClick={() => remove.mutate(member.userId)}>
-                ✕
+              <Button size="icon-sm" variant="ghost" onClick={() => setRemoving(member)}>
+                <XIcon />
               </Button>
             </div>
           </li>
         ))}
       </ul>
+      <ConfirmDialog
+        open={removing !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoving(null);
+        }}
+        title={t("members.removeConfirm", { name: removing?.name ?? "" })}
+        confirmLabel={t("members.remove")}
+        destructive
+        onConfirm={() => {
+          if (removing) remove.mutate(removing.userId);
+          setRemoving(null);
+        }}
+      />
     </div>
   );
 }
 
-function GrantsTab({ projectId }: { projectId: string }) {
+function GrantsSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation("settings");
   const queryClient = useQueryClient();
   const grants = useQuery({
@@ -139,6 +256,7 @@ function GrantsTab({ projectId }: { projectId: string }) {
     mutationFn: (next: Array<{ resourceType: string; resourceId: string }>) =>
       api(`/projects/${projectId}/grants`, { method: "PUT", json: next }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["grants", projectId] }),
+    onError: toastError,
   });
 
   const toggle = (resourceType: string, resourceId: string) => {
@@ -210,20 +328,19 @@ function GrantsTab({ projectId }: { projectId: string }) {
   );
 }
 
-function ReposTab({ projectId }: { projectId: string }) {
+type RepoRow = { id: string; url: string; defaultBranch: string; hasCredential: boolean };
+
+function ReposSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation("settings");
   const queryClient = useQueryClient();
   const repos = useQuery({
     queryKey: ["repos", projectId],
-    queryFn: () =>
-      api<Array<{ id: string; url: string; defaultBranch: string; hasCredential: boolean }>>(
-        `/projects/${projectId}/repos`,
-      ),
+    queryFn: () => api<RepoRow[]>(`/projects/${projectId}/repos`),
   });
   const [url, setUrl] = useState("");
   const [branch, setBranch] = useState("main");
   const [token, setToken] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<RepoRow | null>(null);
 
   const add = useMutation({
     mutationFn: () =>
@@ -239,15 +356,15 @@ function ReposTab({ projectId }: { projectId: string }) {
     onSuccess: () => {
       setUrl("");
       setToken("");
-      setError(null);
       void queryClient.invalidateQueries({ queryKey: ["repos", projectId] });
     },
-    onError: (err) => setError(err instanceof ApiError ? err.message : String(err)),
+    onError: toastError,
   });
   const remove = useMutation({
     mutationFn: (repoId: string) =>
       api(`/projects/${projectId}/repos/${repoId}`, { method: "DELETE" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repos", projectId] }),
+    onError: toastError,
   });
 
   return (
@@ -279,7 +396,6 @@ function ReposTab({ projectId }: { projectId: string }) {
           {t("repos.add")}
         </Button>
       </div>
-      {error && <p className="text-sm text-destructive">{error}</p>}
       <ul className="divide-y">
         {(repos.data ?? []).map((repo) => (
           <li key={repo.id} className="flex items-center justify-between py-2 text-sm">
@@ -289,18 +405,31 @@ function ReposTab({ projectId }: { projectId: string }) {
                 {repo.defaultBranch} · {repo.hasCredential ? t("repos.private") : t("repos.public")}
               </p>
             </div>
-            <Button size="sm" variant="ghost" onClick={() => remove.mutate(repo.id)}>
-              ✕
+            <Button size="icon-sm" variant="ghost" onClick={() => setRemoving(repo)}>
+              <XIcon />
             </Button>
           </li>
         ))}
       </ul>
+      <ConfirmDialog
+        open={removing !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoving(null);
+        }}
+        title={t("repos.removeConfirm", { url: removing?.url ?? "" })}
+        confirmLabel={t("repos.remove")}
+        destructive
+        onConfirm={() => {
+          if (removing) remove.mutate(removing.id);
+          setRemoving(null);
+        }}
+      />
     </div>
   );
 }
 
-function QuotaTab({ projectId }: { projectId: string }) {
-  const { t } = useTranslation("settings");
+function QuotaSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation(["settings", "common"]);
   const queryClient = useQueryClient();
   const quota = useQuery({
     queryKey: ["quota", projectId],
@@ -324,13 +453,17 @@ function QuotaTab({ projectId }: { projectId: string }) {
           hardStop: hardStopValue,
         },
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["quota", projectId] }),
+    onSuccess: () => {
+      toast.success(t("settings:quota.saved"));
+      void queryClient.invalidateQueries({ queryKey: ["quota", projectId] });
+    },
+    onError: toastError,
   });
 
   return (
     <div className="max-w-md space-y-4">
       <div className="space-y-1">
-        <Label htmlFor="quota-cost">{t("quota.costLimit")}</Label>
+        <Label htmlFor="quota-cost">{t("settings:quota.costLimit")}</Label>
         <Input
           id="quota-cost"
           type="number"
@@ -339,7 +472,7 @@ function QuotaTab({ projectId }: { projectId: string }) {
         />
       </div>
       <div className="space-y-1">
-        <Label htmlFor="quota-tokens">{t("quota.tokenLimit")}</Label>
+        <Label htmlFor="quota-tokens">{t("settings:quota.tokenLimit")}</Label>
         <Input
           id="quota-tokens"
           type="number"
@@ -348,45 +481,61 @@ function QuotaTab({ projectId }: { projectId: string }) {
         />
       </div>
       <div className="flex items-center justify-between">
-        <Label htmlFor="quota-hard">{t("quota.hardStop")}</Label>
+        <Label htmlFor="quota-hard">{t("settings:quota.hardStop")}</Label>
         <Switch id="quota-hard" checked={hardStopValue} onCheckedChange={setHardStop} />
       </div>
       <Button disabled={save.isPending} onClick={() => save.mutate()}>
-        {t("quota.save")}
+        {t("settings:quota.save")}
       </Button>
-      {save.isSuccess && <p className="text-sm text-muted-foreground">{t("quota.saved")}</p>}
     </div>
   );
 }
 
+const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
+  { key: "general", icon: FolderCogIcon },
+  { key: "members", icon: UsersIcon },
+  { key: "grants", icon: ShieldCheckIcon },
+  { key: "repos", icon: GitBranchIcon },
+  { key: "quota", icon: GaugeIcon },
+];
+
 export function SettingsPage() {
-  const { t } = useTranslation("settings");
+  const { t } = useTranslation(["settings", "common"]);
   const { projectId } = useParams({ strict: false }) as { projectId: string };
+  const [section, setSection] = useState("general");
 
   return (
-    <Card>
-      <CardContent className="pt-4">
-        <Tabs defaultValue="members">
-          <TabsList>
-            <TabsTrigger value="members">{t("tabs.members")}</TabsTrigger>
-            <TabsTrigger value="grants">{t("tabs.grants")}</TabsTrigger>
-            <TabsTrigger value="repos">{t("tabs.repos")}</TabsTrigger>
-            <TabsTrigger value="quota">{t("tabs.quota")}</TabsTrigger>
-          </TabsList>
-          <TabsContent value="members" className="pt-4">
-            <MembersTab projectId={projectId} />
-          </TabsContent>
-          <TabsContent value="grants" className="pt-4">
-            <GrantsTab projectId={projectId} />
-          </TabsContent>
-          <TabsContent value="repos" className="pt-4">
-            <ReposTab projectId={projectId} />
-          </TabsContent>
-          <TabsContent value="quota" className="pt-4">
-            <QuotaTab projectId={projectId} />
-          </TabsContent>
-        </Tabs>
-      </CardContent>
-    </Card>
+    <div className="space-y-6">
+      <PageHeader title={t("common:nav.settings")} />
+      <div className="grid items-start gap-6 md:grid-cols-[200px_1fr]">
+        <nav className="flex gap-1 overflow-x-auto md:flex-col">
+          {SECTIONS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setSection(item.key)}
+              className={cn(
+                "flex shrink-0 items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm",
+                section === item.key
+                  ? "bg-muted font-medium"
+                  : "text-muted-foreground hover:bg-muted/60",
+              )}
+            >
+              <item.icon className="size-4" />
+              {t(`settings:tabs.${item.key}`)}
+            </button>
+          ))}
+        </nav>
+        <Card>
+          <CardContent className="pt-5">
+            {section === "general" && <GeneralSection projectId={projectId} />}
+            {section === "members" && <MembersSection projectId={projectId} />}
+            {section === "grants" && <GrantsSection projectId={projectId} />}
+            {section === "repos" && <ReposSection projectId={projectId} />}
+            {section === "quota" && <QuotaSection projectId={projectId} />}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
   );
 }

@@ -20,9 +20,10 @@ Each registry has its own page in the Admin sidebar section, with create and edi
 
 **Templates** — every orchestration template with its version history. Clicking one opens the **editor**: edit the YAML source, **Validate** (a dry-run compile listing every issue at once, plus a live preview of the submission form the inputs will generate), **Save draft**, then **Publish**. Published versions are immutable — the publish button moves the "latest" pointer that new submissions use, while running and historical runs keep their pinned versions. Builtin templates re-publish automatically when the platform ships changed sources.
 
-## Project settings (Settings tab, project admins)
+## Project settings (Settings page, project admins)
 
-- **Members** — add by email (the person must have an account), change roles, remove. A project always keeps at least one admin; the platform blocks demoting or removing the last one.
+- **General** — rename the project, edit its description, and (in the danger zone, behind a confirmation) **archive** it: the project disappears from switchers and stops accepting submissions, while historical runs and data are preserved.
+- **Members** — add by email (the person must have an account), change roles, remove (with confirmation). A project always keeps at least one admin; the platform blocks demoting or removing the last one.
 - **Resources** — the grant toggles per registry type. This is the gate: a template requirement that isn't granted here makes submission fail fast with a named error. **Optional** resources are also gated — an optional skill or MCP server (for example the GitHub server behind an "open a PR" step) is withheld from the run unless it's granted, never resolved with a shared credential. A step that explicitly requires that resource is then skipped; a step that merely could use it runs without it.
 - **Repositories** — git remotes the project's runs may check out: URL, default branch, optional access token (write-only, encrypted; injected only during clone and scrubbed before agent code runs).
 - **Quota** — monthly cost (USD) and/or token ceilings with a **hard stop** switch. Hard-stop quotas reject new submissions once exhausted and abort in-flight runs at the next step boundary; soft quotas are informational.

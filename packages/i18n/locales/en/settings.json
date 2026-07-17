@@ -1,13 +1,25 @@
 {
   "tabs": {
+    "general": "General",
     "members": "Members",
     "grants": "Resources",
     "repos": "Repositories",
     "quota": "Quota"
   },
+  "general": {
+    "name": "Project name",
+    "description": "Description",
+    "dangerZone": "Danger zone",
+    "archive": "Archive project",
+    "archiveHint": "Archiving hides the project and stops new submissions. Historical runs and data are preserved.",
+    "archiveConfirm": "Archive \"{{name}}\"?",
+    "archived": "Project archived"
+  },
   "members": {
     "email": "Email of an existing user",
-    "add": "Add member"
+    "add": "Add member",
+    "remove": "Remove",
+    "removeConfirm": "Remove {{name}} from the project?"
   },
   "roles": {
     "admin": "Admin",
@@ -25,6 +37,8 @@
     "branch": "Default branch",
     "token": "Access token (optional)",
     "add": "Add",
+    "remove": "Remove",
+    "removeConfirm": "Remove the repository {{url}}?",
     "private": "credentialed",
     "public": "public"
   },
@@ -33,6 +47,6 @@
     "tokenLimit": "Monthly token limit",
     "hardStop": "Hard stop when exhausted",
     "save": "Save quota",
-    "saved": "Saved."
+    "saved": "Quota saved"
   }
 }
