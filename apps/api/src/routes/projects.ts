@@ -1,13 +1,27 @@
 import {
   AppError,
+  grantsPutSchema,
   memberAddSchema,
   memberUpdateSchema,
   projectCreateSchema,
   projectUpdateSchema,
   quotaUpdateSchema,
+  type ResourceType,
 } from "@agrippa/core";
-import { auditLogs, projectMembers, projectQuotas, projects, users } from "@agrippa/db";
-import { and, count, eq } from "drizzle-orm";
+import {
+  auditLogs,
+  fabri,
+  mcpServers,
+  models,
+  orchestrationTemplates,
+  projectMembers,
+  projectQuotas,
+  projectResourceGrants,
+  projects,
+  skills,
+  users,
+} from "@agrippa/db";
+import { and, count, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
@@ -228,6 +242,69 @@ export const projectRoutes = new Hono<AppEnv>()
     });
     return c.json({ removed: true });
   })
+
+  // ── Resource grants ────────────────────────────────────────────────────────
+  .get("/:projectId/grants", requireProjectRole("viewer"), async (c) => {
+    const rows = await c.var.db
+      .select()
+      .from(projectResourceGrants)
+      .where(eq(projectResourceGrants.projectId, c.req.param("projectId")));
+    return c.json(rows);
+  })
+  .put(
+    "/:projectId/grants",
+    requireProjectRole("admin"),
+    validate("json", grantsPutSchema),
+    async (c) => {
+      const projectId = c.req.param("projectId");
+      const input = c.req.valid("json");
+      const db = c.var.db;
+
+      // every referenced resource must exist in its registry
+      const tables: Record<ResourceType, { table: typeof fabri; ids: string[] }> = {
+        faber: { table: fabri, ids: [] },
+        model: { table: models as unknown as typeof fabri, ids: [] },
+        skill: { table: skills as unknown as typeof fabri, ids: [] },
+        mcp_server: { table: mcpServers as unknown as typeof fabri, ids: [] },
+        template: { table: orchestrationTemplates as unknown as typeof fabri, ids: [] },
+      };
+      for (const grant of input) tables[grant.resourceType].ids.push(grant.resourceId);
+      for (const [type, { table, ids }] of Object.entries(tables)) {
+        if (ids.length === 0) continue;
+        const found = await db.select({ id: table.id }).from(table).where(inArray(table.id, ids));
+        if (found.length !== new Set(ids).size) {
+          throw new AppError("unknown_resource", 400, `Unknown ${type} id in grants`);
+        }
+      }
+
+      // replace-all semantics inside one transaction
+      const rows = await db.transaction(async (tx) => {
+        await tx
+          .delete(projectResourceGrants)
+          .where(eq(projectResourceGrants.projectId, projectId));
+        if (input.length === 0) return [];
+        return await tx
+          .insert(projectResourceGrants)
+          .values(
+            input.map((grant) => ({
+              projectId,
+              resourceType: grant.resourceType,
+              resourceId: grant.resourceId,
+              configOverride: grant.configOverride,
+              grantedBy: c.var.user.id,
+            })),
+          )
+          .returning();
+      });
+      await audit(c, {
+        action: "project.grants.update",
+        resourceType: "project_resource_grant",
+        projectId,
+        payload: { count: input.length },
+      });
+      return c.json(rows);
+    },
+  )
 
   // ── Quota ──────────────────────────────────────────────────────────────────
   .get("/:projectId/quota", requireProjectRole("viewer"), async (c) => {

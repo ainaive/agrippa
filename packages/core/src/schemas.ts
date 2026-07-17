@@ -41,3 +41,94 @@ export type ProjectCreateInput = z.infer<typeof projectCreateSchema>;
 export type ProjectUpdateInput = z.infer<typeof projectUpdateSchema>;
 export type MemberAddInput = z.infer<typeof memberAddSchema>;
 export type QuotaUpdateInput = z.infer<typeof quotaUpdateSchema>;
+
+// ── Resource layer ────────────────────────────────────────────────────────────
+
+import { MODEL_TIERS, RESOURCE_TYPES } from "./domain";
+
+/** API-facing localized text: both product locales are mandatory. */
+export const localizedTextInputSchema = z
+  .object({ en: z.string().min(1), "zh-CN": z.string().min(1) })
+  .catchall(z.string());
+
+export const faberCreateSchema = z.object({
+  slug: slugSchema,
+  nameI18n: localizedTextInputSchema,
+  personaI18n: localizedTextInputSchema,
+  systemPrompt: z.string().min(1).max(20_000),
+  avatar: z.string().max(16).optional(),
+});
+
+export const faberUpdateSchema = z.object({
+  nameI18n: localizedTextInputSchema.optional(),
+  personaI18n: localizedTextInputSchema.optional(),
+  systemPrompt: z.string().min(1).max(20_000).optional(),
+  avatar: z.string().max(16).nullable().optional(),
+  status: z.enum(["active", "disabled"]).optional(),
+});
+
+export const modelCreateSchema = z.object({
+  provider: z.string().min(1),
+  providerModelId: z.string().min(1),
+  displayName: z.string().min(1),
+  tier: z.enum(MODEL_TIERS),
+  contextWindow: z.number().int().positive().optional(),
+  inputCostPerMtok: z.number().nonnegative().optional(),
+  outputCostPerMtok: z.number().nonnegative().optional(),
+});
+
+export const modelUpdateSchema = z.object({
+  displayName: z.string().min(1).optional(),
+  tier: z.enum(MODEL_TIERS).optional(),
+  contextWindow: z.number().int().positive().nullable().optional(),
+  inputCostPerMtok: z.number().nonnegative().nullable().optional(),
+  outputCostPerMtok: z.number().nonnegative().nullable().optional(),
+  status: z.enum(["active", "disabled"]).optional(),
+});
+
+export const mcpServerCreateSchema = z.object({
+  slug: slugSchema,
+  nameI18n: localizedTextInputSchema,
+  transport: z.enum(["stdio", "http", "sse"]),
+  config: z.record(z.string(), z.unknown()),
+  /** Write-only; encrypted into the secrets table, never echoed back. */
+  authToken: z.string().min(1).optional(),
+});
+
+export const mcpServerUpdateSchema = z.object({
+  nameI18n: localizedTextInputSchema.optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
+  authToken: z.string().min(1).nullable().optional(),
+  status: z.enum(["active", "disabled"]).optional(),
+});
+
+export const skillCreateSchema = z.object({
+  slug: z.string().regex(/^[a-z][a-z0-9-]*(\/[a-z][a-z0-9-]*)?$/),
+  nameI18n: localizedTextInputSchema,
+  descriptionI18n: localizedTextInputSchema,
+  source: z.enum(["builtin", "git", "upload"]),
+});
+
+export const skillVersionCreateSchema = z.object({
+  version: z.string().regex(/^\d+\.\d+\.\d+$/, "semver x.y.z"),
+  contentRef: z.string().min(1),
+  manifest: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const templateCreateSchema = z.object({
+  slug: z.string().regex(/^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$/),
+  scenarioSlug: slugSchema,
+  nameI18n: localizedTextInputSchema,
+});
+
+export const templateVersionCreateSchema = z.object({
+  sourceYaml: z.string().min(1).max(200_000),
+});
+
+export const grantsPutSchema = z.array(
+  z.object({
+    resourceType: z.enum(RESOURCE_TYPES),
+    resourceId: z.uuid(),
+    configOverride: z.record(z.string(), z.unknown()).optional(),
+  }),
+);

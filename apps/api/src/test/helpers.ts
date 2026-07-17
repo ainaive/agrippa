@@ -1,6 +1,13 @@
+import { randomBytes } from "node:crypto";
+import path from "node:path";
 import { createDb, type Db, migrateDb, seed } from "@agrippa/db";
+import { seedBuiltinTemplates } from "@agrippa/orchestration";
 import { sql } from "drizzle-orm";
 import type { App } from "../app";
+
+process.env.AGRIPPA_SECRET_KEY ??= randomBytes(32).toString("base64");
+
+const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates");
 
 export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
@@ -29,6 +36,7 @@ export async function freshTestDb(): Promise<Db> {
   await db.execute(sql`drop schema if exists drizzle cascade`);
   await migrateDb(db);
   await seed(db);
+  await seedBuiltinTemplates(db, TEMPLATES_DIR);
   return db;
 }
 

@@ -4,8 +4,11 @@ import { type Auth, createAuth } from "./auth";
 import type { AppEnv } from "./context";
 import { requireSession } from "./middleware/auth";
 import { errorHandler } from "./middleware/error";
+import { catalogRoutes } from "./routes/catalog";
 import { meRoutes } from "./routes/me";
 import { projectRoutes } from "./routes/projects";
+import { registryRoutes } from "./routes/registry";
+import { templateRoutes, templateValidateRoute } from "./routes/templates";
 
 export function createApp(deps: { db: Db; auth?: Auth }) {
   const auth = deps.auth ?? createAuth(deps.db);
@@ -23,6 +26,10 @@ export function createApp(deps: { db: Db; auth?: Auth }) {
   const v1 = new Hono<AppEnv>();
   v1.use("*", requireSession);
   v1.route("/", meRoutes);
+  v1.route("/", catalogRoutes);
+  v1.route("/", registryRoutes);
+  v1.route("/templates", templateValidateRoute);
+  v1.route("/templates", templateRoutes);
   v1.route("/projects", projectRoutes);
   app.route("/api/v1", v1);
 

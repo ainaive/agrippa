@@ -1,4 +1,6 @@
+import path from "node:path";
 import { createDb, migrateDb, seed } from "@agrippa/db";
+import { seedBuiltinTemplates } from "@agrippa/orchestration";
 import { createApp } from "./app";
 
 const db = createDb();
@@ -6,7 +8,10 @@ const db = createDb();
 if (process.env.AGRIPPA_MIGRATE_ON_BOOT !== "0") {
   await migrateDb(db);
   await seed(db);
-  console.log("[api] migrations + seed applied");
+  const templatesDir =
+    process.env.AGRIPPA_TEMPLATES_DIR ?? path.resolve(import.meta.dirname, "../../../templates");
+  const { published } = await seedBuiltinTemplates(db, templatesDir);
+  console.log(`[api] migrations + seed applied; templates published: ${published.length}`);
 }
 
 const app = createApp({ db });

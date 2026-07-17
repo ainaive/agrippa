@@ -1,6 +1,15 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "../client";
-import { fabri, models, orchestrationTemplates, orgs, scenarios, taskTypes } from "../schema";
+import {
+  fabri,
+  models,
+  orchestrationTemplates,
+  orgs,
+  scenarios,
+  skills,
+  skillVersions,
+  taskTypes,
+} from "../schema";
 
 /**
  * Idempotent seed of builtin resources: the default org, the three scenarios,
@@ -241,6 +250,52 @@ export async function seed(db: Db): Promise<void> {
         sortOrder: row.sortOrder,
       })
       .onConflictDoNothing();
+  }
+
+  // ── Builtin skills (content lives in templates/_shared/skills/<name>/) ────
+  const skillRows = [
+    {
+      slug: "builtin/git-workflow",
+      nameI18n: { en: "Git Workflow", "zh-CN": "Git 工作流" },
+      descriptionI18n: {
+        en: "Branching, committing, and diff hygiene for platform-driven changes.",
+        "zh-CN": "平台驱动变更的分支、提交与差异规范。",
+      },
+      contentRef: "builtin://git-workflow",
+    },
+    {
+      slug: "builtin/test-runner",
+      nameI18n: { en: "Test Runner", "zh-CN": "测试执行" },
+      descriptionI18n: {
+        en: "Detecting and running a repository's test suite reliably.",
+        "zh-CN": "可靠地识别并执行仓库的测试套件。",
+      },
+      contentRef: "builtin://test-runner",
+    },
+  ];
+  for (const row of skillRows) {
+    await db
+      .insert(skills)
+      .values({
+        slug: row.slug,
+        nameI18n: row.nameI18n,
+        descriptionI18n: row.descriptionI18n,
+        source: "builtin",
+      })
+      .onConflictDoNothing();
+    const [head] = await db.select().from(skills).where(eq(skills.slug, row.slug));
+    if (!head) throw new Error(`seed: skill ${row.slug} missing after upsert`);
+    await db
+      .insert(skillVersions)
+      .values({ skillId: head.id, version: "1.0.0", contentRef: row.contentRef })
+      .onConflictDoNothing();
+    if (!head.latestVersionId) {
+      const [version] = await db
+        .select()
+        .from(skillVersions)
+        .where(eq(skillVersions.skillId, head.id));
+      await db.update(skills).set({ latestVersionId: version?.id }).where(eq(skills.id, head.id));
+    }
   }
 
   // ── Models (Anthropic; prices are list USD per MTok) ──────────────────────

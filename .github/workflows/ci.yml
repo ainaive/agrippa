@@ -50,6 +50,9 @@ jobs:
       - name: Dependency direction
         run: bun scripts/check-deps.ts
 
+      - name: Validate builtin templates
+        run: bun scripts/validate-templates.ts
+
       - name: Commitlint (PR range)
         if: github.event_name == 'pull_request'
         run: bunx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }}
