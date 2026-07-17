@@ -17,6 +17,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "diff": "^9.0.0",
     "i18next": "^26.3.6",
     "lucide-react": "^1.25.0",
     "radix-ui": "^1.6.2",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",
+    "@types/diff": "^8.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.3",

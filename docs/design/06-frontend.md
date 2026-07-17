@@ -70,7 +70,7 @@ The page (`pages/RunDetailPage.tsx` composing `features/runs/*`):
 4. **Run detail** — as above; also params snapshot, pinned template version, model resolution, retry button.
 5. **Approvals inbox** — pending approvals across the user's projects; decide inline.
 6. **Resource admin** — registries for fabri / skills / MCP servers / models: list, status, versions, create/edit; secrets write-only masked.
-7. **Template editor** — CodeMirror YAML editor, `validate` (dry-run compile with inline errors), rendered **form preview** from compiled inputs, version list, publish (with diff vs. previous version from `source_yaml`).
+7. **Template editor** — monospace YAML textarea (CodeMirror deliberately out of scope for now), `validate` (dry-run compile with inline errors), rendered **form preview** from compiled inputs, version browser (open any version; edits fork into the next draft), client-side diff between any two versions (`diff` + the shared PatchView), publish and deprecate with confirmation.
 8. **Project settings** — members & roles, resource grants (checkbox matrix per resource type), repos, quota.
 9. **Usage & audit** — token/cost charts (per model / task type / member / period), audit log table with filters.
 

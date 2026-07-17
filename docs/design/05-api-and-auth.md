@@ -83,6 +83,7 @@ CRUD /mcp-servers                         # secrets accepted write-only, returne
 CRUD /models
 CRUD /templates                           POST /templates/:id/versions            # save draft
 POST /templates/:id/versions/:v/publish   POST /templates/validate                # dry-run compile
+POST /templates/:id/versions/:v/deprecate # published & non-latest only (409 version_is_latest)
 ```
 
 ### Governance

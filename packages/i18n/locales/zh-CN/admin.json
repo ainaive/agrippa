@@ -71,6 +71,13 @@
     "versions": "版本",
     "publish": "发布",
     "noVersions": "暂无版本——请先保存草稿。",
-    "formPreview": "表单预览"
+    "formPreview": "表单预览",
+    "compare": "版本对比",
+    "deprecate": "弃用",
+    "baseVersion": "基于 v{{version}} 编辑——保存将创建新草稿。",
+    "publishConfirm": "发布 v{{version}}？",
+    "publishHint": "新提交的任务将固定使用该版本。已发布版本不可变。",
+    "deprecateConfirm": "弃用 v{{version}}？",
+    "deprecateHint": "弃用的版本对历史执行仍然可用，仅标记为退役。"
   }
 }
