@@ -18,6 +18,31 @@ docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
 
 **演示模式**：设置 `AGRIPPA_EXECUTOR=fake` 并将 `ANTHROPIC_API_KEY` 留空——所有任务类型都会由零 Token 消耗的演示执行器端到端跑通，产出占位产出物。适合在花费 Token 之前评估平台。
 
+## 部署到虚拟机（systemd，无需 Docker）
+
+要求：Ubuntu 22.04/24.04 LTS，约 2 GB 内存，root 权限。
+
+```sh
+sudo git clone https://github.com/ainaive/agrippa /opt/agrippa
+sudo /opt/agrippa/infra/vm/install.sh        # 加 --skip-redis 可不装 Redis
+```
+
+安装脚本幂等（可重复执行），在同一台机器上完成全部准备：
+
+- Bun，以及 worker 的系统依赖（`git`、`ripgrep`、用于智能体沙箱的 `bubblewrap`）
+- PostgreSQL 17（PGDG）与 Redis 7（可选——没有它实时流会降级为轮询）
+- `agrippa` 系统用户，数据目录位于 `/var/lib/agrippa`
+- `/etc/agrippa/agrippa.env`，密钥自动生成——**务必备份 `AGRIPPA_SECRET_KEY`**
+- `agrippa-api` + `agrippa-worker` systemd 服务，随后完成首次构建并启动
+
+打开 `http://<主机>:3000`。上文的演示模式同样适用（在 `/etc/agrippa/agrippa.env` 中设置 `AGRIPPA_EXECUTOR=fake`）。后续更新：
+
+```sh
+sudo /opt/agrippa/infra/vm/deploy.sh         # 拉取 → 构建 → 重启（先 api 后 worker）
+```
+
+虚拟机上的日志、备份与故障排查见[运维指南](06-operations.md)。
+
 ## 源码运行（开发模式）
 
 参见 [README 快速开始](../../../README.md#getting-started)：Bun ≥ 1.3 + 本地 Postgres，启动三个进程（`api`、`worker`、`web`）。

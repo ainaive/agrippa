@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **VM deployment without Docker** — `infra/vm/` ships an idempotent Ubuntu 22.04/24.04 installer (Bun, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets), a git-pull `deploy.sh`, and hardened systemd units. The api still migrates + seeds on boot; the worker gates its start on the api's `/healthz` so it never runs against a stale schema. The worker unit deliberately leaves namespaces unrestricted (bubblewrap needs them — the sandbox degrades silently otherwise). Docker Compose and local dev mode are unchanged.
+
 ### Security
 
 - **Executor isolation seam** — one enforceable place (`packages/executor-core/isolation.ts`) decides every tool call and scrubs the subprocess environment. Read-only workspaces now actually deny shell and confine writes to the artifact directory; read-write workspaces confine writes to the workspace with a boundary-safe check (the previous `startsWith` let a sibling `<workspace>-evil` path through, and `Bash` bypassed the check entirely). **Reads (Read/Grep/Glob) are confined to the workspace too**, so the agent can't read `/proc/self/environ`, another run's directory, or the shared artifact store. The SDK subprocess environment is **allow-listed** — only the SDK auth variables and a fixed set of system essentials pass through, so platform secrets, DSNs, and injection vectors like `NODE_OPTIONS` are all dropped — with the OS `sandbox` enabled where available (bubblewrap installed in the worker image), `strictMcpConfig`, and repo-supplied `.claude`/`.mcp.json` removed after checkout so a checked-out repository can't inject hooks or permission overrides. The worker image runs as a non-root user with `/app` kept root-owned.
@@ -16,6 +20,7 @@ All notable changes to Agrippa are documented here. The format follows
 
 ### Fixed
 
+- **Dev-mode sign-in through the Vite proxy** — better-auth trusts only its `baseURL` origin (`http://localhost:3000`), so auth POSTs from the dev SPA on `:5173` were rejected with 403 `INVALID_ORIGIN`. The dev proxy now rewrites the `Origin` header to the API's own, completing the same-origin simulation of the production deployment (ADR-0001) instead of loosening the API's origin check.
 - **Crash recovery for no-retry steps** — a worker that died mid-step no longer silently skips (or spuriously fails) a step without template retries; the crashed attempt no longer consumes the retry budget, and the executor session is carried onto the recovery attempt so resume works.
 - **Atomic run lifecycle** — one `finalizeRun` owns every terminal transition: a single transaction does the status CAS (requiring `cancel_requested = false` for a success, so a late cancel wins atomically), finishedAt/totals, and the terminal event. Both the engine and the worker's retry-exhaustion path use it, so a run is never half-finalized and a queued run whose setup threw transitions `queued → failed` (now legal) with a terminal event instead of stranding. Event sequence numbers come from an atomic per-run counter (`runs.next_event_seq`), and approval decisions are CAS on `pending` with the sweeper re-enqueuing any run left paused by a lost resume enqueue.
 - **Quota accounting** — the engine now counts the same monthly window as the submit gate, excludes the run's own spend from the headroom it checks (no double-count on resume), re-reads project usage at each step boundary so concurrent runs can't jointly overspend, and restores per-phase spend on resume so per-phase budgets aren't reset by a crash.

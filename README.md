@@ -23,21 +23,30 @@ M1 implemented — all three layers work end to end. See the [M1 plan](docs/plan
 ```sh
 bun install
 docker compose -f infra/docker-compose.dev.yml up -d   # postgres + redis (or use local installs)
-export DATABASE_URL=postgres://localhost:5432/agrippa
-export AGRIPPA_SECRET_KEY=$(openssl rand -base64 32)
-export AGRIPPA_EXECUTOR=fake                            # token-free demo executor
+cat > .env.local <<EOF         # created once; Bun loads it automatically (git-ignored)
+DATABASE_URL=postgres://localhost:5432/agrippa
+AGRIPPA_SECRET_KEY=$(openssl rand -base64 32)
+AGRIPPA_EXECUTOR=fake
+EOF
 bun apps/api/src/index.ts      # api :3000 (migrates + seeds on boot)
 bun apps/worker/src/index.ts   # worker
 cd apps/web && bun run dev     # SPA :5173 (proxies /api → :3000)
 ```
 
-Sign up (the first user becomes org admin), create a project, grant models/skills under Settings → Resources, then submit a task from the catalog. Set `AGRIPPA_EXECUTOR=claude-agent-sdk` and `ANTHROPIC_API_KEY` for real runs.
+Sign up (the first user becomes org admin), create a project, grant models/skills under Settings → Resources, then submit a task from the catalog. For real runs set `AGRIPPA_EXECUTOR=claude-agent-sdk` and `ANTHROPIC_API_KEY` in `.env.local` — and keep the file: `AGRIPPA_SECRET_KEY` encrypts credentials you store, so regenerating it orphans them (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 **Self-hosted** (Docker):
 
 ```sh
 cp infra/env/.env.example infra/env/.env    # fill in the secrets
 docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+```
+
+**Self-hosted** (VM, systemd — no Docker; Ubuntu 22.04/24.04):
+
+```sh
+sudo git clone https://github.com/ainaive/agrippa /opt/agrippa
+sudo /opt/agrippa/infra/vm/install.sh       # idempotent; updates: infra/vm/deploy.sh
 ```
 
 **Quality gate**: `bun run check && bun test` (same commands CI runs).
@@ -51,7 +60,7 @@ docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
 
 ## Tech stack
 
-TypeScript · Bun workspaces monorepo · Hono (REST + SSE) · Vite + React + TailwindCSS + shadcn/ui · Drizzle + Postgres · pg-boss · Redis (pubsub) · better-auth · i18next (en / zh-CN) · Claude Agent SDK (first executor) · Docker Compose (self-hosted)
+TypeScript · Bun workspaces monorepo · Hono (REST + SSE) · Vite + React + TailwindCSS + shadcn/ui · Drizzle + Postgres · pg-boss · Redis (pubsub) · better-auth · i18next (en / zh-CN) · Claude Agent SDK (first executor) · Docker Compose or systemd VM (self-hosted)
 
 ---
 

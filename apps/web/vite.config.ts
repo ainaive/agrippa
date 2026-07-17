@@ -12,7 +12,17 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://localhost:3000",
+      "/api": {
+        target: "http://localhost:3000",
+        // Dev simulates the production same-origin deployment (ADR-0001: the
+        // API serves the SPA, no CORS). Rewrite Origin to the API's own, or
+        // better-auth's CSRF check 403s every auth POST with INVALID_ORIGIN.
+        configure(proxy) {
+          proxy.on("proxyReq", (proxyReq) => {
+            proxyReq.setHeader("origin", "http://localhost:3000");
+          });
+        },
+      },
     },
   },
 });
