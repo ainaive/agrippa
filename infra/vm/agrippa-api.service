@@ -1,0 +1,30 @@
+# Agrippa API — Hono REST + SSE, serves the built SPA (AGRIPPA_WEB_DIST).
+# Migrates + seeds the database on boot (AGRIPPA_MIGRATE_ON_BOOT=0 to skip),
+# which is why deploy.sh restarts this unit before the worker.
+[Unit]
+Description=Agrippa API (REST + SSE + SPA)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=agrippa
+Group=agrippa
+WorkingDirectory=/opt/agrippa
+EnvironmentFile=/etc/agrippa/agrippa.env
+Environment=NODE_ENV=production
+ExecStart=/usr/local/bin/bun apps/api/src/index.ts
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+# Hardening — the API never runs agent code, so it can be stricter than the
+# worker. No MemoryDenyWriteExecute: Bun's JavaScriptCore JIT needs W^X.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+
+[Install]
+WantedBy=multi-user.target

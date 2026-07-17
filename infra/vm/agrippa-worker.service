@@ -1,0 +1,38 @@
+# Agrippa worker — pg-boss consumers + the orchestration engine.
+# Does NOT migrate the database; ExecStartPre gates on the API's /healthz so a
+# first boot (or an upgrade with new migrations) never runs against a stale
+# schema. SIGTERM triggers the worker's graceful drain (queue.stop()); a run
+# killed by TimeoutStopSec resumes step-granularly after restart.
+[Unit]
+Description=Agrippa worker (run execution engine)
+After=network-online.target postgresql.service redis-server.service agrippa-api.service
+Wants=network-online.target
+
+[Service]
+User=agrippa
+Group=agrippa
+WorkingDirectory=/opt/agrippa
+EnvironmentFile=/etc/agrippa/agrippa.env
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/agrippa
+# Wait up to 120s for the API to report healthy (schema migrated + seeded).
+# $$ keeps systemd from eating the $ — the shell must see $(seq) and ${PORT}.
+ExecStartPre=/bin/sh -c 'for i in $$(seq 1 60); do curl -sf "http://127.0.0.1:$${PORT:-3000}/healthz" >/dev/null && exit 0; sleep 2; done; echo "API /healthz never became ready" >&2; exit 1'
+ExecStart=/usr/local/bin/bun apps/worker/src/index.ts
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+# Hardening — deliberately LIGHTER than the API: agent commands run inside
+# bubblewrap, which needs user/mount/pid/net namespaces, so RestrictNamespaces=
+# and SystemCallFilter= MUST stay off here (the sandbox degrades silently
+# without them — see infra/Dockerfile.worker). ProtectSystem=full keeps
+# /usr and /etc read-only; run workspaces and artifacts live under
+# /var/lib/agrippa, which stays writable by file permissions.
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
