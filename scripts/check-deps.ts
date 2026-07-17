@@ -42,9 +42,10 @@ for await (const path of new Glob("{apps,packages}/*/package.json").scan(".")) {
     failed = true;
     continue;
   }
-  const internal = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies }).filter((d) =>
-    d.startsWith("@agrippa/"),
-  );
+  // runtime dependencies only: tests may simulate other layers (e.g. the api
+  // integration suite drives the engine like a worker would), so devDependencies
+  // are exempt — the architectural rule is about production imports.
+  const internal = Object.keys({ ...pkg.dependencies }).filter((d) => d.startsWith("@agrippa/"));
   for (const dep of internal) {
     if (!allowed.includes(dep)) {
       console.error(`✗ ${pkg.name} → ${dep} violates the dependency direction`);
