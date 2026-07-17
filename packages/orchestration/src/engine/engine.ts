@@ -557,6 +557,10 @@ class RunEngine {
       workspaceDir: this.workspaceDir,
       resumeSessionId: row.executorSessionId ?? undefined,
       priorContext,
+      expectedArtifacts: step.produces.map((key) => ({
+        key,
+        kind: this.template.spec.outputs.artifacts.find((a) => a.key === key)?.kind ?? "markdown",
+      })),
     };
   }
 

@@ -66,6 +66,8 @@ export type StepExecutionRequest = {
   workspaceDir: string;
   resumeSessionId?: string;
   priorContext: PriorStepSummary[];
+  /** Artifact keys this step must produce (from the template contract). */
+  expectedArtifacts: Array<{ key: string; kind: ArtifactKind }>;
 };
 
 export type NormalizedErrorCode =
