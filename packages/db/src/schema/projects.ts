@@ -1,3 +1,4 @@
+import { PROJECT_ROLES, RESOURCE_TYPES } from "@agrippa/core";
 import {
   bigint,
   boolean,
@@ -37,9 +38,6 @@ export const projects = pgTable(
   (t) => [uniqueIndex("projects_org_slug_uq").on(t.orgId, t.slug)],
 );
 
-export const PROJECT_ROLES = ["admin", "member", "viewer"] as const;
-export type ProjectRole = (typeof PROJECT_ROLES)[number];
-
 export const projectMembers = pgTable(
   "project_members",
   {
@@ -70,9 +68,6 @@ export const repoConnections = pgTable("repo_connections", {
     .default("active"),
   createdAt: createdAtCol(),
 });
-
-export const RESOURCE_TYPES = ["skill", "mcp_server", "model", "template", "faber"] as const;
-export type ResourceType = (typeof RESOURCE_TYPES)[number];
 
 export const projectResourceGrants = pgTable(
   "project_resource_grants",

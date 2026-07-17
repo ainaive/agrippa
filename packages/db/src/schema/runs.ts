@@ -1,4 +1,4 @@
-import type { RunStatus, StepStatus } from "@agrippa/core";
+import { ARTIFACT_KINDS, type RunStatus, type StepStatus } from "@agrippa/core";
 import {
   type AnyPgColumn,
   bigserial,
@@ -132,9 +132,6 @@ export const approvals = pgTable("approvals", {
   decidedAt: tstz("decided_at"),
   comment: text("comment"),
 });
-
-export const ARTIFACT_KINDS = ["file", "patch", "markdown", "json", "link"] as const;
-export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 export const artifacts = pgTable("artifacts", {
   id: idCol(),

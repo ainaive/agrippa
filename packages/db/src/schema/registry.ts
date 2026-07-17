@@ -1,4 +1,4 @@
-import type { LocalizedText } from "@agrippa/core";
+import { type LocalizedText, MODEL_TIERS } from "@agrippa/core";
 import {
   type AnyPgColumn,
   boolean,
@@ -158,9 +158,6 @@ export const mcpServers = pgTable("mcp_servers", {
 });
 
 // ── Models ────────────────────────────────────────────────────────────────────
-
-export const MODEL_TIERS = ["strong", "balanced", "fast"] as const;
-export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export const models = pgTable("models", {
   id: idCol(),
