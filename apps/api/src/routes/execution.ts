@@ -418,9 +418,6 @@ export const executionRoutes = new Hono<AppEnv>()
         return rows;
       };
 
-      // 1) replay history (gap-free by construction)
-      await replay();
-
       const isTerminal = async (): Promise<boolean> => {
         const [row] = await db
           .select({ status: runs.status })
@@ -429,9 +426,11 @@ export const executionRoutes = new Hono<AppEnv>()
         return row ? isTerminalRunStatus(row.status) : true;
       };
 
-      if (await isTerminal()) return;
-
-      // 2) live: bridge the bus when present, else poll the DB
+      // Live: bridge the bus when present, else poll the DB. With a bus we must
+      // subscribe BEFORE replaying Postgres — an event committed and published
+      // in the window between replay and subscribe would otherwise be delivered
+      // only at the terminal replay, contradicting ADR-0007's gap-free
+      // guarantee. Buffered live events dedupe against the replay by seq.
       if (bus) {
         const queue: Array<() => Promise<void>> = [];
         let notify: (() => void) | null = null;
@@ -444,6 +443,7 @@ export const executionRoutes = new Hono<AppEnv>()
           notify?.();
         });
         try {
+          await replay(); // history first; the subscription is already buffering
           while (!closed) {
             while (queue.length > 0) {
               const job = queue.shift();
@@ -463,6 +463,8 @@ export const executionRoutes = new Hono<AppEnv>()
           unsubscribe();
         }
       } else {
+        await replay();
+        if (await isTerminal()) return;
         while (!closed) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
           await replay();

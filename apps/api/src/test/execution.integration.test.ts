@@ -250,6 +250,10 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
     // resume from the middle: only later events are replayed
     const ids = [...text.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+    // subscribe-before-replay must not deliver any event twice: seq strictly
+    // increasing, deduped by cursor (ADR-0007)
+    expect(new Set(ids).size).toBe(ids.length);
+    expect([...ids].sort((a, b) => a - b)).toEqual(ids);
     const middle = ids[Math.floor(ids.length / 2)] as number;
     const partial = await viewer.request(`/api/v1/runs/${runId}/events`, {
       headers: { "last-event-id": String(middle) },
