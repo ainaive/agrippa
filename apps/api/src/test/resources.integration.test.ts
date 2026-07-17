@@ -233,8 +233,12 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
     const denied = await member.request("/api/v1/audit-logs");
     expect(denied.status).toBe(403);
 
-    const all = await jsonOf<Array<{ action: string }>>(await admin.request("/api/v1/audit-logs"));
+    const all = await jsonOf<Array<{ action: string; actorEmail: string | null }>>(
+      await admin.request("/api/v1/audit-logs"),
+    );
     expect(all.length).toBeGreaterThan(0);
+    // actor identity is joined in for display
+    expect(all.some((row) => row.actorEmail !== null)).toBe(true);
 
     const filtered = await jsonOf<Array<{ action: string }>>(
       await admin.request("/api/v1/audit-logs?action=project.create"),

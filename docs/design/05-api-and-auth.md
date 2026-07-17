@@ -87,7 +87,7 @@ POST /templates/:id/versions/:v/publish   POST /templates/validate              
 
 ### Governance
 ```
-GET  /audit-logs?project=&actor=&action=&from=&to=
+GET  /audit-logs?projectId=&action=&limit=   # rows include joined actorEmail/actorName
 CRUD /api-keys                            # secret shown once at creation
 ```
 

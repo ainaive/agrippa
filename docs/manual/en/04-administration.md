@@ -31,4 +31,4 @@ Each registry has its own page in the Admin sidebar section, with create and edi
 
 Each project's dashboard shows current-month spend (with a per-model breakdown) against the quota; the same data is available at `GET /api/v1/projects/:id/usage`.
 
-Every mutation in the system — member changes, grants, template publishes, submissions, approvals, cancellations — writes an audit entry (actor, action, resource, payload, IP). Org admins can query them: `GET /api/v1/audit-logs?projectId=&action=&limit=`.
+Every mutation in the system — member changes, grants, template publishes, submissions, approvals, cancellations — writes an audit entry (actor, action, resource, payload, IP). Org admins browse them on the **Audit log** page in the Admin section: filter by project or action, and expand any row to see its payload. The same data is available at `GET /api/v1/audit-logs?projectId=&action=&limit=`.

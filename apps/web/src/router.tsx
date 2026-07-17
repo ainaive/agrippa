@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-router";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AdminLayout } from "./pages/admin/AdminLayout";
+import { AuditLogPage } from "./pages/admin/AuditLogPage";
 import { FabriPage } from "./pages/admin/FabriPage";
 import { McpServersPage } from "./pages/admin/McpServersPage";
 import { ModelsPage } from "./pages/admin/ModelsPage";
@@ -108,6 +109,13 @@ const adminMcpRoute = createRoute({
   staticData: { crumb: "nav.mcp" },
 });
 
+const adminAuditRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/audit",
+  component: AuditLogPage,
+  staticData: { crumb: "nav.audit" },
+});
+
 const projectRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/projects/$projectId",
@@ -169,6 +177,7 @@ const routeTree = rootRoute.addChildren([
       adminModelsRoute,
       adminSkillsRoute,
       adminMcpRoute,
+      adminAuditRoute,
     ]),
     projectRoute.addChildren([
       dashboardRoute,

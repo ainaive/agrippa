@@ -56,6 +56,13 @@
     "authed": "auth configured",
     "noAuth": "no auth"
   },
+  "audit": {
+    "title": "Audit log",
+    "hint": "Every mutation in the system — who did what, where, and when.",
+    "allProjects": "All projects",
+    "actionFilter": "Filter by action, e.g. task.submit",
+    "empty": "No audit entries match the current filters."
+  },
   "editor": {
     "source": "Template source (YAML)",
     "validate": "Validate",

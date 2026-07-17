@@ -56,6 +56,13 @@
     "authed": "已配置凭证",
     "noAuth": "无凭证"
   },
+  "audit": {
+    "title": "审计日志",
+    "hint": "系统内的每次变更——谁在何时何处做了什么。",
+    "allProjects": "全部项目",
+    "actionFilter": "按操作筛选，如 task.submit",
+    "empty": "没有符合筛选条件的审计记录。"
+  },
   "editor": {
     "source": "模板源码（YAML）",
     "validate": "校验",
