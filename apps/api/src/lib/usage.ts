@@ -1,5 +1,5 @@
-import { AppError } from "@agrippa/core";
-import { type Db, models, projectQuotas, tokenUsage } from "@agrippa/db";
+import { AppError, type LocalizedText } from "@agrippa/core";
+import { type Db, models, projectQuotas, runs, tasks, taskTypes, tokenUsage } from "@agrippa/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 const periodStart = sql`date_trunc('month', now())`;
@@ -8,9 +8,14 @@ export type ProjectUsage = {
   costUsd: number;
   tokens: number;
   byModel: Array<{ model: string; costUsd: number; tokens: number }>;
+  byTaskType: Array<{ taskTypeNameI18n: LocalizedText | null; costUsd: number; tokens: number }>;
+  byDay: Array<{ day: string; costUsd: number; tokens: number }>;
 };
 
-/** Current-period (monthly) usage totals for a project. */
+/**
+ * Current-period (monthly) usage for a project. All groupings share the same
+ * month window the quota gate uses, so the numbers agree everywhere.
+ */
 export async function projectUsage(db: Db, projectId: string): Promise<ProjectUsage> {
   const where = and(eq(tokenUsage.projectId, projectId), gte(tokenUsage.occurredAt, periodStart));
   const [totals] = await db
@@ -32,11 +37,45 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
     .where(where)
     .groupBy(models.displayName);
 
+  const byTaskType = await db
+    .select({
+      nameI18n: taskTypes.nameI18n,
+      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+      tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
+    })
+    .from(tokenUsage)
+    .leftJoin(runs, eq(tokenUsage.runId, runs.id))
+    .leftJoin(tasks, eq(runs.taskId, tasks.id))
+    .leftJoin(taskTypes, eq(tasks.taskTypeId, taskTypes.id))
+    .where(where)
+    .groupBy(taskTypes.nameI18n);
+
+  const byDay = await db
+    .select({
+      day: sql<string>`to_char(date_trunc('day', ${tokenUsage.occurredAt}), 'YYYY-MM-DD')`,
+      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+      tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
+    })
+    .from(tokenUsage)
+    .where(where)
+    .groupBy(sql`date_trunc('day', ${tokenUsage.occurredAt})`)
+    .orderBy(sql`date_trunc('day', ${tokenUsage.occurredAt})`);
+
   return {
     costUsd: Number(totals?.cost ?? 0),
     tokens: Number(totals?.tokens ?? 0),
     byModel: byModel.map((row) => ({
       model: row.model,
+      costUsd: Number(row.cost),
+      tokens: Number(row.tokens),
+    })),
+    byTaskType: byTaskType.map((row) => ({
+      taskTypeNameI18n: (row.nameI18n as LocalizedText | null) ?? null,
+      costUsd: Number(row.cost),
+      tokens: Number(row.tokens),
+    })),
+    byDay: byDay.map((row) => ({
+      day: row.day,
       costUsd: Number(row.cost),
       tokens: Number(row.tokens),
     })),

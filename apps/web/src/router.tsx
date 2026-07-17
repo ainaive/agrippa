@@ -24,6 +24,7 @@ import { Shell } from "./pages/Shell";
 import { SubmitTaskPage } from "./pages/SubmitTaskPage";
 import { TasksPage } from "./pages/TasksPage";
 import { TemplateEditorPage } from "./pages/TemplateEditorPage";
+import { UsagePage } from "./pages/UsagePage";
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> });
 
@@ -157,6 +158,13 @@ const runRoute = createRoute({
   staticData: { crumb: "$run" },
 });
 
+const usageRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: "/usage",
+  component: UsagePage,
+  staticData: { crumb: "nav.usage" },
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/settings",
@@ -185,6 +193,7 @@ const routeTree = rootRoute.addChildren([
       submitRoute,
       tasksRoute,
       runRoute,
+      usageRoute,
       settingsRoute,
     ]),
   ]),

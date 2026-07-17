@@ -49,7 +49,7 @@ PATCH  /projects/:id/members/:userId      DELETE /projects/:id/members/:userId
 POST   /projects/:id/repos                GET /projects/:id/repos  DELETE .../repos/:repoId
 GET    /projects/:id/grants               PUT /projects/:id/grants # bulk enable/disable resources
 GET    /projects/:id/quota                PUT /projects/:id/quota
-GET    /projects/:id/usage?period=&groupBy=model|task_type|member
+GET    /projects/:id/usage   # current-month totals + byModel + byTaskType + byDay (same window as the quota gate)
 ```
 
 ### Catalog

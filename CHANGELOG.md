@@ -9,6 +9,8 @@ All notable changes to Agrippa are documented here. The format follows
 ### Added
 
 - **Cross-project approvals inbox** — `GET /api/v1/approvals/pending` returns every pending checkpoint in the caller's projects (membership-scoped, with project role). The Approvals page now lists them grouped by project with inline review: presented artifacts preview in place and members can approve/reject without opening the run. The sidebar entry carries a live pending-count badge.
+- **Project usage analytics** — `GET /projects/:id/usage` now also returns `byTaskType` and `byDay` groupings (same monthly window as the quota gate, so all numbers agree), and a new per-project **Usage** page shows spend vs. quota, total tokens, a daily-spend chart, and per-model / per-task-type breakdowns.
+- **Audit log page** — `/admin/audit` surfaces the previously UI-less audit endpoint with project/action filters and expandable payloads; rows now include the joined actor name/email.
 
 ### Changed (web UI overhaul, in progress)
 

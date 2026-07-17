@@ -288,6 +288,24 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(await download.text()).toBe("# Root cause");
   });
 
+  it("reports usage grouped by model, task type, and day", async () => {
+    const usage = await jsonOf<{
+      costUsd: number;
+      tokens: number;
+      byModel: Array<{ model: string; tokens: number }>;
+      byTaskType: Array<{ taskTypeNameI18n: Record<string, string> | null; tokens: number }>;
+      byDay: Array<{ day: string; tokens: number }>;
+    }>(await viewer.request(`/api/v1/projects/${projectId}/usage`));
+    // the fake executor recorded 500+200 and 800+300 tokens
+    expect(usage.tokens).toBe(1800);
+    expect(usage.byModel.length).toBeGreaterThan(0);
+    expect(usage.byTaskType).toHaveLength(1);
+    expect(usage.byTaskType[0]?.taskTypeNameI18n?.en).toBeTruthy();
+    expect(usage.byDay).toHaveLength(1);
+    expect(usage.byDay[0]?.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(usage.byDay[0]?.tokens).toBe(1800);
+  });
+
   it("replays the full event log over SSE, honoring Last-Event-ID", async () => {
     const full = await viewer.request(`/api/v1/runs/${runId}/events`);
     expect(full.status).toBe(200);

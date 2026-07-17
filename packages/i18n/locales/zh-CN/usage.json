@@ -1,0 +1,11 @@
+{
+  "title": "用量",
+  "period": "{{period}}的花费与 Token 消耗。",
+  "totalCost": "总费用",
+  "totalTokens": "Token 总量",
+  "daily": "每日花费",
+  "byModel": "按模型",
+  "byTaskType": "按任务类型",
+  "empty": "暂无数据。",
+  "noUsage": "本月尚无用量记录。"
+}

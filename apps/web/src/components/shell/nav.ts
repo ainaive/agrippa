@@ -1,4 +1,5 @@
 import {
+  BarChart3Icon,
   LayoutDashboardIcon,
   ListChecksIcon,
   type LucideIcon,
@@ -18,6 +19,7 @@ export const projectNav: ProjectNavItem[] = [
   { key: "dashboard", icon: LayoutDashboardIcon, to: "/projects/$projectId", exact: true },
   { key: "catalog", icon: ShapesIcon, to: "/projects/$projectId/catalog" },
   { key: "tasks", icon: ListChecksIcon, to: "/projects/$projectId/tasks" },
+  { key: "usage", icon: BarChart3Icon, to: "/projects/$projectId/usage" },
   {
     key: "settings",
     icon: SettingsIcon,
