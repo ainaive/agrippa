@@ -3,13 +3,40 @@
   "loading": "加载中…",
   "selectProject": "选择项目",
   "signOut": "退出登录",
+  "adminOnly": "需要管理员权限",
   "nav": {
     "approvals": "审批",
     "admin": "管理",
     "dashboard": "工作台",
     "catalog": "任务目录",
     "tasks": "任务",
-    "settings": "设置"
+    "settings": "设置",
+    "project": "项目",
+    "organization": "组织",
+    "templates": "编排模板",
+    "fabri": "Faber 智能体",
+    "models": "模型",
+    "skills": "技能",
+    "mcp": "MCP 服务",
+    "audit": "审计日志",
+    "usage": "用量"
+  },
+  "breadcrumb": {
+    "newTask": "新建任务"
+  },
+  "userMenu": {
+    "language": "语言"
+  },
+  "switcher": {
+    "search": "查找项目…",
+    "projects": "项目",
+    "create": "新建项目",
+    "empty": "未找到项目",
+    "archived": "已归档"
+  },
+  "projectNotFound": {
+    "title": "项目不存在",
+    "hint": "该项目不存在，或你不是项目成员。"
   },
   "actions": {
     "save": "保存",

@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed (web UI overhaul, in progress)
+
+- **GitLab-style app shell** — the thin top bar + horizontal tabs are replaced by a persistent left sidebar (collapsible to an icon rail; sheet drawer on mobile) with a searchable project switcher, grouped Project/Organization navigation, and role-gated entries. A slim top bar carries breadcrumbs (derived from the route tree) and an avatar menu bundling language, theme (light/dark/system, persisted), and sign-out. New indigo/violet visual identity over cool-tinted neutrals with semantic status colors; emoji glyphs replaced by lucide icons; toasts (sonner) and confirmation dialogs wired into the shell. Projects can now be created any time from the switcher, not just on first login.
+
 ### Added
 
 - **VM deployment without Docker** — `infra/vm/` ships an idempotent Ubuntu 22.04/24.04 installer (Bun, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets), a git-pull `deploy.sh`, and hardened systemd units. The api still migrates + seeds on boot; the worker gates its start on the api's `/healthz` so it never runs against a stale schema. The worker unit deliberately leaves namespaces unrestricted (bubblewrap needs them — the sandbox degrades silently otherwise). Docker Compose and local dev mode are unchanged.

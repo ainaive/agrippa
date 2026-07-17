@@ -1,6 +1,7 @@
 import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
 import { AdminPage } from "./pages/AdminPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
+import { AdminLayout } from "./pages/admin/AdminLayout";
 import { CatalogPage } from "./pages/CatalogPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { HomeRedirect } from "./pages/HomeRedirect";
@@ -37,24 +38,34 @@ const approvalsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/approvals",
   component: ApprovalsPage,
+  staticData: { crumb: "nav.approvals" },
 });
 
 const adminRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/admin",
+  component: AdminLayout,
+  staticData: { crumb: "nav.admin" },
+});
+
+const adminIndexRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/",
   component: AdminPage,
 });
 
 const templateEditorRoute = createRoute({
-  getParentRoute: () => shellRoute,
-  path: "/admin/templates/$templateId",
+  getParentRoute: () => adminRoute,
+  path: "/templates/$templateId",
   component: TemplateEditorPage,
+  staticData: { crumb: "nav.templates" },
 });
 
 const projectRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/projects/$projectId",
   component: ProjectLayout,
+  staticData: { crumb: "$project" },
 });
 
 const dashboardRoute = createRoute({
@@ -67,30 +78,35 @@ const catalogRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/catalog",
   component: CatalogPage,
+  staticData: { crumb: "nav.catalog" },
 });
 
 const submitRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/submit/$taskTypeId",
   component: SubmitTaskPage,
+  staticData: { crumb: "breadcrumb.newTask" },
 });
 
 const tasksRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/tasks",
   component: TasksPage,
+  staticData: { crumb: "nav.tasks" },
 });
 
 const runRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/runs/$runId",
   component: RunDetailPage,
+  staticData: { crumb: "$run" },
 });
 
 const settingsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/settings",
   component: SettingsPage,
+  staticData: { crumb: "nav.settings" },
 });
 
 const routeTree = rootRoute.addChildren([
@@ -98,8 +114,7 @@ const routeTree = rootRoute.addChildren([
   shellRoute.addChildren([
     homeRoute,
     approvalsRoute,
-    adminRoute,
-    templateEditorRoute,
+    adminRoute.addChildren([adminIndexRoute, templateEditorRoute]),
     projectRoute.addChildren([
       dashboardRoute,
       catalogRoute,
@@ -116,5 +131,9 @@ export const router = createRouter({ routeTree });
 declare module "@tanstack/react-router" {
   interface Register {
     router: typeof router;
+  }
+  interface StaticDataRouteOption {
+    /** Breadcrumb label: a common-namespace i18n key, or "$project" / "$run" for dynamic labels. */
+    crumb?: string;
   }
 }

@@ -3,13 +3,40 @@
   "loading": "Loading…",
   "selectProject": "Select project",
   "signOut": "Sign out",
+  "adminOnly": "Administrator access required",
   "nav": {
     "approvals": "Approvals",
     "admin": "Admin",
     "dashboard": "Dashboard",
     "catalog": "Catalog",
     "tasks": "Tasks",
-    "settings": "Settings"
+    "settings": "Settings",
+    "project": "Project",
+    "organization": "Organization",
+    "templates": "Templates",
+    "fabri": "Fabri",
+    "models": "Models",
+    "skills": "Skills",
+    "mcp": "MCP servers",
+    "audit": "Audit log",
+    "usage": "Usage"
+  },
+  "breadcrumb": {
+    "newTask": "New task"
+  },
+  "userMenu": {
+    "language": "Language"
+  },
+  "switcher": {
+    "search": "Find a project…",
+    "projects": "Projects",
+    "create": "New project",
+    "empty": "No projects found",
+    "archived": "Archived"
+  },
+  "projectNotFound": {
+    "title": "Project not found",
+    "hint": "This project does not exist or you are not a member of it."
   },
   "actions": {
     "save": "Save",

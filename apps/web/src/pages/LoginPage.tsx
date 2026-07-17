@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { HammerIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -38,12 +39,16 @@ export function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-muted/40 p-4">
+    <div className="flex min-h-screen flex-col items-center justify-center gap-6 bg-muted/40 p-4">
+      <div className="flex items-center gap-2.5">
+        <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+          <HammerIcon className="size-5" />
+        </div>
+        <span className="text-lg font-semibold tracking-tight">{t("title")}</span>
+      </div>
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <span aria-hidden>⚒️</span> {t("title")}
-          </CardTitle>
+          <CardTitle>{mode === "signUp" ? t("signUp") : t("signIn")}</CardTitle>
           <p className="text-sm text-muted-foreground">{t("subtitle")}</p>
         </CardHeader>
         <CardContent>
