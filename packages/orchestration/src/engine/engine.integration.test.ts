@@ -35,6 +35,7 @@ import {
   InMemoryArtifactStore,
   silentLogger,
 } from "./fakes";
+import { appendRunEvent, decideApproval, transitionRun } from "./run-lifecycle";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates");
@@ -542,5 +543,52 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(seen).toContain("step.started");
     expect(seen).toContain("usage");
     expect(seen).toContain("approval.required");
+  });
+});
+
+describe.skipIf(!dbUp)("run-lifecycle module", () => {
+  it("transitionRun is a compare-and-swap on the expected status", async () => {
+    const { db, runId } = await setupFixture();
+    // queued → running applies once; a second call with the stale `from` fails
+    expect(await transitionRun(db, runId, "queued", "running")).toBe(true);
+    expect(await transitionRun(db, runId, "queued", "running")).toBe(false);
+    // a late finalize cannot overwrite a status it no longer holds
+    expect(await transitionRun(db, runId, "running", "cancelled")).toBe(true);
+    expect(await transitionRun(db, runId, "running", "succeeded")).toBe(false);
+    const [row] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("cancelled");
+  });
+
+  it("appendRunEvent allocates a monotonic per-run seq from the database", async () => {
+    const { db, runId } = await setupFixture();
+    const a = await appendRunEvent(db, { runId, type: "x.one", payload: {} });
+    const b = await appendRunEvent(db, { runId, type: "x.two", payload: {} });
+    // concurrent appends must not collide on the unique (run_id, seq) index
+    const [c, d] = await Promise.all([
+      appendRunEvent(db, { runId, type: "x.three", payload: {} }),
+      appendRunEvent(db, { runId, type: "x.four", payload: {} }),
+    ]);
+    const seqs = [a.seq, b.seq, c.seq, d.seq].sort((m, n) => m - n);
+    expect(new Set(seqs).size).toBe(4);
+    expect(b.seq).toBeGreaterThan(a.seq);
+  });
+
+  it("decideApproval is a compare-and-swap on pending", async () => {
+    const { db, runId } = await setupFixture();
+    const [approval] = await db
+      .insert(approvals)
+      .values({ runId, checkpointId: "cp-1", status: "pending" })
+      .returning();
+    const id = approval?.id as string;
+    const first = await decideApproval(db, id, { status: "approved" });
+    expect(first?.status).toBe("approved");
+    // a racing expiry cannot overwrite the user's decision
+    const second = await decideApproval(db, id, { status: "expired" });
+    expect(second).toBeNull();
+    const [row] = await db
+      .select({ status: approvals.status })
+      .from(approvals)
+      .where(eq(approvals.id, id));
+    expect(row?.status).toBe("approved");
   });
 });

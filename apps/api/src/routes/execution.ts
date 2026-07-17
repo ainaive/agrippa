@@ -18,14 +18,16 @@ import {
   templateVersions,
 } from "@agrippa/db";
 import {
+  appendRunEvent as allocateRunEvent,
   authorizeResources,
   buildParamsValidator,
+  decideApproval,
   resolveModelRoles,
   SubmitError,
   type TemplateDoc,
   verifyRepoRefs,
 } from "@agrippa/orchestration";
-import { and, asc, desc, eq, gt, max } from "drizzle-orm";
+import { and, asc, desc, eq, gt } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
@@ -47,26 +49,15 @@ async function loadRunScoped(
   return run;
 }
 
-/** Appends an API-originated event to the run log (seq = max + 1) and the bus. */
+/** Appends an API-originated event to the run log (DB-allocated seq) and the bus. */
 async function appendRunEvent(
   c: { var: AppEnv["Variables"] },
   runId: string,
   type: string,
   payload: Record<string, unknown>,
 ): Promise<void> {
-  const [maxSeq] = await c.var.db
-    .select({ v: max(runEvents.seq) })
-    .from(runEvents)
-    .where(eq(runEvents.runId, runId));
-  const seq = (maxSeq?.v ?? 0) + 1;
-  await c.var.db.insert(runEvents).values({ runId, seq, type, payload });
-  await c.var.bus?.publish({
-    runId,
-    seq,
-    type,
-    payload,
-    createdAt: new Date().toISOString(),
-  });
+  const { seq, createdAt } = await allocateRunEvent(c.var.db, { runId, type, payload });
+  await c.var.bus?.publish({ runId, seq, type, payload, createdAt: createdAt.toISOString() });
 }
 
 export const executionRoutes = new Hono<AppEnv>()
@@ -310,19 +301,20 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(approvals)
       .where(and(eq(approvals.id, c.req.param("approvalId")), eq(approvals.runId, run.id)));
     if (!approval) throw AppError.notFound("Approval");
-    if (approval.status !== "pending") {
-      throw AppError.conflict("already_decided", `Approval is ${approval.status}`);
+    // compare-and-swap on status='pending' so a user decision and the expiry
+    // worker cannot overwrite each other
+    const updated = await decideApproval(c.var.db, approval.id, {
+      status: input.decision,
+      decidedBy: c.var.user.id,
+      comment: input.comment,
+    });
+    if (!updated) {
+      // already decided, OR a prior attempt decided then failed to enqueue: in
+      // both cases the durable state is correct, so re-enqueue to unstick the
+      // run (the sweeper also backstops this) and report the conflict
+      await c.var.queue?.enqueueRun(run.id);
+      throw AppError.conflict("already_decided", "Approval is already decided");
     }
-    const [updated] = await c.var.db
-      .update(approvals)
-      .set({
-        status: input.decision,
-        decidedBy: c.var.user.id,
-        decidedAt: new Date(),
-        comment: input.comment,
-      })
-      .where(eq(approvals.id, approval.id))
-      .returning();
     await appendRunEvent(c, run.id, "approval.decided", {
       approvalId: approval.id,
       checkpointId: approval.checkpointId,

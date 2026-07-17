@@ -9,13 +9,14 @@ import { approvals, createDb, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import {
   createRunQueue,
+  decideApproval,
   durationToMinutes,
   type EngineDeps,
   executeRun,
   InProcessEventBus,
   RedisEventBus,
 } from "@agrippa/orchestration";
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, lt, ne, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
@@ -76,16 +77,11 @@ await queue.boss.work(
 
 await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayload>[]) => {
   for (const job of jobs) {
-    const [approval] = await db
-      .select()
-      .from(approvals)
-      .where(eq(approvals.id, job.data.approvalId));
-    if (approval?.status !== "pending") continue;
-    await db
-      .update(approvals)
-      .set({ status: "expired", decidedAt: new Date() })
-      .where(eq(approvals.id, approval.id));
-    deps.logger.warn(`approval ${approval.id} expired — resuming run for onTimeout handling`);
+    // CAS pending → expired; null means a user already decided it (or a prior
+    // run of this job did) — nothing to do
+    const expired = await decideApproval(db, job.data.approvalId, { status: "expired" });
+    if (!expired) continue;
+    deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
     await queue.enqueueRun(job.data.runId); // engine applies the template's onTimeout
   }
 });
@@ -129,6 +125,16 @@ setInterval(async () => {
       .from(runs)
       .where(and(eq(runs.status, "queued"), lt(runs.queuedAt, sql`now() - interval '30 seconds'`)));
     for (const run of stragglers) await queue.enqueueRun(run.id);
+
+    // runs paused on an approval that has since been decided but whose resume
+    // enqueue was lost (e.g. the API/worker died between the decision and the
+    // send) — re-enqueue so the decision actually takes effect
+    const strandedApprovals = await db
+      .selectDistinct({ id: runs.id })
+      .from(runs)
+      .innerJoin(approvals, eq(approvals.runId, runs.id))
+      .where(and(eq(runs.status, "waiting_approval"), ne(approvals.status, "pending")));
+    for (const run of strandedApprovals) await queue.enqueueRun(run.id);
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }

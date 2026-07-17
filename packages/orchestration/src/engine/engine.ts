@@ -1,9 +1,4 @@
-import {
-  canTransitionRun,
-  isTerminalRunStatus,
-  type RunStatus,
-  type StepStatus,
-} from "@agrippa/core";
+import { isTerminalRunStatus, type RunStatus, type StepStatus } from "@agrippa/core";
 import {
   approvals,
   artifacts,
@@ -38,6 +33,7 @@ import {
   type TemplateStep,
 } from "../template-schema";
 import type { EngineDeps, RunOutcome } from "./deps";
+import { appendRunEvent, transitionRun } from "./run-lifecycle";
 
 type RunRow = typeof runs.$inferSelect;
 type StepRow = typeof runSteps.$inferSelect;
@@ -92,7 +88,6 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
 }
 
 class RunEngine {
-  private seq = 0;
   private meter!: BudgetMeter;
   private readonly abort = new AbortController();
   private abortReason: AbortReason | null = null;
@@ -152,10 +147,23 @@ class RunEngine {
       .select({ v: max(runEvents.seq) })
       .from(runEvents)
       .where(eq(runEvents.runId, run.id));
-    this.seq = maxSeq?.v ?? 0;
-    const resuming = this.seq > 0;
+    const resuming = (maxSeq?.v ?? 0) > 0;
 
-    await this.transition(run.status, "running");
+    if (!(await this.transition(run.status, "running"))) {
+      // another worker/path advanced the run between our read and here
+      const [current] = await db
+        .select({ status: runs.status })
+        .from(runs)
+        .where(eq(runs.id, run.id));
+      if (!current || isTerminalRunStatus(current.status)) {
+        throw new RunFailure(
+          current?.status === "cancelled" ? "cancelled" : "superseded",
+          "run already finalized by another worker",
+          current?.status === "cancelled" ? "cancelled" : "failed",
+        );
+      }
+      this.run.status = current.status;
+    }
     if (run.startedAt === null) {
       await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, run.id));
       this.run.startedAt = new Date();
@@ -755,18 +763,17 @@ class RunEngine {
     payload: Record<string, unknown>,
     stepRowId?: string,
   ): Promise<void> {
-    this.seq += 1;
-    const createdAt = new Date();
-    await this.db.insert(runEvents).values({
+    // seq is allocated by the database (run-lifecycle.appendRunEvent), not from
+    // an in-memory counter that a concurrent writer could collide with
+    const { seq, createdAt } = await appendRunEvent(this.db, {
       runId: this.run.id,
       stepId: stepRowId ?? this.currentStepRowId,
-      seq: this.seq,
       type,
       payload,
     });
     await this.deps.bus.publish({
       runId: this.run.id,
-      seq: this.seq,
+      seq,
       type,
       payload,
       createdAt: createdAt.toISOString(),
@@ -804,13 +811,15 @@ class RunEngine {
     if (this.abortReason) throw this.abortFailure();
   }
 
-  private async transition(from: RunStatus, to: RunStatus): Promise<void> {
-    if (from === to) return;
-    if (!canTransitionRun(from, to)) {
-      throw new Error(`illegal run transition ${from} → ${to}`);
-    }
-    await this.db.update(runs).set({ status: to }).where(eq(runs.id, this.run.id));
-    this.run.status = to;
+  /**
+   * Compare-and-swap the run status. Returns false when the row had already
+   * moved off `from` (e.g. a concurrent cancel/finalize won the race); callers
+   * that must not clobber the other outcome check the result.
+   */
+  private async transition(from: RunStatus, to: RunStatus): Promise<boolean> {
+    const applied = await transitionRun(this.db, this.run.id, from, to);
+    if (applied) this.run.status = to;
+    return applied;
   }
 
   private async handleFailure(err: unknown): Promise<RunOutcome> {
@@ -842,7 +851,9 @@ class RunEngine {
     error: { code: string; message: string } | null,
   ): Promise<void> {
     const snapshot = this.meter?.snapshot() ?? { costUsd: 0, tokens: 0, perPhaseCostUsd: {} };
-    await this.transition(this.run.status, status);
+    // CAS: if another path (e.g. a concurrent cancel) already finalized the run,
+    // do not overwrite its terminal status/error with ours
+    if (!(await this.transition(this.run.status, status))) return;
     await this.db
       .update(runs)
       .set({
