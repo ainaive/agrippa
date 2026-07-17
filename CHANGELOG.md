@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **VM deployment without Docker** — `infra/vm/` ships an idempotent Ubuntu 22.04/24.04 installer (Bun, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets), a git-pull `deploy.sh`, and hardened systemd units. The api still migrates + seeds on boot; the worker gates its start on the api's `/healthz` so it never runs against a stale schema. The worker unit deliberately leaves namespaces unrestricted (bubblewrap needs them — the sandbox degrades silently otherwise). Docker Compose and local dev mode are unchanged.
+
 ### Security
 
 - **Executor isolation seam** — one enforceable place (`packages/executor-core/isolation.ts`) decides every tool call and scrubs the subprocess environment. Read-only workspaces now actually deny shell and confine writes to the artifact directory; read-write workspaces confine writes to the workspace with a boundary-safe check (the previous `startsWith` let a sibling `<workspace>-evil` path through, and `Bash` bypassed the check entirely). **Reads (Read/Grep/Glob) are confined to the workspace too**, so the agent can't read `/proc/self/environ`, another run's directory, or the shared artifact store. The SDK subprocess environment is **allow-listed** — only the SDK auth variables and a fixed set of system essentials pass through, so platform secrets, DSNs, and injection vectors like `NODE_OPTIONS` are all dropped — with the OS `sandbox` enabled where available (bubblewrap installed in the worker image), `strictMcpConfig`, and repo-supplied `.claude`/`.mcp.json` removed after checkout so a checked-out repository can't inject hooks or permission overrides. The worker image runs as a non-root user with `/app` kept root-owned.

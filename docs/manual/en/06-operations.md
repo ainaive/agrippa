@@ -11,6 +11,20 @@
 | `postgres` | System of record | Also carries the job queue (pg-boss) — no separate broker |
 | `redis` | Live-event fan-out only | **Disposable**: if it's down, live streams degrade to replay/polling; correctness is unaffected |
 
+## VM (systemd) deployment
+
+The same stack installed by `infra/vm/install.sh` on one Ubuntu host (no Docker; see [Getting Started](01-getting-started.md#deploy-on-a-vm-systemd-no-docker)):
+
+| Piece | Where |
+|---|---|
+| Services | `agrippa-api.service`, `agrippa-worker.service` (Postgres and Redis run as regular system services) |
+| Logs | `journalctl -u agrippa-api -f` · `journalctl -u agrippa-worker -f` |
+| Code + SPA build | `/opt/agrippa` (root-owned) |
+| Config | `/etc/agrippa/agrippa.env` — one file for both services |
+| Run workspaces / artifacts | `/var/lib/agrippa/runs` · `/var/lib/agrippa/artifacts` |
+
+Updates: `sudo /opt/agrippa/infra/vm/deploy.sh` — pulls (`--ff-only`), installs with the frozen lockfile, rebuilds the SPA, restarts the api, waits for `/healthz` (migrations apply on api boot), then restarts the worker. Config changes take effect with `sudo systemctl restart agrippa-api agrippa-worker`.
+
 ## Configuration reference
 
 Documented in `infra/env/.env.example`; the full set:
@@ -35,13 +49,13 @@ Documented in `infra/env/.env.example`; the full set:
 
 ## Backup — three things
 
-1. The **postgres volume** (`pgdata`) — schedule `pg_dump` per your policy.
-2. The **work volume** (`workdata`) — holds large artifacts; losing it loses downloads over 64 KB (metadata and small artifacts survive in Postgres).
+1. The **database** — Compose: the `pgdata` volume; VM: `pg_dump agrippa` — schedule per your policy.
+2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata and small artifacts survive in Postgres).
 3. **`AGRIPPA_SECRET_KEY`** — without it, every stored git token and MCP credential is unrecoverable. Redis needs no backup.
 
 ## Upgrades & scaling
 
-Pull new images and `docker compose up -d`. The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and cost is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
+Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and cost is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 
 Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (SSE) — e.g. `proxy_buffering off;` in nginx — or live progress will arrive in bursts.
 
@@ -59,3 +73,5 @@ Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (
 | Checkout fails for a private repo | The repo connection's token is missing/expired — re-add it under Settings → Repositories (tokens are write-only; re-enter, don't "view"). |
 | Need to inspect what an agent actually did on disk | Set `AGRIPPA_KEEP_WORKSPACES=1` on the worker and re-run; workspaces persist under `WORKSPACE_ROOT/<runId>`. |
 | `healthz` returns 503 | The api can't reach Postgres — check `DATABASE_URL` and the postgres service. |
+| (VM) worker stuck in "activating" | Its `ExecStartPre` is waiting for the api's `/healthz` (up to 120 s) — check `journalctl -u agrippa-api` for why the api isn't healthy. |
+| (VM) agent commands fail, or sandboxing is suspect on Ubuntu 24.04 | AppArmor's `apparmor_restrict_unprivileged_userns` can block bubblewrap — and without bwrap the sandbox degrades **silently**. Probe with `sudo -u agrippa bwrap --unshare-all --ro-bind / / /bin/true`; if it fails, allow unprivileged user namespaces (or install a bwrap AppArmor profile) and restart the worker. |

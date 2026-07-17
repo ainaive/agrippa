@@ -18,6 +18,31 @@ Open `http://localhost:3000`. The stack is four services: **api** (also serves t
 
 **Demo mode**: set `AGRIPPA_EXECUTOR=fake` and leave `ANTHROPIC_API_KEY` empty — every task type runs end to end with a token-free demo executor that produces placeholder artifacts. Ideal for evaluating the platform before spending tokens.
 
+## Deploy on a VM (systemd, no Docker)
+
+Requirements: Ubuntu 22.04/24.04 LTS, ~2 GB RAM, root access.
+
+```sh
+sudo git clone https://github.com/ainaive/agrippa /opt/agrippa
+sudo /opt/agrippa/infra/vm/install.sh        # add --skip-redis to omit Redis
+```
+
+The installer is idempotent and sets up everything on one box:
+
+- Bun, plus the worker's OS dependencies (`git`, `ripgrep`, `bubblewrap` for the agent sandbox)
+- PostgreSQL 17 (PGDG) and Redis 7 (optional — without it, live streams fall back to polling)
+- an `agrippa` system user, data directories under `/var/lib/agrippa`
+- `/etc/agrippa/agrippa.env` with generated secrets — **back up `AGRIPPA_SECRET_KEY`**
+- `agrippa-api` + `agrippa-worker` systemd units, then the first build and start
+
+Open `http://<host>:3000`. The demo-mode note above applies here too (`AGRIPPA_EXECUTOR=fake` in `/etc/agrippa/agrippa.env`). To update later:
+
+```sh
+sudo /opt/agrippa/infra/vm/deploy.sh         # pull → build → restart (api first, then worker)
+```
+
+See [Operations](06-operations.md) for logs, backup, and troubleshooting on a VM.
+
 ## Run from source (development)
 
 See the [README quick start](../../../README.md#getting-started): Bun ≥ 1.3 + local Postgres, three processes (`api`, `worker`, `web`).

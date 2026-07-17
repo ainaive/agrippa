@@ -40,6 +40,13 @@ cp infra/env/.env.example infra/env/.env    # fill in the secrets
 docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
 ```
 
+**Self-hosted** (VM, systemd — no Docker; Ubuntu 22.04/24.04):
+
+```sh
+sudo git clone https://github.com/ainaive/agrippa /opt/agrippa
+sudo /opt/agrippa/infra/vm/install.sh       # idempotent; updates: infra/vm/deploy.sh
+```
+
 **Quality gate**: `bun run check && bun test` (same commands CI runs).
 
 ## Documentation
@@ -51,7 +58,7 @@ docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
 
 ## Tech stack
 
-TypeScript · Bun workspaces monorepo · Hono (REST + SSE) · Vite + React + TailwindCSS + shadcn/ui · Drizzle + Postgres · pg-boss · Redis (pubsub) · better-auth · i18next (en / zh-CN) · Claude Agent SDK (first executor) · Docker Compose (self-hosted)
+TypeScript · Bun workspaces monorepo · Hono (REST + SSE) · Vite + React + TailwindCSS + shadcn/ui · Drizzle + Postgres · pg-boss · Redis (pubsub) · better-auth · i18next (en / zh-CN) · Claude Agent SDK (first executor) · Docker Compose or systemd VM (self-hosted)
 
 ---
 
