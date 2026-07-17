@@ -6,10 +6,11 @@ import {
   type Executor,
   type ExecutorEvent,
   evaluateToolCall,
+  isReadTool,
   isWriteTool,
-  realWriteContained,
+  pathArgOf,
+  realContained,
   type StepExecutionRequest,
-  writeTargetOf,
 } from "@agrippa/executor-core";
 import { type Options, type SDKMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
@@ -117,14 +118,14 @@ export function buildQueryArgs(
       const decision = evaluateToolCall(req.toolPolicy, req.workspaceDir, toolName, record);
       if (decision.behavior === "deny") return decision;
       // the lexical check above can't see through symlinks — verify the real
-      // write target stays inside the workspace before allowing a write tool
-      const target = writeTargetOf(record);
-      if (isWriteTool(toolName) && target !== undefined) {
+      // target stays inside the workspace before allowing a read or write tool
+      const target = pathArgOf(record);
+      if ((isWriteTool(toolName) || isReadTool(toolName)) && target !== undefined) {
         const resolved = path.resolve(req.workspaceDir, target);
-        if (!(await realWriteContained(req.toolPolicy.writeRoot, resolved))) {
+        if (!(await realContained(req.toolPolicy.writeRoot, resolved))) {
           return {
             behavior: "deny",
-            message: `write resolves (via a symlink) outside the run workspace (${target})`,
+            message: `path resolves (via a symlink) outside the run workspace (${target})`,
           };
         }
       }

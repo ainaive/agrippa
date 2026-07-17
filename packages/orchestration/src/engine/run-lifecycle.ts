@@ -22,11 +22,6 @@ export type RunEventInput = {
 
 export type AppendedRunEvent = { seq: number; createdAt: Date };
 
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; message?: string };
-  return e?.code === "23505" || /duplicate key|run_events_run_seq_uq/i.test(e?.message ?? "");
-}
-
 /**
  * Move a run from `from` to `to` iff it is still in `from` (compare-and-swap).
  * Returns true when this caller made the change, false when the row had already
@@ -56,33 +51,31 @@ export async function transitionRun(
 }
 
 /**
- * Append a run event with a database-allocated per-run seq. The seq is computed
- * inside the INSERT (max+1 over the run's events), so serial writers are always
- * correct; the unique (run_id, seq) index backstops the rare concurrent race,
- * on which we retry rather than fail the job.
+ * Append a run event with a database-allocated per-run seq. The seq comes from an
+ * atomic `UPDATE runs SET next_event_seq = next_event_seq + 1 … RETURNING`: the
+ * row lock serializes concurrent allocations, so this is collision-free and — key
+ * for the approval flow — works inside a caller's transaction (the old
+ * max(seq)+1-with-retry aborted on the first unique violation inside a tx).
  */
 export async function appendRunEvent(db: DbOrTx, event: RunEventInput): Promise<AppendedRunEvent> {
-  const nextSeq = sql<number>`(select coalesce(max(${runEvents.seq}), 0) + 1 from ${runEvents} where ${runEvents.runId} = ${event.runId})`;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const [row] = await db
-        .insert(runEvents)
-        .values({
-          runId: event.runId,
-          stepId: event.stepId ?? null,
-          seq: nextSeq,
-          type: event.type,
-          payload: event.payload ?? {},
-        })
-        .returning({ seq: runEvents.seq, createdAt: runEvents.createdAt });
-      if (!row) throw new Error("run_events insert returned no row");
-      return row;
-    } catch (err) {
-      if (isUniqueViolation(err) && attempt < 4) continue;
-      throw err;
-    }
-  }
-  throw new Error("run_events seq allocation exhausted retries");
+  const [seqRow] = await db
+    .update(runs)
+    .set({ nextEventSeq: sql`${runs.nextEventSeq} + 1` })
+    .where(eq(runs.id, event.runId))
+    .returning({ seq: runs.nextEventSeq });
+  if (!seqRow) throw new Error(`appendRunEvent: run ${event.runId} not found`);
+  const [row] = await db
+    .insert(runEvents)
+    .values({
+      runId: event.runId,
+      stepId: event.stepId ?? null,
+      seq: seqRow.seq,
+      type: event.type,
+      payload: event.payload ?? {},
+    })
+    .returning({ seq: runEvents.seq, createdAt: runEvents.createdAt });
+  if (!row) throw new Error("run_events insert returned no row");
+  return row;
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   findStrandedApprovalRuns,
   InProcessEventBus,
   RedisEventBus,
+  transitionRun,
 } from "@agrippa/orchestration";
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
@@ -103,16 +104,20 @@ async function scheduleApprovalExpiry(runId: string): Promise<void> {
 }
 
 async function markRunFailed(runId: string, err: unknown): Promise<void> {
-  const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+  const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
   if (!run || isTerminalRunStatus(run.status)) return;
-  await db
-    .update(runs)
-    .set({
-      status: "failed",
-      finishedAt: new Date(),
-      error: { code: "internal", message: `retries exhausted: ${String(err).slice(0, 500)}` },
-    })
-    .where(eq(runs.id, runId));
+  // route through the lifecycle CAS so a concurrent transition (e.g. a cancel or
+  // a resumed worker finalizing) can't be clobbered by this retry-exhaustion path
+  await db.transaction(async (tx) => {
+    if (!(await transitionRun(tx, runId, run.status, "failed"))) return;
+    await tx
+      .update(runs)
+      .set({
+        finishedAt: new Date(),
+        error: { code: "internal", message: `retries exhausted: ${String(err).slice(0, 500)}` },
+      })
+      .where(eq(runs.id, runId));
+  });
 }
 
 /**

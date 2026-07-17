@@ -10,10 +10,12 @@ import path from "node:path";
  * adapter and its tests — the adapter must not re-implement any of it.
  *
  * What this layer can and cannot do: it statically contains the file-writing
- * tools (Write/Edit/NotebookEdit) and refuses shell in read-only workspaces.
- * It does **not** contain arbitrary writes a shell command makes in a
- * read-write workspace — that requires OS-level isolation (the SDK `sandbox`
- * option / a non-root worker / a container), layered on top by the adapter.
+ * and file-reading tools (Write/Edit/Read/Grep/Glob) to the workspace and
+ * refuses shell in read-only workspaces, and it redacts known secret values
+ * from event payloads. It does **not** contain what a shell command reads or
+ * writes in a read-write workspace — that requires OS-level isolation (the SDK
+ * `sandbox` option / a non-root worker / a container), layered on top by the
+ * adapter — and it cannot isolate one run from another at the OS level.
  */
 
 export type WorkspaceAccess = "readOnly" | "readWrite";
@@ -23,6 +25,8 @@ export const ARTIFACT_SUBDIR = ".agrippa/artifacts";
 
 /** Tools that write to the filesystem through a file_path / path arg. */
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+/** Tools that read the filesystem through a file_path / path arg. */
+const READ_TOOLS = new Set(["Read", "Grep", "Glob", "NotebookRead"]);
 /** Tools that execute arbitrary commands (uncontainable by static rules). */
 const EXEC_TOOLS = new Set(["Bash", "BashOutput", "KillShell", "KillBash"]);
 
@@ -31,10 +35,18 @@ export function isWriteTool(toolName: string): boolean {
   return WRITE_TOOLS.has(toolName);
 }
 
-/** The path argument a write tool targets, if any. */
-export function writeTargetOf(input: Record<string, unknown>): string | undefined {
+/** Whether a tool reads the filesystem through a path argument. */
+export function isReadTool(toolName: string): boolean {
+  return READ_TOOLS.has(toolName);
+}
+
+/** The filesystem path argument a tool targets, if any. */
+export function pathArgOf(input: Record<string, unknown>): string | undefined {
   return (input.file_path ?? input.path ?? input.notebook_path) as string | undefined;
 }
+
+/** @deprecated use {@link pathArgOf}; kept for the write-tool call site. */
+export const writeTargetOf = pathArgOf;
 
 export type ToolDecision = { behavior: "allow" } | { behavior: "deny"; message: string };
 
@@ -55,7 +67,11 @@ export function isWithin(parent: string, child: string): boolean {
  * - read-only workspace: file writes are confined to the artifact directory
  *   (the agent still has to emit its declared artifacts) and shell is denied;
  * - read-write workspace: file writes must stay within the workspace root;
- *   shell is allowed (contained by the OS sandbox when available).
+ *   shell is allowed (contained by the OS sandbox when available);
+ * - reads (Read/Grep/Glob) with an explicit path must stay within the workspace,
+ *   so the agent can't read `/proc/self/environ`, another run's directory, or the
+ *   shared artifact store. A read with no path argument defaults to the cwd
+ *   (the workspace) and is allowed.
  */
 export function evaluateToolCall(
   policy: { access: WorkspaceAccess; writeRoot: string },
@@ -76,7 +92,7 @@ export function evaluateToolCall(
   }
 
   if (WRITE_TOOLS.has(toolName)) {
-    const target = writeTargetOf(input);
+    const target = pathArgOf(input);
     if (target === undefined) return { behavior: "allow" };
     const resolved = path.resolve(workspaceDir, target);
     if (!isWithin(writeRoot, resolved)) {
@@ -96,20 +112,32 @@ export function evaluateToolCall(
     }
   }
 
+  if (READ_TOOLS.has(toolName)) {
+    const target = pathArgOf(input);
+    if (target === undefined) return { behavior: "allow" }; // defaults to the workspace cwd
+    const resolved = path.resolve(workspaceDir, target);
+    if (!isWithin(writeRoot, resolved)) {
+      return {
+        behavior: "deny",
+        message: `reads outside the run workspace are not permitted (${target})`,
+      };
+    }
+  }
+
   return { behavior: "allow" };
 }
 
 /**
- * Symlink-safe containment for a write target. `evaluateToolCall` is purely
- * lexical, so a symlink component (e.g. `workspace/link -> /app`) would slip a
- * write past it; this canonicalizes the nearest existing ancestor of the target
- * (the file itself may not exist yet) and confirms it stays inside `writeRoot`.
- * Fail-closed on any resolution error.
+ * Symlink-safe containment for a read or write target. `evaluateToolCall` is
+ * purely lexical, so a symlink component (e.g. `workspace/link -> /app`) would
+ * slip a target past it; this canonicalizes the nearest existing ancestor of the
+ * target (the file itself may not exist yet, e.g. a fresh write) and confirms it
+ * stays inside `root`. Fail-closed on any resolution error.
  */
-export async function realWriteContained(writeRoot: string, target: string): Promise<boolean> {
-  let root: string;
+export async function realContained(root: string, target: string): Promise<boolean> {
+  let realRoot: string;
   try {
-    root = await realpath(path.resolve(writeRoot));
+    realRoot = await realpath(path.resolve(root));
   } catch {
     return false;
   }
@@ -117,7 +145,7 @@ export async function realWriteContained(writeRoot: string, target: string): Pro
   for (;;) {
     try {
       const real = await realpath(dir);
-      return real === root || real.startsWith(root + path.sep);
+      return real === realRoot || real.startsWith(realRoot + path.sep);
     } catch {
       const parent = path.dirname(dir);
       if (parent === dir) return false; // reached filesystem root without a hit
@@ -179,4 +207,66 @@ export function buildScrubbedEnv(
     out[key] = value;
   }
   return out;
+}
+
+/**
+ * Secret VALUES worth redacting from anything the agent can surface (event
+ * payloads, tool output). Covers the platform secrets plus the provider auth
+ * variables that the subprocess legitimately keeps but must never be echoed
+ * back through SSE/the timeline.
+ */
+export function collectEnvSecretValues(
+  source: Record<string, string | undefined> = process.env,
+): string[] {
+  const keys = [
+    ...SECRET_ENV_KEYS,
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ];
+  return keys
+    .map((k) => source[k])
+    .filter((v): v is string => typeof v === "string" && v.length > 0);
+}
+
+export type SecretRedactor = {
+  /** Add more secret values to redact (e.g. per-step resolved MCP tokens). */
+  add(values: Array<string | undefined>): void;
+  /** Deep-replace every known secret value with a placeholder. */
+  redact<T>(value: T): T;
+};
+
+const REDACTION_PLACEHOLDER = "[REDACTED]";
+/** Below this length a "secret" would match innocuous substrings and corrupt output. */
+const MIN_SECRET_LEN = 8;
+
+/**
+ * Redacts known secret values from event payloads before they are persisted or
+ * streamed. Values shorter than {@link MIN_SECRET_LEN} are ignored so a short or
+ * empty token can't blank out unrelated text.
+ */
+export function createSecretRedactor(initial: Array<string | undefined> = []): SecretRedactor {
+  const secrets = new Set<string>();
+  const add = (values: Array<string | undefined>) => {
+    for (const v of values) if (v && v.length >= MIN_SECRET_LEN) secrets.add(v);
+  };
+  add(initial);
+  const redactString = (s: string): string => {
+    let out = s;
+    for (const secret of secrets) {
+      if (out.includes(secret)) out = out.split(secret).join(REDACTION_PLACEHOLDER);
+    }
+    return out;
+  };
+  const walk = (value: unknown): unknown => {
+    if (typeof value === "string") return redactString(value);
+    if (Array.isArray(value)) return value.map(walk);
+    if (value && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value)) out[k] = walk(v);
+      return out;
+    }
+    return value;
+  };
+  return { add, redact: (value) => walk(value) as typeof value };
 }

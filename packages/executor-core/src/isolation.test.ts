@@ -3,7 +3,13 @@ import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildScrubbedEnv, evaluateToolCall, isWithin, realWriteContained } from "./isolation";
+import {
+  buildScrubbedEnv,
+  createSecretRedactor,
+  evaluateToolCall,
+  isWithin,
+  realContained,
+} from "./isolation";
 
 const ROOT = "/work/runs/run-1";
 const rw = { access: "readWrite" as const, writeRoot: ROOT };
@@ -31,6 +37,22 @@ describe("evaluateToolCall — read-write workspace", () => {
     );
     // relative path resolves against the workspace, escaping is denied
     expect(evaluateToolCall(rw, ROOT, "Edit", { file_path: "../run-2/a" }).behavior).toBe("deny");
+  });
+
+  it("confines reads to the workspace (blocks /proc, other runs, artifact store)", () => {
+    // in-workspace reads and no-path reads (default cwd) are fine
+    expect(evaluateToolCall(rw, ROOT, "Read", { file_path: `${ROOT}/src/a.ts` }).behavior).toBe(
+      "allow",
+    );
+    expect(evaluateToolCall(rw, ROOT, "Grep", { pattern: "TODO" }).behavior).toBe("allow");
+    // escaping reads are denied
+    expect(evaluateToolCall(rw, ROOT, "Read", { file_path: "/proc/self/environ" }).behavior).toBe(
+      "deny",
+    );
+    expect(
+      evaluateToolCall(rw, ROOT, "Read", { file_path: "/work/runs/run-2/secret" }).behavior,
+    ).toBe("deny");
+    expect(evaluateToolCall(rw, ROOT, "Glob", { path: "/work/artifacts" }).behavior).toBe("deny");
   });
 });
 
@@ -84,7 +106,7 @@ describe("buildScrubbedEnv", () => {
   });
 });
 
-describe("realWriteContained", () => {
+describe("realContained", () => {
   const dirs: string[] = [];
   const ws = () => {
     const d = mkdtempSync(path.join(tmpdir(), "iso-ws-"));
@@ -96,12 +118,28 @@ describe("realWriteContained", () => {
     const root = ws();
     await mkdir(path.join(root, "src"), { recursive: true });
     // a not-yet-existing file under a real dir is contained
-    expect(await realWriteContained(root, path.join(root, "src/new.ts"))).toBe(true);
+    expect(await realContained(root, path.join(root, "src/new.ts"))).toBe(true);
     // a symlinked directory pointing outside defeats the lexical check
     const outside = ws();
     symlinkSync(outside, path.join(root, "escape"));
-    expect(await realWriteContained(root, path.join(root, "escape/x.ts"))).toBe(false);
+    expect(await realContained(root, path.join(root, "escape/x.ts"))).toBe(false);
 
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+});
+
+describe("createSecretRedactor", () => {
+  it("replaces known secret values anywhere in a payload, ignoring short values", () => {
+    const r = createSecretRedactor(["sk-ant-supersecretvalue"]);
+    r.add(["ghp_anotherlongtoken12345", "b"]); // "b" is too short → ignored
+    const out = r.redact({
+      text: "leaked sk-ant-supersecretvalue here",
+      nested: ["ghp_anotherlongtoken12345", { k: "safe b value" }],
+      num: 7,
+    }) as { text: string; nested: [string, { k: string }]; num: number };
+    expect(out.text).toBe("leaked [REDACTED] here");
+    expect(out.nested[0]).toBe("[REDACTED]");
+    expect(out.nested[1].k).toBe("safe b value"); // short "b" not redacted
+    expect(out.num).toBe(7);
   });
 });

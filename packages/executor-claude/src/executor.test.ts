@@ -116,6 +116,14 @@ describe("claude executor option mapping (docs/design/03)", () => {
     );
     // read-write: shell is permitted (OS-sandboxed when available)
     expect((await rw("Bash", { command: "ls" }, ctx))?.behavior).toBe("allow");
+    // reads are confined to the workspace: /proc and other runs are denied
+    expect((await rw("Read", { file_path: "/proc/self/environ" }, ctx))?.behavior).toBe("deny");
+    expect((await rw("Read", { file_path: "/work/runs/other/secret" }, ctx))?.behavior).toBe(
+      "deny",
+    );
+    expect(
+      (await rw("Read", { file_path: path.join(rwReq.workspaceDir, "src/a.ts") }, ctx))?.behavior,
+    ).toBe("allow");
 
     // read-only: shell denied, repo writes denied, artifact writes allowed
     const roReq = makeRequest();

@@ -604,6 +604,39 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(seen).toContain("usage");
     expect(seen).toContain("approval.required");
   });
+
+  it("redacts known secret values from persisted events", async () => {
+    const secret = "sk-ant-supersecretvalue-1234567890";
+    const prev = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = secret; // the engine seeds its redactor from env
+    let db: Db;
+    let runId: string;
+    try {
+      const fx = await setupFixture();
+      db = fx.db;
+      runId = fx.runId;
+      const script: Record<string, FakeStepBehavior> = {
+        ...HAPPY_SCRIPT,
+        "reproduce-bug": {
+          kind: "succeed",
+          events: [
+            { type: "message.completed", role: "assistant", text: `the key is ${secret} oops` },
+            { type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" },
+          ],
+          output: "done",
+        },
+      };
+      await executeRun(fx.makeDeps(script), runId);
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prev;
+    }
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    const msg = events.find((e) => e.type === "message.completed");
+    const serialized = JSON.stringify(msg?.payload);
+    expect(serialized).toContain("[REDACTED]");
+    expect(serialized).not.toContain(secret);
+  });
 });
 
 describe.skipIf(!dbUp)("run-lifecycle module", () => {
@@ -631,6 +664,13 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     const seqs = [a.seq, b.seq, c.seq, d.seq].sort((m, n) => m - n);
     expect(new Set(seqs).size).toBe(4);
     expect(b.seq).toBeGreaterThan(a.seq);
+
+    // must also work INSIDE a transaction — the old max(seq)+1-with-retry aborted
+    // the whole tx on the first unique violation (the approval-flow regression)
+    const e = await db.transaction((tx) =>
+      appendRunEvent(tx, { runId, type: "x.five", payload: {} }),
+    );
+    expect(e.seq).toBeGreaterThan(d.seq);
   });
 
   it("findStrandedApprovalRuns selects only runs with no pending approval", async () => {

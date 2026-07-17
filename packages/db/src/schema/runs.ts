@@ -66,6 +66,8 @@ export const runs = pgTable(
       .default({ mcpServers: [], skills: [] }),
     budget: jsonb("budget").$type<Record<string, unknown>>().notNull().default({}),
     usageTotals: jsonb("usage_totals").$type<Record<string, unknown>>().notNull().default({}),
+    // atomic per-run event-seq allocator (UPDATE … RETURNING); avoids max(seq)+1 races
+    nextEventSeq: integer("next_event_seq").notNull().default(0),
     workspaceRef: text("workspace_ref"),
     error: jsonb("error").$type<Record<string, unknown>>(),
     cancelRequested: boolean("cancel_requested").notNull().default(false),

@@ -22,6 +22,13 @@
       "when": 1784274345055,
       "tag": "0002_run-resource-manifest",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784282490871,
+      "tag": "0003_run-next-event-seq",
+      "breakpoints": true
     }
   ]
 }

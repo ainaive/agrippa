@@ -15,11 +15,15 @@ import {
 import {
   BudgetExceededError,
   BudgetMeter,
+  collectEnvSecretValues,
+  createSecretRedactor,
   type ExecutionContext,
   type Executor,
   type ExecutorEvent,
   type PriorStepSummary,
+  type ResolvedMcpServer,
   type ResolvedModel,
+  type SecretRedactor,
   type StepExecutionRequest,
   type UsageDelta,
 } from "@agrippa/executor-core";
@@ -61,6 +65,18 @@ class RunClaimLost extends Error {
     super("run is owned by another worker");
     this.name = "RunClaimLost";
   }
+}
+
+/** The credential values a resolved MCP server injects, for secret redaction. */
+function mcpSecretValues(server: ResolvedMcpServer): string[] {
+  if (server.transport === "stdio") return Object.values(server.env);
+  const values: string[] = [];
+  for (const header of Object.values(server.headers)) {
+    values.push(header);
+    const bearer = /^Bearer\s+(.+)$/i.exec(header);
+    if (bearer) values.push(bearer[1] as string);
+  }
+  return values;
 }
 
 /**
@@ -113,6 +129,8 @@ class RunEngine {
   private producedArtifacts = new Set<string>();
   // stepId → crashed-attempt count + last executor session, for crash resume
   private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
+  // scrubs known secret values from event payloads before persist/publish
+  private readonly redactor: SecretRedactor = createSecretRedactor(collectEnvSecretValues());
 
   constructor(
     private readonly deps: EngineDeps,
@@ -598,6 +616,8 @@ class RunEngine {
     const { resolved: mcpServers, missing } = await this.deps.resources.mcpServers(
       this.authorizedMcpRefs(step.mcpServers),
     );
+    // register the resolved MCP credentials so they're redacted from any event
+    this.redactor.add(mcpServers.flatMap(mcpSecretValues));
     const optionalRefs = new Set(
       this.template.spec.resources.mcpServers.filter((m) => m.optional).map((m) => m.ref),
     );
@@ -843,19 +863,22 @@ class RunEngine {
     payload: Record<string, unknown>,
     stepRowId?: string,
   ): Promise<void> {
+    // redact known secret values (provider key, MCP tokens) an agent may have
+    // echoed into message/tool output, so they never reach run_events or SSE
+    const safePayload = this.redactor.redact(payload);
     // seq is allocated by the database (run-lifecycle.appendRunEvent), not from
     // an in-memory counter that a concurrent writer could collide with
     const { seq, createdAt } = await appendRunEvent(this.db, {
       runId: this.run.id,
       stepId: stepRowId ?? this.currentStepRowId,
       type,
-      payload,
+      payload: safePayload,
     });
     await this.deps.bus.publish({
       runId: this.run.id,
       seq,
       type,
-      payload,
+      payload: safePayload,
       createdAt: createdAt.toISOString(),
     });
   }
@@ -931,22 +954,53 @@ class RunEngine {
     error: { code: string; message: string } | null,
   ): Promise<void> {
     const snapshot = this.meter?.snapshot() ?? { costUsd: 0, tokens: 0, perPhaseCostUsd: {} };
-    // CAS: if another path (e.g. a concurrent cancel) already finalized the run,
-    // do not overwrite its terminal status/error with ours
-    if (!(await this.transition(this.run.status, status))) return;
-    await this.db
-      .update(runs)
-      .set({
-        finishedAt: new Date(),
-        error: error ?? null,
-        usageTotals: {
-          costUsd: snapshot.costUsd,
-          tokens: snapshot.tokens,
-          perPhaseCostUsd: snapshot.perPhaseCostUsd,
-        },
-      })
-      .where(eq(runs.id, this.run.id));
-    await this.emit(`run.${status}`, error ? { error } : {});
+
+    // a cancel that landed after the last interrupt check still wins over a
+    // success — otherwise the API returns "cancel requested" but the run succeeds
+    let finalStatus = status;
+    let finalError = error;
+    if (status === "succeeded") {
+      const [row] = await this.db
+        .select({ cancelRequested: runs.cancelRequested })
+        .from(runs)
+        .where(eq(runs.id, this.run.id));
+      if (row?.cancelRequested) {
+        finalStatus = "cancelled";
+        finalError = { code: "cancelled", message: "run cancelled" };
+      }
+    }
+    const type = `run.${finalStatus}`;
+    const eventPayload = this.redactor.redact(finalError ? { error: finalError } : {});
+
+    // status flip + finishedAt/totals + terminal event commit together — a crash
+    // can no longer leave a terminal run with no finishedAt/totals/event that
+    // executeRun would then never repair. Publish to the bus only after commit.
+    const committed = await this.db.transaction(async (tx) => {
+      // CAS: if another path (e.g. a concurrent cancel) already finalized, bail
+      if (!(await transitionRun(tx, this.run.id, this.run.status, finalStatus))) return null;
+      this.run.status = finalStatus;
+      await tx
+        .update(runs)
+        .set({
+          finishedAt: new Date(),
+          error: finalError ?? null,
+          usageTotals: {
+            costUsd: snapshot.costUsd,
+            tokens: snapshot.tokens,
+            perPhaseCostUsd: snapshot.perPhaseCostUsd,
+          },
+        })
+        .where(eq(runs.id, this.run.id));
+      return await appendRunEvent(tx, { runId: this.run.id, type, payload: eventPayload });
+    });
+    if (!committed) return; // another path finalized the run
+    await this.deps.bus.publish({
+      runId: this.run.id,
+      seq: committed.seq,
+      type,
+      payload: eventPayload,
+      createdAt: committed.createdAt.toISOString(),
+    });
     try {
       await this.deps.workspace.cleanup(this.run.id);
     } catch (err) {
