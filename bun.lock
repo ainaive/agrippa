@@ -80,6 +80,9 @@
     "packages/executor-core": {
       "name": "@agrippa/executor-core",
       "version": "0.0.0",
+      "dependencies": {
+        "@agrippa/core": "workspace:*",
+      },
     },
     "packages/i18n": {
       "name": "@agrippa/i18n",
