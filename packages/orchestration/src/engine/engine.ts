@@ -672,17 +672,10 @@ class RunEngine {
     row: StepRow,
     event: ExecutorEvent,
   ): Promise<void> {
-    const { type, ...payload } = event as { type: string } & Record<string, unknown>;
-    await this.emit(type, { phaseId: phase.id, stepId: step.id, ...payload }, row.id);
-    if (event.type === "step.started" && event.sessionId) {
-      await this.db
-        .update(runSteps)
-        .set({ executorSessionId: event.sessionId })
-        .where(eq(runSteps.id, row.id));
-    }
     if (event.type === "artifact") {
-      // only accept artifacts the step contracted to produce — a non-compliant
-      // executor cannot smuggle in uncontracted keys or a mismatched kind
+      // validate the contract BEFORE emitting: an uncontracted artifact's inline
+      // contents/path/key must not leak into run_events or the SSE stream. Emit
+      // the normalized contract kind so downstream sees the declared type.
       const produces = "produces" in step ? step.produces : [];
       if (!produces.includes(event.key)) {
         this.deps.logger.warn("dropping uncontracted artifact", {
@@ -692,10 +685,30 @@ class RunEngine {
         });
         return;
       }
-      const contractKind = this.template.spec.outputs.artifacts.find(
-        (a) => a.key === event.key,
-      )?.kind;
-      await this.storeArtifact(row, { ...event, kind: contractKind ?? event.kind });
+      const contractKind =
+        this.template.spec.outputs.artifacts.find((a) => a.key === event.key)?.kind ?? event.kind;
+      await this.emit(
+        "artifact",
+        {
+          phaseId: phase.id,
+          stepId: step.id,
+          key: event.key,
+          kind: contractKind,
+          path: event.path,
+        },
+        row.id,
+      );
+      await this.storeArtifact(row, { ...event, kind: contractKind });
+      return;
+    }
+
+    const { type, ...payload } = event as { type: string } & Record<string, unknown>;
+    await this.emit(type, { phaseId: phase.id, stepId: step.id, ...payload }, row.id);
+    if (event.type === "step.started" && event.sessionId) {
+      await this.db
+        .update(runSteps)
+        .set({ executorSessionId: event.sessionId })
+        .where(eq(runSteps.id, row.id));
     }
   }
 

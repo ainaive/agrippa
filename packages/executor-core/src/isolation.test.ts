@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildScrubbedEnv, evaluateToolCall, isWithin } from "./isolation";
+import { buildScrubbedEnv, evaluateToolCall, isWithin, realWriteContained } from "./isolation";
 
 const ROOT = "/work/runs/run-1";
 const rw = { access: "readWrite" as const, writeRoot: ROOT };
@@ -50,26 +53,55 @@ describe("evaluateToolCall — read-only workspace", () => {
 });
 
 describe("buildScrubbedEnv", () => {
-  it("drops platform secrets but keeps Anthropic auth and system vars", () => {
+  it("drops platform secrets but keeps allow-listed SDK auth and system vars", () => {
     const env = buildScrubbedEnv({
       PATH: "/usr/bin",
       HOME: "/home/bun",
       ANTHROPIC_API_KEY: "sk-ant-xxx",
+      ANTHROPIC_BASE_URL: "https://api.anthropic.com",
       AGRIPPA_SECRET_KEY: "master",
       DATABASE_URL: "postgres://secret",
       BETTER_AUTH_SECRET: "s",
       REDIS_URL: "redis://x",
       GITHUB_TOKEN: "ghp_x",
       SOME_PASSWORD: "p",
+      // namespaced secrets must NOT ride along just because of their prefix
+      ANTHROPIC_PRIVATE_KEY: "leak",
+      CLAUDE_ADMIN_TOKEN: "leak",
     });
     expect(env.PATH).toBe("/usr/bin");
     expect(env.HOME).toBe("/home/bun");
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com");
     expect(env.AGRIPPA_SECRET_KEY).toBeUndefined();
     expect(env.DATABASE_URL).toBeUndefined();
     expect(env.BETTER_AUTH_SECRET).toBeUndefined();
     expect(env.REDIS_URL).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.SOME_PASSWORD).toBeUndefined();
+    expect(env.ANTHROPIC_PRIVATE_KEY).toBeUndefined();
+    expect(env.CLAUDE_ADMIN_TOKEN).toBeUndefined();
+  });
+});
+
+describe("realWriteContained", () => {
+  const dirs: string[] = [];
+  const ws = () => {
+    const d = mkdtempSync(path.join(tmpdir(), "iso-ws-"));
+    dirs.push(d);
+    return d;
+  };
+
+  it("allows a new file in the workspace and rejects a symlink escape", async () => {
+    const root = ws();
+    await mkdir(path.join(root, "src"), { recursive: true });
+    // a not-yet-existing file under a real dir is contained
+    expect(await realWriteContained(root, path.join(root, "src/new.ts"))).toBe(true);
+    // a symlinked directory pointing outside defeats the lexical check
+    const outside = ws();
+    symlinkSync(outside, path.join(root, "escape"));
+    expect(await realWriteContained(root, path.join(root, "escape/x.ts"))).toBe(false);
+
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 });

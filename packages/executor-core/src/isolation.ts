@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -24,6 +25,16 @@ export const ARTIFACT_SUBDIR = ".agrippa/artifacts";
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 /** Tools that execute arbitrary commands (uncontainable by static rules). */
 const EXEC_TOOLS = new Set(["Bash", "BashOutput", "KillShell", "KillBash"]);
+
+/** Whether a tool writes to the filesystem through a path argument. */
+export function isWriteTool(toolName: string): boolean {
+  return WRITE_TOOLS.has(toolName);
+}
+
+/** The path argument a write tool targets, if any. */
+export function writeTargetOf(input: Record<string, unknown>): string | undefined {
+  return (input.file_path ?? input.path ?? input.notebook_path) as string | undefined;
+}
 
 export type ToolDecision = { behavior: "allow" } | { behavior: "deny"; message: string };
 
@@ -65,7 +76,7 @@ export function evaluateToolCall(
   }
 
   if (WRITE_TOOLS.has(toolName)) {
-    const target = (input.file_path ?? input.path ?? input.notebook_path) as string | undefined;
+    const target = writeTargetOf(input);
     if (target === undefined) return { behavior: "allow" };
     const resolved = path.resolve(workspaceDir, target);
     if (!isWithin(writeRoot, resolved)) {
@@ -89,10 +100,49 @@ export function evaluateToolCall(
 }
 
 /**
- * Environment variables that must never reach the agent subprocess: leaking
- * `AGRIPPA_SECRET_KEY` decrypts every stored credential, and the datastore
- * URLs grant direct access to run/tenant data. The Anthropic/Claude vars the
- * SDK needs to authenticate are preserved.
+ * Symlink-safe containment for a write target. `evaluateToolCall` is purely
+ * lexical, so a symlink component (e.g. `workspace/link -> /app`) would slip a
+ * write past it; this canonicalizes the nearest existing ancestor of the target
+ * (the file itself may not exist yet) and confirms it stays inside `writeRoot`.
+ * Fail-closed on any resolution error.
+ */
+export async function realWriteContained(writeRoot: string, target: string): Promise<boolean> {
+  let root: string;
+  try {
+    root = await realpath(path.resolve(writeRoot));
+  } catch {
+    return false;
+  }
+  let dir = path.resolve(target);
+  for (;;) {
+    try {
+      const real = await realpath(dir);
+      return real === root || real.startsWith(root + path.sep);
+    } catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) return false; // reached filesystem root without a hit
+      dir = parent;
+    }
+  }
+}
+
+/**
+ * SDK/CLI authentication variables the agent subprocess legitimately needs.
+ * Everything else that looks like a secret is dropped, even in the Anthropic /
+ * Claude namespaces — so an admin/private variable can't ride along.
+ */
+const SDK_AUTH_ALLOW = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+]);
+
+/**
+ * Platform secrets that must never reach the agent subprocess: leaking
+ * `AGRIPPA_SECRET_KEY` decrypts every stored credential, and the datastore URLs
+ * grant direct access to run/tenant data.
  */
 const SECRET_ENV_KEYS = new Set([
   "AGRIPPA_SECRET_KEY",
@@ -102,17 +152,18 @@ const SECRET_ENV_KEYS = new Set([
   "REDIS_URL",
 ]);
 
-/** Heuristic secret-name match, minus the Anthropic/Claude auth vars we keep. */
+/** Heuristic secret-name match (applied to every non-allowlisted variable). */
 function looksSecret(key: string): boolean {
-  if (/^(ANTHROPIC_|CLAUDE_)/.test(key)) return false;
-  return /(SECRET|PASSWORD|PRIVATE_KEY|_TOKEN$|_KEY$)/i.test(key);
+  return /(SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL|_TOKEN$|_KEY$)/i.test(key);
 }
 
 /**
  * Build the subprocess environment for the agent, dropping platform secrets.
  * The SDK's `env` option REPLACES the child environment wholesale, so we start
  * from the worker env and remove what the agent must not see, rather than
- * allow-listing (which would starve the CLI of PATH/HOME/locale it needs).
+ * allow-listing (which would starve the CLI of PATH/HOME/locale it needs). The
+ * SDK auth variables are kept via an explicit allowlist so the secret heuristic
+ * doesn't drop them.
  */
 export function buildScrubbedEnv(
   source: Record<string, string | undefined> = process.env,
@@ -120,6 +171,10 @@ export function buildScrubbedEnv(
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
+    if (SDK_AUTH_ALLOW.has(key)) {
+      out[key] = value;
+      continue;
+    }
     if (SECRET_ENV_KEYS.has(key) || looksSecret(key)) continue;
     out[key] = value;
   }
