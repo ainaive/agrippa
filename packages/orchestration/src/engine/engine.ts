@@ -52,6 +52,18 @@ class RunFailure extends Error {
 }
 
 /**
+ * Raised when this worker loses the run-claim to another still-active worker.
+ * We must not finalize or execute — the owner is running the run — so execute()
+ * catches it and exits without touching the run.
+ */
+class RunClaimLost extends Error {
+  constructor() {
+    super("run is owned by another worker");
+    this.name = "RunClaimLost";
+  }
+}
+
+/**
  * Executes (or resumes) one run to its next stopping point: a terminal state
  * or a waiting_approval pause. Steps are the idempotency unit — on resume,
  * succeeded/skipped steps are skipped and the budget meter re-initializes
@@ -133,6 +145,8 @@ class RunEngine {
       const outcome = await this.runPhases();
       return outcome;
     } catch (err) {
+      // another worker owns the run — leave it entirely to them, finalize nothing
+      if (err instanceof RunClaimLost) return "already_terminal";
       return await this.handleFailure(err);
     } finally {
       if (this.timeoutTimer) clearTimeout(this.timeoutTimer);
@@ -157,14 +171,13 @@ class RunEngine {
         .select({ status: runs.status })
         .from(runs)
         .where(eq(runs.id, run.id));
-      if (!current || isTerminalRunStatus(current.status)) {
-        throw new RunFailure(
-          current?.status === "cancelled" ? "cancelled" : "superseded",
-          "run already finalized by another worker",
-          current?.status === "cancelled" ? "cancelled" : "failed",
-        );
+      if (current && current.status === "cancelled") {
+        throw new RunFailure("cancelled", "run cancelled", "cancelled");
       }
-      this.run.status = current.status;
+      // it's terminal (another worker finished it) or already `running` under
+      // another live worker — either way this worker must not proceed and
+      // duplicate side effects; the owner (or a later re-delivery) drives it
+      throw new RunClaimLost();
     }
     if (run.startedAt === null) {
       await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, run.id));

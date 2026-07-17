@@ -13,10 +13,11 @@ import {
   durationToMinutes,
   type EngineDeps,
   executeRun,
+  findStrandedApprovalRuns,
   InProcessEventBus,
   RedisEventBus,
 } from "@agrippa/orchestration";
-import { and, eq, lt, ne, sql } from "drizzle-orm";
+import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
@@ -129,12 +130,7 @@ setInterval(async () => {
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
-    const strandedApprovals = await db
-      .selectDistinct({ id: runs.id })
-      .from(runs)
-      .innerJoin(approvals, eq(approvals.runId, runs.id))
-      .where(and(eq(runs.status, "waiting_approval"), ne(approvals.status, "pending")));
-    for (const run of strandedApprovals) await queue.enqueueRun(run.id);
+    for (const runId of await findStrandedApprovalRuns(db)) await queue.enqueueRun(runId);
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }

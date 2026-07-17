@@ -49,17 +49,6 @@ async function loadRunScoped(
   return run;
 }
 
-/** Appends an API-originated event to the run log (DB-allocated seq) and the bus. */
-async function appendRunEvent(
-  c: { var: AppEnv["Variables"] },
-  runId: string,
-  type: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  const { seq, createdAt } = await allocateRunEvent(c.var.db, { runId, type, payload });
-  await c.var.bus?.publish({ runId, seq, type, payload, createdAt: createdAt.toISOString() });
-}
-
 export const executionRoutes = new Hono<AppEnv>()
   // ── Submit ──────────────────────────────────────────────────────────────────
   .post(
@@ -301,34 +290,56 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(approvals)
       .where(and(eq(approvals.id, c.req.param("approvalId")), eq(approvals.runId, run.id)));
     if (!approval) throw AppError.notFound("Approval");
-    // compare-and-swap on status='pending' so a user decision and the expiry
-    // worker cannot overwrite each other
-    const updated = await decideApproval(c.var.db, approval.id, {
-      status: input.decision,
-      decidedBy: c.var.user.id,
-      comment: input.comment,
+    const eventPayload = {
+      approvalId: approval.id,
+      checkpointId: approval.checkpointId,
+      decision: input.decision,
+    };
+    // decision (CAS on status='pending'), the approval.decided event, and the
+    // audit row commit together — a partial write can't leave the timeline or
+    // audit log missing the decision that a later retry would then skip
+    const result = await c.var.db.transaction(async (tx) => {
+      const updated = await decideApproval(tx, approval.id, {
+        status: input.decision,
+        decidedBy: c.var.user.id,
+        comment: input.comment,
+      });
+      if (!updated) return { updated: null as null };
+      const event = await allocateRunEvent(tx, {
+        runId: run.id,
+        type: "approval.decided",
+        payload: eventPayload,
+      });
+      await audit(
+        c,
+        {
+          action: "run.approval.decide",
+          resourceType: "approval",
+          resourceId: approval.id,
+          projectId: run.projectId,
+          payload: { decision: input.decision },
+        },
+        tx,
+      );
+      return { updated, event };
     });
-    if (!updated) {
+    if (!result.updated) {
       // already decided, OR a prior attempt decided then failed to enqueue: in
       // both cases the durable state is correct, so re-enqueue to unstick the
       // run (the sweeper also backstops this) and report the conflict
       await c.var.queue?.enqueueRun(run.id);
       throw AppError.conflict("already_decided", "Approval is already decided");
     }
-    await appendRunEvent(c, run.id, "approval.decided", {
-      approvalId: approval.id,
-      checkpointId: approval.checkpointId,
-      decision: input.decision,
-    });
-    await audit(c, {
-      action: "run.approval.decide",
-      resourceType: "approval",
-      resourceId: approval.id,
-      projectId: run.projectId,
-      payload: { decision: input.decision },
+    // publish + enqueue only after the decision durably committed
+    await c.var.bus?.publish({
+      runId: run.id,
+      seq: result.event.seq,
+      type: "approval.decided",
+      payload: eventPayload,
+      createdAt: result.event.createdAt.toISOString(),
     });
     await c.var.queue?.enqueueRun(run.id); // resume at the gated phase
-    return c.json(updated);
+    return c.json(result.updated);
   })
 
   // ── Artifacts ───────────────────────────────────────────────────────────────

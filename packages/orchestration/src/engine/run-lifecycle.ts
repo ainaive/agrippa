@@ -1,5 +1,5 @@
 import { canTransitionRun, type RunStatus } from "@agrippa/core";
-import { approvals, type Db, runEvents, runs } from "@agrippa/db";
+import { approvals, type DbOrTx, runEvents, runs } from "@agrippa/db";
 import { and, eq, sql } from "drizzle-orm";
 
 /**
@@ -33,12 +33,17 @@ function isUniqueViolation(err: unknown): boolean {
  * moved on (e.g. a cancel landed first). Rejects illegal transitions up front.
  */
 export async function transitionRun(
-  db: Db,
+  db: DbOrTx,
   runId: string,
   from: RunStatus,
   to: RunStatus,
 ): Promise<boolean> {
-  if (from === to) return true;
+  if (from === to) {
+    // a self-transition is an assertion "the run is still in `from`" — verify
+    // against the database rather than trusting a possibly-stale caller value
+    const [row] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
+    return row?.status === to;
+  }
   if (!canTransitionRun(from, to)) {
     throw new Error(`illegal run transition ${from} → ${to}`);
   }
@@ -56,7 +61,7 @@ export async function transitionRun(
  * correct; the unique (run_id, seq) index backstops the rare concurrent race,
  * on which we retry rather than fail the job.
  */
-export async function appendRunEvent(db: Db, event: RunEventInput): Promise<AppendedRunEvent> {
+export async function appendRunEvent(db: DbOrTx, event: RunEventInput): Promise<AppendedRunEvent> {
   const nextSeq = sql<number>`(select coalesce(max(${runEvents.seq}), 0) + 1 from ${runEvents} where ${runEvents.runId} = ${event.runId})`;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
@@ -81,12 +86,32 @@ export async function appendRunEvent(db: Db, event: RunEventInput): Promise<Appe
 }
 
 /**
+ * Runs paused in `waiting_approval` whose approvals are **all** decided — i.e. a
+ * decision landed but its resume enqueue was lost. The sweeper re-enqueues these.
+ * The `not exists (… pending)` guard is essential: a multi-checkpoint run with an
+ * earlier decided approval and a current pending one must NOT be selected, or the
+ * sweeper would re-enqueue it every tick while it legitimately waits.
+ */
+export async function findStrandedApprovalRuns(db: DbOrTx): Promise<string[]> {
+  const rows = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(
+      and(
+        eq(runs.status, "waiting_approval"),
+        sql`not exists (select 1 from ${approvals} where ${approvals.runId} = ${runs.id} and ${approvals.status} = 'pending')`,
+      ),
+    );
+  return rows.map((r) => r.id);
+}
+
+/**
  * Decide a pending approval atomically. The `status = 'pending'` predicate makes
  * this a compare-and-swap: a user decision and the expiry worker can't overwrite
  * each other. Returns the updated row, or null if it was no longer pending.
  */
 export async function decideApproval(
-  db: Db,
+  db: DbOrTx,
   approvalId: string,
   patch: { status: "approved" | "rejected" | "expired"; decidedBy?: string; comment?: string },
 ): Promise<typeof approvals.$inferSelect | null> {

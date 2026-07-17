@@ -35,7 +35,12 @@ import {
   InMemoryArtifactStore,
   silentLogger,
 } from "./fakes";
-import { appendRunEvent, decideApproval, transitionRun } from "./run-lifecycle";
+import {
+  appendRunEvent,
+  decideApproval,
+  findStrandedApprovalRuns,
+  transitionRun,
+} from "./run-lifecycle";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates");
@@ -626,6 +631,30 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     const seqs = [a.seq, b.seq, c.seq, d.seq].sort((m, n) => m - n);
     expect(new Set(seqs).size).toBe(4);
     expect(b.seq).toBeGreaterThan(a.seq);
+  });
+
+  it("findStrandedApprovalRuns selects only runs with no pending approval", async () => {
+    const { db, runId } = await setupFixture();
+    await db.update(runs).set({ status: "waiting_approval" }).where(eq(runs.id, runId));
+
+    // one pending approval → not stranded
+    const [a1] = await db
+      .insert(approvals)
+      .values({ runId, checkpointId: "cp-1", status: "pending" })
+      .returning();
+    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+
+    // a second, earlier checkpoint gets approved while cp-1 is still pending →
+    // still not stranded (the multi-approval trap the old innerJoin fell into)
+    await db
+      .insert(approvals)
+      .values({ runId, checkpointId: "cp-0", status: "approved" })
+      .returning();
+    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+
+    // cp-1 decided too → now every approval is decided → stranded, re-enqueue
+    await decideApproval(db, a1?.id as string, { status: "approved" });
+    expect(await findStrandedApprovalRuns(db)).toContain(runId);
   });
 
   it("decideApproval is a compare-and-swap on pending", async () => {
