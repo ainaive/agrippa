@@ -6,6 +6,8 @@ Orchestration templates are the heart of Agrippa: a YAML document that defines a
 
 Admin → Templates → *(create a head or open one)* → edit YAML → **Validate** → **Save draft** → **Publish**. Validation is a full dry-run compile that reports *every* problem at once and previews the submission form. Publishing is irreversible for that version — new submissions use it; old runs keep theirs. Builtin templates live in the repo under `templates/` and republish automatically on deploy when their source changes (`bun run templates:validate` checks them in CI).
 
+The editor's version list lets you **open any historical version** (editing an old source and saving simply creates the next draft — versions themselves never change), **Compare versions** shows a colorized diff between any two, and older published versions can be **deprecated** — they stay available to the historical runs that pin them, but are marked retired. The latest published version can't be deprecated (new submissions pin it); publish a newer version first.
+
 ## A minimal template, annotated
 
 ```yaml

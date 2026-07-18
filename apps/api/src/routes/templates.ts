@@ -186,6 +186,51 @@ export const templateRoutes = new Hono<AppEnv>()
       resourceId: row.id,
     });
     return c.json(published);
+  })
+  .post("/:id/versions/:version/deprecate", requireOrgAdmin, async (c) => {
+    const db = c.var.db;
+    const [row] = await db
+      .select()
+      .from(templateVersions)
+      .where(
+        and(
+          eq(templateVersions.templateId, c.req.param("id")),
+          eq(templateVersions.version, Number(c.req.param("version"))),
+        ),
+      );
+    if (!row) throw AppError.notFound("Template version");
+    if (row.status !== "published") {
+      throw AppError.conflict(
+        "not_published",
+        `Version is ${row.status}; only published versions can be deprecated`,
+      );
+    }
+    // never break submissions: the version new runs pin must stay published
+    const [head] = await db
+      .select({ latestPublishedVersionId: orchestrationTemplates.latestPublishedVersionId })
+      .from(orchestrationTemplates)
+      .where(eq(orchestrationTemplates.id, row.templateId));
+    if (head?.latestPublishedVersionId === row.id) {
+      throw AppError.conflict(
+        "version_is_latest",
+        "The latest published version cannot be deprecated; publish a newer version first",
+      );
+    }
+    // conditional on status so a concurrent transition can't be clobbered
+    const [deprecated] = await db
+      .update(templateVersions)
+      .set({ status: "deprecated" })
+      .where(and(eq(templateVersions.id, row.id), eq(templateVersions.status, "published")))
+      .returning();
+    if (!deprecated) {
+      throw AppError.conflict("not_published", "Version changed state concurrently");
+    }
+    await audit(c, {
+      action: "template.version.deprecate",
+      resourceType: "template_version",
+      resourceId: row.id,
+    });
+    return c.json(deprecated);
   });
 
 /** Dry-run compile — used by the template editor's validate button. */

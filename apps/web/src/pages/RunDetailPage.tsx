@@ -1,67 +1,65 @@
 import { isTerminalRunStatus } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import { ChevronDownIcon, RotateCcwIcon, XIcon } from "lucide-react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { ArtifactPreview, isPreviewable } from "@/components/artifacts/ArtifactPreview";
+import { DetailSkeleton } from "@/components/LoadingSkeletons";
+import { PageHeader } from "@/components/PageHeader";
+import { QueryErrorState } from "@/components/QueryErrorState";
+import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
-import { RunStatusBadge } from "../components/RunStatusBadge";
+import { ApprovalPanel } from "@/features/runs/ApprovalPanel";
+import { BudgetMeter } from "@/features/runs/BudgetMeter";
+import { PhaseTimeline } from "@/features/runs/PhaseTimeline";
+import { RunActivityFeed } from "@/features/runs/RunActivityFeed";
+import { RunMetaCard } from "@/features/runs/RunMetaCard";
 import { useRunEvents } from "../features/useRunEvents";
 import { api } from "../lib/api";
-import { formatCost, formatDuration, formatTime, lt } from "../lib/format";
+import { formatCost, formatDuration, formatTime } from "../lib/format";
 import type { Approval, Artifact, Run, RunStep } from "../lib/types";
 
-function ApprovalBanner({ runId, approval }: { runId: string; approval: Approval }) {
+function ArtifactRow({ artifact }: { artifact: Artifact }) {
   const { t } = useTranslation("runs");
-  const queryClient = useQueryClient();
-  const [comment, setComment] = useState("");
-
-  const decide = useMutation({
-    mutationFn: (decision: "approved" | "rejected") =>
-      api(`/runs/${runId}/approvals/${approval.id}`, {
-        method: "POST",
-        json: { decision, comment: comment || undefined },
-      }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["run", runId] }),
-  });
-
   return (
-    <Card className="border-amber-400/60 bg-amber-50/50 dark:bg-amber-950/20">
-      <CardHeader>
-        <CardTitle className="text-base">
-          ⏸ {approval.payload.title ? lt(approval.payload.title) : approval.checkpointId}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">{t("approval.hint")}</p>
-        <Textarea
-          rows={2}
-          placeholder={t("approval.commentPlaceholder")}
-          value={comment}
-          onChange={(e) => setComment(e.target.value)}
-        />
-        <div className="flex gap-2">
-          <Button size="sm" disabled={decide.isPending} onClick={() => decide.mutate("approved")}>
-            {t("approval.approve")}
-          </Button>
-          <Button
-            size="sm"
-            variant="destructive"
-            disabled={decide.isPending}
-            onClick={() => decide.mutate("rejected")}
-          >
-            {t("approval.reject")}
+    <Collapsible>
+      <div className="flex items-center justify-between gap-2 py-2 text-sm">
+        <div className="min-w-0">
+          <p className="truncate font-medium">{artifact.artifactKey}</p>
+          <p className="text-xs text-muted-foreground">
+            {artifact.kind} · {artifact.size ?? 0} B · {formatTime(artifact.createdAt)}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-1.5">
+          {isPreviewable(artifact) ? (
+            <CollapsibleTrigger asChild>
+              <Button size="sm" variant="ghost" className="group/trigger">
+                {t("artifact.preview")}
+                <ChevronDownIcon className="transition-transform group-data-[state=open]/trigger:rotate-180" />
+              </Button>
+            </CollapsibleTrigger>
+          ) : null}
+          <Button size="sm" variant="outline" asChild>
+            <a href={`/api/v1/artifacts/${artifact.id}/download`} target="_blank" rel="noreferrer">
+              {t("actions.download")}
+            </a>
           </Button>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+      <CollapsibleContent className="pb-3">
+        <ArtifactPreview artifact={artifact} />
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
 export function RunDetailPage() {
   const { t } = useTranslation("runs");
+  const navigate = useNavigate();
   const { projectId, runId } = useParams({ strict: false }) as {
     projectId: string;
     runId: string;
@@ -106,55 +104,71 @@ export function RunDetailPage() {
   const retry = useMutation({
     mutationFn: () =>
       api<{ runId: string }>(`/tasks/${run.data?.taskId}/retry`, { method: "POST" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["tasks", projectId] }),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["tasks", projectId] });
+      void navigate({
+        to: "/projects/$projectId/runs/$runId",
+        params: { projectId, runId: result.runId },
+      });
+    },
   });
 
-  if (!run.data) return <p className="text-muted-foreground">…</p>;
+  if (run.isError) return <QueryErrorState onRetry={() => void run.refetch()} />;
+  if (!run.data) return <DetailSkeleton />;
   const current = run.data;
   const pendingApproval = (approvals.data ?? []).find((a) => a.status === "pending");
 
-  // latest attempt per step, in seq order
-  const stepRows = [...(steps.data ?? [])]
-    .sort((a, b) => a.seq - b.seq || a.attempt - b.attempt)
-    .reduce((acc, row) => {
-      acc.set(row.stepId, row);
-      return acc;
-    }, new Map<string, RunStep>());
+  // latest attempt per step, in seq order — for the output fallback
+  const latestSteps = [
+    ...[...(steps.data ?? [])]
+      .sort((a, b) => a.seq - b.seq || a.attempt - b.attempt)
+      .reduce((acc, row) => acc.set(row.stepId, row), new Map<string, RunStep>())
+      .values(),
+  ];
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-3">
-        <h2 className="text-lg font-semibold">
-          {t("run")} #{current.number}
-        </h2>
-        <RunStatusBadge status={current.status} />
-        <span className="text-sm text-muted-foreground">
-          {formatCost(current.usageTotals?.costUsd)} ·{" "}
-          {formatDuration(current.startedAt, current.finishedAt)}
-        </span>
-        <div className="ml-auto flex gap-2">
-          {!isTerminalRunStatus(current.status) && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={cancel.isPending}
-              onClick={() => cancel.mutate()}
-            >
-              {t("actions.cancel")}
-            </Button>
-          )}
-          {isTerminalRunStatus(current.status) && (
+    <div className="space-y-6">
+      <PageHeader
+        title={
+          <span className="tabular-nums">
+            {t("run")} #{current.number}
+          </span>
+        }
+        meta={
+          <>
+            <RunStatusBadge status={current.status} />
+            <span className="text-sm text-muted-foreground tabular-nums">
+              {current.usageTotals?.costUsd != null
+                ? `${formatCost(current.usageTotals.costUsd)} · `
+                : ""}
+              {formatDuration(current.startedAt, current.finishedAt)}
+            </span>
+          </>
+        }
+        actions={
+          isTerminalRunStatus(current.status) ? (
             <Button
               size="sm"
               variant="outline"
               disabled={retry.isPending}
               onClick={() => retry.mutate()}
             >
+              <RotateCcwIcon />
               {t("actions.retry")}
             </Button>
-          )}
-        </div>
-      </div>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={cancel.isPending}
+              onClick={() => cancel.mutate()}
+            >
+              <XIcon />
+              {t("actions.cancel")}
+            </Button>
+          )
+        }
+      />
 
       {current.error && (
         <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
@@ -162,51 +176,69 @@ export function RunDetailPage() {
         </p>
       )}
 
-      {pendingApproval && <ApprovalBanner runId={runId} approval={pendingApproval} />}
+      {pendingApproval && (
+        <ApprovalPanel
+          runId={runId}
+          approval={pendingApproval}
+          artifacts={artifacts.data ?? []}
+          artifactsStatus={artifacts.status}
+        />
+      )}
 
-      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t("timeline")}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ol className="space-y-2">
-              {[...stepRows.values()].map((step) => (
-                <li key={step.id} className="flex items-center justify-between gap-2 text-sm">
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">{step.stepId}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {step.phaseId}
-                      {step.attempt > 1 ? ` · ${t("attempt")} ${step.attempt}` : ""}
-                      {step.startedAt
-                        ? ` · ${formatDuration(step.startedAt, step.finishedAt)}`
-                        : ""}
-                    </p>
-                  </div>
-                  <RunStatusBadge status={step.status} />
-                </li>
-              ))}
-              {stepRows.size === 0 && (
-                <p className="text-sm text-muted-foreground">{t("noSteps")}</p>
-              )}
-            </ol>
-          </CardContent>
-        </Card>
+      <div className="grid items-start gap-4 lg:grid-cols-[340px_1fr]">
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("timeline")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <PhaseTimeline
+                template={current.template}
+                steps={steps.data ?? []}
+                approvals={approvals.data ?? []}
+              />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("budget.title")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <BudgetMeter run={current} />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("meta.title")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <RunMetaCard run={current} />
+            </CardContent>
+          </Card>
+        </div>
 
         <Tabs defaultValue="output">
           <TabsList>
             <TabsTrigger value="output">{t("tabs.output")}</TabsTrigger>
+            <TabsTrigger value="activity">{t("tabs.activity")}</TabsTrigger>
             <TabsTrigger value="artifacts">
               {t("tabs.artifacts")} ({artifacts.data?.length ?? 0})
             </TabsTrigger>
             <TabsTrigger value="params">{t("tabs.params")}</TabsTrigger>
           </TabsList>
+          <TabsContent value="activity">
+            <Card>
+              <CardContent>
+                <RunActivityFeed events={events} />
+              </CardContent>
+            </Card>
+          </TabsContent>
           <TabsContent value="output">
             <Card>
-              <CardContent className="pt-4">
+              <CardContent>
                 <pre className="max-h-96 min-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs">
                   {streamText ||
-                    [...stepRows.values()]
+                    latestSteps
                       .filter((s) => s.output)
                       .map((s) => `── ${s.stepId} ──\n${s.output}`)
                       .join("\n\n") ||
@@ -217,42 +249,22 @@ export function RunDetailPage() {
           </TabsContent>
           <TabsContent value="artifacts">
             <Card>
-              <CardContent className="pt-4">
+              <CardContent>
                 {(artifacts.data ?? []).length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t("noArtifacts")}</p>
                 ) : (
-                  <ul className="divide-y">
+                  <div className="divide-y">
                     {(artifacts.data ?? []).map((artifact) => (
-                      <li
-                        key={artifact.id}
-                        className="flex items-center justify-between py-2 text-sm"
-                      >
-                        <div>
-                          <p className="font-medium">{artifact.artifactKey}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {artifact.kind} · {artifact.size ?? 0} B ·{" "}
-                            {formatTime(artifact.createdAt)}
-                          </p>
-                        </div>
-                        <Button size="sm" variant="outline" asChild>
-                          <a
-                            href={`/api/v1/artifacts/${artifact.id}/download`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {t("actions.download")}
-                          </a>
-                        </Button>
-                      </li>
+                      <ArtifactRow key={artifact.id} artifact={artifact} />
                     ))}
-                  </ul>
+                  </div>
                 )}
               </CardContent>
             </Card>
           </TabsContent>
           <TabsContent value="params">
             <Card>
-              <CardContent className="pt-4">
+              <CardContent>
                 <pre className="overflow-auto rounded-md bg-muted/50 p-3 text-xs">
                   {JSON.stringify(current.paramsSnapshot, null, 2)}
                 </pre>

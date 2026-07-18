@@ -1,5 +1,5 @@
-import { AppError } from "@agrippa/core";
-import { type Db, models, projectQuotas, tokenUsage } from "@agrippa/db";
+import { AppError, type LocalizedText } from "@agrippa/core";
+import { type Db, models, projectQuotas, runs, tasks, taskTypes, tokenUsage } from "@agrippa/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 const periodStart = sql`date_trunc('month', now())`;
@@ -8,9 +8,21 @@ export type ProjectUsage = {
   costUsd: number;
   tokens: number;
   byModel: Array<{ model: string; costUsd: number; tokens: number }>;
+  byTaskType: Array<{
+    taskTypeId: string | null;
+    taskTypeNameI18n: LocalizedText | null;
+    costUsd: number;
+    tokens: number;
+  }>;
+  byDay: Array<{ day: string; costUsd: number; tokens: number }>;
+  /** Month window boundaries from the database clock — the same calendar byDay is grouped in. */
+  period: { start: string; today: string };
 };
 
-/** Current-period (monthly) usage totals for a project. */
+/**
+ * Current-period (monthly) usage for a project. All groupings share the same
+ * month window the quota gate uses, so the numbers agree everywhere.
+ */
 export async function projectUsage(db: Db, projectId: string): Promise<ProjectUsage> {
   const where = and(eq(tokenUsage.projectId, projectId), gte(tokenUsage.occurredAt, periodStart));
   const [totals] = await db
@@ -32,6 +44,39 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
     .where(where)
     .groupBy(models.displayName);
 
+  // grouped by id, not display name — two task types may share a name
+  const byTaskType = await db
+    .select({
+      taskTypeId: taskTypes.id,
+      nameI18n: taskTypes.nameI18n,
+      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+      tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
+    })
+    .from(tokenUsage)
+    .leftJoin(runs, eq(tokenUsage.runId, runs.id))
+    .leftJoin(tasks, eq(runs.taskId, tasks.id))
+    .leftJoin(taskTypes, eq(tasks.taskTypeId, taskTypes.id))
+    .where(where)
+    .groupBy(taskTypes.id, taskTypes.nameI18n);
+
+  const [period] = await db
+    .select({
+      start: sql<string>`to_char(date_trunc('month', now()), 'YYYY-MM-DD')`,
+      today: sql<string>`to_char(now(), 'YYYY-MM-DD')`,
+    })
+    .from(sql`(select 1) as clock`);
+
+  const byDay = await db
+    .select({
+      day: sql<string>`to_char(date_trunc('day', ${tokenUsage.occurredAt}), 'YYYY-MM-DD')`,
+      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+      tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
+    })
+    .from(tokenUsage)
+    .where(where)
+    .groupBy(sql`date_trunc('day', ${tokenUsage.occurredAt})`)
+    .orderBy(sql`date_trunc('day', ${tokenUsage.occurredAt})`);
+
   return {
     costUsd: Number(totals?.cost ?? 0),
     tokens: Number(totals?.tokens ?? 0),
@@ -40,6 +85,18 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
       costUsd: Number(row.cost),
       tokens: Number(row.tokens),
     })),
+    byTaskType: byTaskType.map((row) => ({
+      taskTypeId: row.taskTypeId ?? null,
+      taskTypeNameI18n: (row.nameI18n as LocalizedText | null) ?? null,
+      costUsd: Number(row.cost),
+      tokens: Number(row.tokens),
+    })),
+    byDay: byDay.map((row) => ({
+      day: row.day,
+      costUsd: Number(row.cost),
+      tokens: Number(row.tokens),
+    })),
+    period: { start: period?.start ?? "", today: period?.today ?? "" },
   };
 }
 

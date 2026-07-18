@@ -42,6 +42,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   let db: Awaited<ReturnType<typeof freshTestDb>>;
   let admin: TestClient;
   let viewer: TestClient;
+  let outsider: TestClient;
   let projectId: string;
   let repoConnectionId: string;
   let taskTypeId: string;
@@ -72,6 +73,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     app = createApp({ db, queue: fakeQueue, bus });
     admin = await signUp(app, "Root", "root@example.com");
     viewer = await signUp(app, "Vera", "vera@example.com");
+    outsider = await signUp(app, "Oz", "oz@example.com");
 
     projectId = (
       await jsonOf<{ id: string }>(
@@ -187,11 +189,36 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     runId = body.runId;
     expect(enqueued).toContain(runId);
 
-    const run = await jsonOf<{ status: string; executorId: string }>(
-      await admin.request(`/api/v1/runs/${runId}`),
-    );
+    const run = await jsonOf<{
+      status: string;
+      executorId: string;
+      template: {
+        slug: string;
+        version: number;
+        phases: Array<Record<string, unknown>>;
+        budgets: Record<string, unknown>;
+        modelRoles: Record<string, unknown>;
+      };
+    }>(await viewer.request(`/api/v1/runs/${runId}`));
     expect(run.status).toBe("queued");
     expect(run.executorId).toBe("claude-agent-sdk");
+
+    // template plan embed: structure + i18n names only. The key allowlist is a
+    // leak guard — a phase must never carry step instructions or prompts.
+    expect(run.template.slug).toBe("swdev.bug-localize-fix");
+    expect(run.template.version).toBeGreaterThanOrEqual(1);
+    expect(run.template.phases.length).toBeGreaterThan(0);
+    for (const phase of run.template.phases) {
+      expect(Object.keys(phase).sort()).toEqual(["approval", "id", "name", "stepIds"]);
+      expect(Array.isArray(phase.stepIds)).toBe(true);
+    }
+    const withApproval = run.template.phases.find((p) => p.approval !== null);
+    expect(withApproval).toBeDefined();
+    expect(Object.keys(withApproval?.approval as Record<string, unknown>).sort()).toEqual([
+      "checkpoint",
+      "present",
+      "title",
+    ]);
   });
 
   it("worker leg 1 pauses at the approval; the API decides; leg 2 succeeds", async () => {
@@ -202,6 +229,18 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     );
     expect(approvalsRes[0]?.status).toBe("pending");
     const approvalId = approvalsRes[0]?.id as string;
+
+    // the pending-approvals inbox is membership-scoped
+    const inbox = await jsonOf<
+      Array<{ id: string; runId: string; taskTitle: string; projectRole: string }>
+    >(await viewer.request("/api/v1/approvals/pending"));
+    expect(inbox.map((i) => i.id)).toContain(approvalId);
+    expect(inbox[0]?.taskTitle).toBe("Fix the widget");
+    expect(inbox[0]?.projectRole).toBe("viewer");
+    const outsiderInbox = await jsonOf<Array<{ id: string }>>(
+      await outsider.request("/api/v1/approvals/pending"),
+    );
+    expect(outsiderInbox).toEqual([]);
 
     // viewers cannot decide
     const denied = await viewer.request(`/api/v1/runs/${runId}/approvals/${approvalId}`, {
@@ -220,13 +259,22 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(await executeRun(engineDeps(), runId)).toBe("succeeded");
     const run = await jsonOf<{ status: string }>(await admin.request(`/api/v1/runs/${runId}`));
     expect(run.status).toBe("succeeded");
+
+    // decided approvals leave the inbox
+    const drained = await jsonOf<Array<{ id: string }>>(
+      await viewer.request("/api/v1/approvals/pending"),
+    );
+    expect(drained.map((i) => i.id)).not.toContain(approvalId);
   });
 
   it("exposes steps and downloadable artifacts", async () => {
-    const steps = await jsonOf<Array<{ stepId: string; status: string }>>(
-      await viewer.request(`/api/v1/runs/${runId}/steps`),
-    );
-    expect(steps.find((s) => s.stepId === "find-root-cause")?.status).toBe("succeeded");
+    const steps = await jsonOf<
+      Array<{ stepId: string; status: string; usage: { costUsd?: number; tokens?: number } }>
+    >(await viewer.request(`/api/v1/runs/${runId}/steps`));
+    const rootCause = steps.find((s) => s.stepId === "find-root-cause");
+    expect(rootCause?.status).toBe("succeeded");
+    // per-step spend is aggregated from token_usage into the response
+    expect(typeof rootCause?.usage.costUsd).toBe("number");
 
     const artifacts = await jsonOf<Array<{ id: string; artifactKey: string }>>(
       await viewer.request(`/api/v1/runs/${runId}/artifacts`),
@@ -238,6 +286,29 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     const download = await viewer.request(`/api/v1/artifacts/${report?.id}/download`);
     expect(download.status).toBe(200);
     expect(await download.text()).toBe("# Root cause");
+  });
+
+  it("reports usage grouped by model, task type, and day", async () => {
+    const usage = await jsonOf<{
+      costUsd: number;
+      tokens: number;
+      byModel: Array<{ model: string; tokens: number }>;
+      byTaskType: Array<{ taskTypeNameI18n: Record<string, string> | null; tokens: number }>;
+      byDay: Array<{ day: string; tokens: number }>;
+      period: { start: string; today: string };
+    }>(await viewer.request(`/api/v1/projects/${projectId}/usage`));
+    // the fake executor recorded 500+200 and 800+300 tokens
+    expect(usage.tokens).toBe(1800);
+    expect(usage.byModel.length).toBeGreaterThan(0);
+    expect(usage.byTaskType).toHaveLength(1);
+    expect(usage.byTaskType[0]?.taskTypeNameI18n?.en).toBeTruthy();
+    expect(usage.byDay).toHaveLength(1);
+    expect(usage.byDay[0]?.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(usage.byDay[0]?.tokens).toBe(1800);
+    // period bounds come from the same DB clock that grouped byDay
+    expect(usage.period.start).toMatch(/^\d{4}-\d{2}-01$/);
+    expect((usage.byDay[0]?.day as string) >= usage.period.start).toBe(true);
+    expect((usage.byDay[0]?.day as string) <= usage.period.today).toBe(true);
   });
 
   it("replays the full event log over SSE, honoring Last-Event-ID", async () => {

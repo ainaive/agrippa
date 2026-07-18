@@ -5,6 +5,7 @@ import enCommon from "../locales/en/common.json";
 import enErrors from "../locales/en/errors.json";
 import enRuns from "../locales/en/runs.json";
 import enSettings from "../locales/en/settings.json";
+import enUsage from "../locales/en/usage.json";
 import zhAdmin from "../locales/zh-CN/admin.json";
 import zhAuth from "../locales/zh-CN/auth.json";
 import zhCatalog from "../locales/zh-CN/catalog.json";
@@ -12,6 +13,7 @@ import zhCommon from "../locales/zh-CN/common.json";
 import zhErrors from "../locales/zh-CN/errors.json";
 import zhRuns from "../locales/zh-CN/runs.json";
 import zhSettings from "../locales/zh-CN/settings.json";
+import zhUsage from "../locales/zh-CN/usage.json";
 
 export const namespaces = [
   "common",
@@ -20,6 +22,7 @@ export const namespaces = [
   "runs",
   "settings",
   "admin",
+  "usage",
   "errors",
 ] as const;
 export type Namespace = (typeof namespaces)[number];
@@ -32,6 +35,7 @@ export const resources = {
     runs: enRuns,
     settings: enSettings,
     admin: enAdmin,
+    usage: enUsage,
     errors: enErrors,
   },
   "zh-CN": {
@@ -41,6 +45,7 @@ export const resources = {
     runs: zhRuns,
     settings: zhSettings,
     admin: zhAdmin,
+    usage: zhUsage,
     errors: zhErrors,
   },
 } as const;

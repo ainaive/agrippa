@@ -21,10 +21,47 @@
   "skills": {
     "noVersions": "no versions"
   },
+  "crud": {
+    "newTemplate": "New template",
+    "newFaber": "New faber",
+    "editFaber": "Edit faber",
+    "avatar": "Avatar (emoji)",
+    "persona": "Persona",
+    "systemPrompt": "System prompt",
+    "newModel": "New model",
+    "editModel": "Edit model",
+    "provider": "Provider",
+    "providerModelId": "Provider model ID",
+    "inputCost": "Input $/Mtok",
+    "outputCost": "Output $/Mtok",
+    "newSkill": "New skill",
+    "description": "Description",
+    "source": "Source",
+    "newVersion": "New version",
+    "version": "Version",
+    "contentRef": "Content reference",
+    "newMcp": "New MCP server",
+    "editMcp": "Edit MCP server",
+    "transport": "Transport",
+    "config": "Configuration (JSON)",
+    "invalidJson": "Configuration is not valid JSON",
+    "authToken": "Auth token",
+    "authTokenHint": "Write-only: stored encrypted and never shown again. Leave empty to keep the current token.",
+    "clearAuth": "Remove the stored token",
+    "active": "Active",
+    "disabled": "Disabled"
+  },
   "mcp": {
     "empty": "No MCP servers registered.",
     "authed": "auth configured",
     "noAuth": "no auth"
+  },
+  "audit": {
+    "title": "Audit log",
+    "hint": "Every mutation in the system — who did what, where, and when.",
+    "allProjects": "All projects",
+    "actionFilter": "Filter by action, e.g. task.submit",
+    "empty": "No audit entries match the current filters."
   },
   "editor": {
     "source": "Template source (YAML)",
@@ -34,6 +71,13 @@
     "versions": "Versions",
     "publish": "Publish",
     "noVersions": "No versions yet — save a draft.",
-    "formPreview": "Form preview"
+    "formPreview": "Form preview",
+    "compare": "Compare versions",
+    "deprecate": "Deprecate",
+    "baseVersion": "Editing from v{{version}} — saving creates a new draft.",
+    "publishConfirm": "Publish v{{version}}?",
+    "publishHint": "New submissions will pin this version. Published versions are immutable.",
+    "deprecateConfirm": "Deprecate v{{version}}?",
+    "deprecateHint": "Deprecated versions stay available to historical runs but are marked as retired."
   }
 }

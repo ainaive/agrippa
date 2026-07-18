@@ -51,6 +51,10 @@ See the [README quick start](../../../README.md#getting-started): Bun ≥ 1.3 + 
 
 Sign up at the login screen — **the first account created becomes the organization admin** (later accounts are regular members). That's how a fresh install bootstraps its administrator, so create your admin account before sharing the URL.
 
+## Finding your way around
+
+Navigation lives in the **left sidebar**. At its top sits the **project switcher** — search your projects, jump between them, or create a new one. Below it, the *Project* section holds Dashboard, Catalog, Tasks, and (for project admins) Settings; the *Organization* section holds the Approvals inbox and, for org admins, the Admin area. The sidebar collapses to an icon rail via the toggle in the top bar, and becomes a drawer on small screens. The top bar shows breadcrumbs for where you are, and the **avatar menu** on the right switches language (English / 中文) and theme (light / dark / system) and signs you out.
+
 ## Initial setup checklist
 
 1. **Create a project** — you'll be prompted on first login. Projects scope everything: members, resources, budgets, repositories.

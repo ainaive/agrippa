@@ -21,10 +21,47 @@
   "skills": {
     "noVersions": "暂无版本"
   },
+  "crud": {
+    "newTemplate": "新建模板",
+    "newFaber": "新建 Faber",
+    "editFaber": "编辑 Faber",
+    "avatar": "头像（Emoji）",
+    "persona": "人设",
+    "systemPrompt": "系统提示词",
+    "newModel": "注册模型",
+    "editModel": "编辑模型",
+    "provider": "提供商",
+    "providerModelId": "提供商模型 ID",
+    "inputCost": "输入 $/百万 Token",
+    "outputCost": "输出 $/百万 Token",
+    "newSkill": "新建技能",
+    "description": "描述",
+    "source": "来源",
+    "newVersion": "新建版本",
+    "version": "版本号",
+    "contentRef": "内容引用",
+    "newMcp": "注册 MCP 服务",
+    "editMcp": "编辑 MCP 服务",
+    "transport": "传输方式",
+    "config": "配置（JSON）",
+    "invalidJson": "配置不是合法的 JSON",
+    "authToken": "认证令牌",
+    "authTokenHint": "只写字段：加密存储且不再显示。留空则保留当前令牌。",
+    "clearAuth": "移除已存储的令牌",
+    "active": "启用",
+    "disabled": "停用"
+  },
   "mcp": {
     "empty": "尚未注册 MCP 服务。",
     "authed": "已配置凭证",
     "noAuth": "无凭证"
+  },
+  "audit": {
+    "title": "审计日志",
+    "hint": "系统内的每次变更——谁在何时何处做了什么。",
+    "allProjects": "全部项目",
+    "actionFilter": "按操作筛选，如 task.submit",
+    "empty": "没有符合筛选条件的审计记录。"
   },
   "editor": {
     "source": "模板源码（YAML）",
@@ -34,6 +71,13 @@
     "versions": "版本",
     "publish": "发布",
     "noVersions": "暂无版本——请先保存草稿。",
-    "formPreview": "表单预览"
+    "formPreview": "表单预览",
+    "compare": "版本对比",
+    "deprecate": "弃用",
+    "baseVersion": "基于 v{{version}} 编辑——保存将创建新草稿。",
+    "publishConfirm": "发布 v{{version}}？",
+    "publishHint": "新提交的任务将固定使用该版本。已发布版本不可变。",
+    "deprecateConfirm": "弃用 v{{version}}？",
+    "deprecateHint": "弃用的版本对历史执行仍然可用，仅标记为退役。"
   }
 }

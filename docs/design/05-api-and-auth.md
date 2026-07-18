@@ -49,7 +49,7 @@ PATCH  /projects/:id/members/:userId      DELETE /projects/:id/members/:userId
 POST   /projects/:id/repos                GET /projects/:id/repos  DELETE .../repos/:repoId
 GET    /projects/:id/grants               PUT /projects/:id/grants # bulk enable/disable resources
 GET    /projects/:id/quota                PUT /projects/:id/quota
-GET    /projects/:id/usage?period=&groupBy=model|task_type|member
+GET    /projects/:id/usage   # current-month totals + byModel + byTaskType + byDay (same window as the quota gate)
 ```
 
 ### Catalog
@@ -64,9 +64,11 @@ GET /task-types/:id                       # includes compiled input schema → f
 POST /projects/:id/tasks                  # {taskTypeId, title, params} → 202 {taskId, runId}
 GET  /projects/:id/tasks?status=&taskType=
 GET  /tasks/:id                           POST /tasks/:id/retry     # → new run
-GET  /runs/:id                            GET /runs/:id/steps
+GET  /runs/:id                            # embeds a viewer-scoped template plan (phases/budgets/modelRoles — no prompts)
+GET  /runs/:id/steps                      # each row carries usage {costUsd, tokens} aggregated from token_usage
 GET  /runs/:id/events                     # SSE; Last-Event-ID replay (see 04)
 POST /runs/:id/cancel
+GET  /approvals/pending                   # cross-project inbox: pending checkpoints in the caller's projects
 GET  /runs/:id/approvals                  POST /runs/:id/approvals/:approvalId  # {decision, comment}
 GET  /runs/:id/artifacts                  GET /artifacts/:id/download
 ```
@@ -81,11 +83,12 @@ CRUD /mcp-servers                         # secrets accepted write-only, returne
 CRUD /models
 CRUD /templates                           POST /templates/:id/versions            # save draft
 POST /templates/:id/versions/:v/publish   POST /templates/validate                # dry-run compile
+POST /templates/:id/versions/:v/deprecate # published & non-latest only (409 version_is_latest)
 ```
 
 ### Governance
 ```
-GET  /audit-logs?project=&actor=&action=&from=&to=
+GET  /audit-logs?projectId=&action=&limit=   # rows include joined actorEmail/actorName
 CRUD /api-keys                            # secret shown once at creation
 ```
 

@@ -28,7 +28,7 @@ Browser (SPA) ──REST──▶ api ──singleton-keyed send──▶ pg-bos
 | `packages/i18n` | en/zh-CN resources by namespace + the server-side error-message lookup; a parity test keeps locales in lockstep. |
 | `apps/api` | Hono: better-auth, RBAC middleware, registries, template publishing, task submission (grant + quota gating), run lifecycle, approvals, artifacts, SSE, audit log. Serves the built SPA in production. Never imports executors. |
 | `apps/worker` | pg-boss consumers around the engine; real deps: `GitWorkspaceManager` (clone with scrubbed credentials), `DbResourceMaterializer` (skills → disk, MCP + secrets), `DiskArtifactStore`, `DemoExecutor` (token-free), approval-expiry handler, reconciliation sweeper. |
-| `apps/web` | React SPA: TanStack Router/Query, shadcn/ui, react-i18next. The load-bearing piece is `TaskParamsForm` — rendered from compiled template inputs, so new task types need zero frontend work. |
+| `apps/web` | React SPA: TanStack Router/Query, shadcn/ui (GitLab-style sidebar shell, indigo/violet tokens, light+dark), react-i18next. The load-bearing piece is `TaskParamsForm` — rendered from compiled template inputs, so new task types need zero frontend work. |
 | `templates/` | Builtin `agrippa/v1` templates (6), shared subagent prompts, builtin skills. Compiled + published at boot, checksum-guarded. |
 
 Dependency direction is enforced by `scripts/check-deps.ts` (runtime deps only).

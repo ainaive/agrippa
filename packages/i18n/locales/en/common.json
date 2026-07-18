@@ -1,15 +1,72 @@
 {
   "appName": "Silicon Workshop",
-  "loading": "Loading…",
   "selectProject": "Select project",
   "signOut": "Sign out",
+  "adminOnly": "Administrator access required",
   "nav": {
     "approvals": "Approvals",
     "admin": "Admin",
     "dashboard": "Dashboard",
     "catalog": "Catalog",
     "tasks": "Tasks",
-    "settings": "Settings"
+    "settings": "Settings",
+    "project": "Project",
+    "organization": "Organization",
+    "templates": "Templates",
+    "fabri": "Fabri",
+    "models": "Models",
+    "skills": "Skills",
+    "mcp": "MCP servers",
+    "audit": "Audit log",
+    "usage": "Usage"
+  },
+  "breadcrumb": {
+    "newTask": "New task"
+  },
+  "userMenu": {
+    "language": "Language"
+  },
+  "switcher": {
+    "search": "Find a project…",
+    "projects": "Projects",
+    "create": "New project",
+    "empty": "No projects found",
+    "archived": "Archived"
+  },
+  "projectNotFound": {
+    "title": "Project not found",
+    "hint": "This project does not exist or you are not a member of it."
+  },
+  "actions": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "create": "Create",
+    "edit": "Edit",
+    "confirm": "Confirm",
+    "close": "Close",
+    "retry": "Retry",
+    "copy": "Copy",
+    "search": "Search",
+    "expand": "Expand"
+  },
+  "error": {
+    "title": "Couldn't load this page"
+  },
+  "feedback": {
+    "saved": "Changes saved",
+    "created": "Created",
+    "deleted": "Deleted",
+    "error": "Something went wrong"
+  },
+  "empty": {
+    "generic": "Nothing here yet."
+  },
+  "theme": {
+    "toggle": "Theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
   },
   "firstProject": {
     "title": "Create your first project",

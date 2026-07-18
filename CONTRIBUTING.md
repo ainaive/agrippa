@@ -19,6 +19,8 @@ bun apps/worker/src/index.ts
 cd apps/web && bun run dev                          # http://localhost:5173
 ```
 
+Prefer one terminal? `bun run dev` at the repo root starts all three (api + worker in watch mode, Vite) with prefixed logs. Their dev scripts pass `--env-file=../../.env.local` because `bun --filter` runs each with its workspace as cwd, where the root file isn't auto-loaded.
+
 Bun loads `.env` / `.env.local` natively from the directory you start it in — no dotenv, no `export`s — and `.env.local` is git-ignored, so secrets can't be committed. Create it **once and keep it**: `AGRIPPA_SECRET_KEY` encrypts credentials you store in dev (repo tokens, MCP auth), and a fresh key per shell — the old `export $(openssl rand …)` workflow — silently orphans them. Plain `export`s still work if you prefer; they take precedence over the file.
 
 The first account you sign up becomes the org admin. Real agent runs need `AGRIPPA_EXECUTOR=claude-agent-sdk` plus `ANTHROPIC_API_KEY` (worker env).

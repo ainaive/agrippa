@@ -2,18 +2,23 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { FaberAvatar } from "@/components/FaberAvatar";
+import { DetailSkeleton } from "@/components/LoadingSkeletons";
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
 import {
   defaultParams,
   missingRequired,
   type ParamsValue,
   TaskParamsForm,
 } from "../components/TaskParamsForm";
-import { ApiError, api } from "../lib/api";
+import { api } from "../lib/api";
 import { formatCost, lt } from "../lib/format";
+import { toastApiError } from "../lib/toast";
 import type { TaskTypeDetail } from "../lib/types";
 
 export function SubmitTaskPage() {
@@ -46,75 +51,87 @@ export function SubmitTaskPage() {
         params: { projectId, runId: result.runId },
       });
     },
+    onError: toastApiError,
   });
 
-  if (taskType.isLoading) return <p className="text-muted-foreground">…</p>;
+  if (taskType.isLoading) return <DetailSkeleton />;
   if (!taskType.data) return <p className="text-destructive">{t("notFound")}</p>;
   const detail = taskType.data;
   const missing = missingRequired(inputs, value);
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4">
-      <div>
-        <h2 className="flex items-center gap-2 text-lg font-semibold">
-          <span aria-hidden>{detail.faber?.avatar ?? "🤖"}</span>
-          {lt(detail.nameI18n)}
-        </h2>
-        <p className="text-sm text-muted-foreground">{lt(detail.descriptionI18n)}</p>
+    <div className="grid items-start gap-6 lg:grid-cols-[1fr_300px]">
+      <div className="space-y-4">
+        <PageHeader title={lt(detail.nameI18n)} description={lt(detail.descriptionI18n)} />
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("form.parameters")}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="space-y-2">
+              <Label htmlFor="task-title">
+                {t("form.title")}
+                <span className="text-destructive"> *</span>
+              </Label>
+              <Input id="task-title" value={title} onChange={(e) => setTitle(e.target.value)} />
+            </div>
+            <TaskParamsForm
+              projectId={projectId}
+              inputs={inputs}
+              value={value}
+              onChange={setParams}
+            />
+          </CardContent>
+        </Card>
       </div>
 
-      <Card>
+      <Card className="lg:sticky lg:top-20">
         <CardHeader>
-          <CardTitle className="text-base">{t("form.parameters")}</CardTitle>
+          <CardTitle className="text-sm font-medium text-muted-foreground">
+            {t("form.summary")}
+          </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-5">
-          <div className="space-y-2">
-            <Label htmlFor="task-title">
-              {t("form.title")}
-              <span className="text-destructive"> *</span>
-            </Label>
-            <Input id="task-title" value={title} onChange={(e) => setTitle(e.target.value)} />
+        <CardContent className="space-y-3 text-sm">
+          <div className="flex items-center gap-2.5">
+            <FaberAvatar avatar={detail.faber?.avatar} size="lg" />
+            <div className="min-w-0">
+              <p className="truncate font-medium">{lt(detail.faber?.nameI18n)}</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {detail.template?.slug}@v{detail.templateVersion?.version ?? "—"}
+              </p>
+            </div>
           </div>
-          <TaskParamsForm
-            projectId={projectId}
-            inputs={inputs}
-            value={value}
-            onChange={setParams}
-          />
+          <Separator />
+          <div className="space-y-1.5">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">{t("form.budget")}</span>
+              <span className="font-medium tabular-nums">
+                {formatCost(detail.budgets?.maxCostUsd)}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">{t("form.duration")}</span>
+              <span className="font-medium tabular-nums">
+                {detail.budgets?.maxDurationMinutes ?? "—"} {t("form.minutes")}
+              </span>
+            </div>
+          </div>
+          <Separator />
+          <Button
+            className="w-full"
+            disabled={!title || missing.length > 0 || submit.isPending || !detail.templateVersion}
+            onClick={() => submit.mutate()}
+          >
+            {submit.isPending ? t("form.submitting") : t("form.submit")}
+          </Button>
+          {missing.length > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {t("form.missingRequired")}: {missing.join(", ")}
+            </p>
+          ) : null}
         </CardContent>
       </Card>
-
-      <div className="flex items-center justify-between rounded-md border bg-muted/40 px-4 py-3 text-sm">
-        <span className="text-muted-foreground">
-          {t("form.budget")}: {formatCost(detail.budgets?.maxCostUsd)} ·{" "}
-          {detail.budgets?.maxDurationMinutes ?? "—"} {t("form.minutes")}
-        </span>
-        <span className="text-muted-foreground">
-          {detail.template?.slug}@v{detail.templateVersion?.version ?? "—"}
-        </span>
-      </div>
-
-      {submit.isError && (
-        <p className="text-sm text-destructive">
-          {submit.error instanceof ApiError
-            ? `${submit.error.code}: ${submit.error.message}`
-            : String(submit.error)}
-        </p>
-      )}
-
-      <div className="flex justify-end gap-2">
-        <Button
-          disabled={!title || missing.length > 0 || submit.isPending || !detail.templateVersion}
-          onClick={() => submit.mutate()}
-        >
-          {submit.isPending ? t("form.submitting") : t("form.submit")}
-        </Button>
-      </div>
-      {missing.length > 0 && (
-        <p className="text-right text-xs text-muted-foreground">
-          {t("form.missingRequired")}: {missing.join(", ")}
-        </p>
-      )}
     </div>
   );
 }

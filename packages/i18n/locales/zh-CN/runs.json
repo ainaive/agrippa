@@ -18,8 +18,23 @@
   },
   "tabs": {
     "output": "输出",
+    "activity": "活动",
     "artifacts": "产出物",
     "params": "参数"
+  },
+  "activity": {
+    "empty": "暂无活动。",
+    "workspaceReady": "工作区就绪",
+    "stepStarted": "步骤开始",
+    "stepCompleted": "步骤完成",
+    "stepFailed": "步骤失败",
+    "stepRetrying": "步骤重试中",
+    "subagent": "子智能体",
+    "approvalRequired": "等待审批"
+  },
+  "artifact": {
+    "preview": "预览",
+    "tooLarge": "内容过大，无法预览——请下载查看。"
   },
   "actions": {
     "cancel": "取消执行",
@@ -30,24 +45,56 @@
     "hint": "执行已在检查点暂停。请审阅产出物后批准或驳回。",
     "commentPlaceholder": "备注（可选）…",
     "approve": "批准",
-    "reject": "驳回"
+    "reject": "驳回",
+    "presented": "呈现的产出物",
+    "loadingArtifacts": "正在加载呈现的产出物…",
+    "artifactsUnavailable": "呈现的产出物加载失败——请谨慎审阅；仍可驳回。",
+    "artifactMissing": "未产出"
   },
   "approvalsInbox": {
     "title": "待办审批",
-    "empty": "当前没有等待你审批的事项。"
+    "empty": "当前没有等待你审批的事项。",
+    "openRun": "打开执行",
+    "review": "审阅"
+  },
+  "phases": {
+    "checkpoint": "审批检查点",
+    "notStarted": "尚未开始"
+  },
+  "steps": {
+    "attempts": "共 {{count}} 次尝试"
+  },
+  "budget": {
+    "title": "预算",
+    "cost": "费用",
+    "duration": "时长",
+    "perPhase": "分阶段上限"
+  },
+  "meta": {
+    "title": "详情",
+    "template": "模板",
+    "executor": "执行器",
+    "models": "模型角色"
   },
   "dashboard": {
     "openTasks": "进行中",
+    "pendingApprovals": "待办审批",
     "spend": "花费",
     "total": "任务总数",
     "recent": "最近任务",
     "newTask": "新建任务",
+    "viewAll": "查看全部",
+    "byModel": "按模型花费",
+    "noSpend": "本月尚无花费。",
+    "tokensCount": "{{formattedCount}} 个 Token",
     "empty": "还没有任务——去任务目录选择一个吧。"
   },
   "table": {
     "title": "标题",
     "status": "状态",
     "created": "创建时间",
-    "run": "执行"
+    "run": "执行",
+    "allStatuses": "全部状态",
+    "noMatches": "没有符合筛选条件的任务。"
   }
 }

@@ -1,5 +1,5 @@
-import { auditLogs } from "@agrippa/db";
-import { and, desc, eq, type SQL } from "drizzle-orm";
+import { auditLogs, users } from "@agrippa/db";
+import { and, desc, eq, getTableColumns, type SQL } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { requireOrgAdmin } from "../middleware/rbac";
@@ -16,8 +16,13 @@ export const governanceRoutes = new Hono<AppEnv>().get(
     const limit = Math.min(Number(c.req.query("limit") ?? 100), 500);
 
     const rows = await c.var.db
-      .select()
+      .select({
+        ...getTableColumns(auditLogs),
+        actorEmail: users.email,
+        actorName: users.name,
+      })
       .from(auditLogs)
+      .leftJoin(users, eq(auditLogs.actorUserId, users.id))
       .where(and(...filters))
       .orderBy(desc(auditLogs.createdAt))
       .limit(limit);

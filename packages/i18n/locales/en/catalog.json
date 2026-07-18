@@ -1,10 +1,14 @@
 {
   "hint": "Pick a task type, fill in the parameters, and the platform executes it in the background.",
   "notFound": "Task type not found",
+  "search": "Search task types…",
+  "noResults": "No task types match your search.",
   "form": {
     "parameters": "Parameters",
     "title": "Task title",
+    "summary": "Summary",
     "budget": "Budget",
+    "duration": "Time limit",
     "minutes": "min",
     "submit": "Submit task",
     "submitting": "Submitting…",

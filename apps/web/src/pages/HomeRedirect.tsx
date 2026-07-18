@@ -1,11 +1,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { FolderKanbanIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { getLastProjectId } from "../features/lastProject";
 import { useMe } from "../features/me";
 import { api } from "../lib/api";
 
@@ -17,12 +19,14 @@ export function HomeRedirect() {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
 
-  const first = me.projects[0];
+  // archived memberships still appear in /me — never land the user in one
+  const active = me.projects.filter((p) => p.status === "active");
+  const target = active.find((p) => p.projectId === getLastProjectId()) ?? active[0];
   useEffect(() => {
-    if (first) {
-      void navigate({ to: "/projects/$projectId", params: { projectId: first.projectId } });
+    if (target) {
+      void navigate({ to: "/projects/$projectId", params: { projectId: target.projectId } });
     }
-  }, [first, navigate]);
+  }, [target, navigate]);
 
   const create = useMutation({
     mutationFn: () => api<{ id: string }>("/projects", { method: "POST", json: { name, slug } }),
@@ -32,12 +36,15 @@ export function HomeRedirect() {
     },
   });
 
-  if (first) return null;
+  if (target) return null;
 
   return (
     <div className="mx-auto mt-16 max-w-md">
       <Card>
         <CardHeader>
+          <div className="mb-2 flex size-10 items-center justify-center rounded-lg bg-primary/10">
+            <FolderKanbanIcon className="size-5 text-primary" />
+          </div>
           <CardTitle>{t("firstProject.title")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">

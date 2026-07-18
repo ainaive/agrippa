@@ -1,32 +1,37 @@
 # 06 — Frontend Architecture
 
-> Status: draft for review · Last updated: 2026-07-17
+> Status: living document · Last updated: 2026-07-17
 
-`apps/web`: Vite + React SPA. Routing: **TanStack Router** (file-based, type-safe params/search). Data: **TanStack Query**. UI: **shadcn/ui** on Tailwind v4 (officially supported on plain Vite: `@tailwindcss/vite` plugin + `@/` path alias; components vendored into `src/components/ui/`). Forms: **react-hook-form** + zod resolvers, schemas from `@agrippa/core`.
+`apps/web`: Vite + React SPA. Routing: **TanStack Router** (code-first route tree in `src/router.tsx`, type-safe params). Data: **TanStack Query**. UI: **shadcn/ui** on Tailwind v4 (`@tailwindcss/vite` plugin + `@/` path alias; components vendored into `src/components/ui/`, exempted from strict lint via a scoped biome override and carrying a few deliberate theme divergences: quiet muted table headers with `tabular-nums` cells, eased sidebar/input transitions, `shadow-2xs` on cards and `shadow-lg` on dialogs). Visual identity: indigo/violet primary over cool-tinted neutrals, defined as OKLCH tokens in `src/index.css` (light + dark) — light mode uses the gray-canvas/white-card surface model (canvas 0.975, sidebar 0.962, cards white) for three-level depth — plus semantic `status-*` tokens for run/step states. **Chrome is neutral**: hover/selected/active surfaces are quiet grays; brand indigo appears only on the primary CTA, focus rings, links, progress, and the logo tile. Typography: Geist Variable + Geist Mono Variable on a **custom type ramp** (`--text-*` in `@theme`: xs 11px, sm 13px body, base 15px card/dialog titles, xl 18px page titles, 2xl 22px stat values; mobile inputs hard-code 16px for the iOS no-zoom rule), globally antialiased, primary-tinted selection, thin scrollbars. Shape: `--radius: 0.5rem` (8px controls, ~11px cards), rounded-rect badges. Icons: lucide-react.
+
+Visual verification is not left to code review: `scripts/screenshot.ts` (dev tool, Playwright) boots the stack on a throwaway database with the fake executor, seeds fixture runs, and captures every page in light and dark, failing on any browser console error.
 
 ## Structure
 
 ```
 apps/web/src/
-├── routes/                 # TanStack Router file-based routes
-│   ├── __root.tsx          # shell: nav, project switcher, locale switcher, approvals badge
-│   ├── index.tsx           # → redirect to last project dashboard
-│   ├── projects.$projectId/
-│   │   ├── index.tsx       # project dashboard
-│   │   ├── catalog.tsx     # scenario catalog
-│   │   ├── tasks.new.tsx   # submission form (?taskType=)
-│   │   ├── tasks.index.tsx # task list
-│   │   ├── runs.$runId.tsx # run detail (live)
-│   │   └── settings.*.tsx  # members / grants / repos / quota
-│   ├── approvals.tsx       # cross-project approvals inbox
-│   ├── admin/              # resource layer (org_admin)
-│   │   ├── fabri.tsx  skills.tsx  mcp-servers.tsx  models.tsx
-│   │   └── templates.$templateId.tsx   # template editor
-│   └── usage.tsx           # org/project usage & audit
-├── features/               # per-domain components + hooks (projects/, runs/, resources/, ...)
-├── components/ui/          # vendored shadcn components
-└── lib/                    # api client, i18n init, query client, SSE hook
+├── router.tsx              # code-first route tree; staticData.crumb drives breadcrumbs
+├── pages/                  # one component per route
+│   ├── Shell.tsx           # auth gate + MeContext + sidebar/topbar chrome
+│   ├── ProjectLayout.tsx   # membership guard, persists last-visited project
+│   ├── admin/AdminLayout.tsx  # org_admin guard (redirect + toast)
+│   └── …Page.tsx           # Dashboard, Catalog, SubmitTask, Tasks, RunDetail, …
+├── components/
+│   ├── shell/              # AppSidebar, ProjectSwitcher, Topbar, UserMenu, nav model
+│   ├── ui/                 # vendored shadcn components
+│   └── …                   # PageHeader, EmptyState, ConfirmDialog, skeletons,
+│                           #   LocalizedTextFields, RunStatusBadge
+├── features/               # me (session), theme, lastProject, useRunEvents (SSE)
+└── lib/                    # api client, i18n init, shared API types, format helpers
 ```
+
+## App shell (GitLab-style)
+
+The chrome is a persistent **left sidebar** + slim **top bar** (`SidebarProvider` → `AppSidebar` + `SidebarInset`):
+
+- **Sidebar** (`components/shell/AppSidebar.tsx`, collapsible to an icon rail; renders as a sheet drawer on mobile): brand mark, then the **project context switcher** (command palette popover: search, archived badges, "New project" dialog), then grouped navigation — *Project* (Dashboard / Catalog / Tasks / Settings, role-gated), *Organization* (Approvals, Admin for org admins). While on org-level pages the project group stays visible, bound to the last-visited project (persisted as `agrippa.lastProject`).
+- **Top bar** (`components/shell/Topbar.tsx`): sidebar trigger, **breadcrumbs** derived from route `staticData.crumb` (i18n keys, with `$project` / `$run` resolving to live names), and the **user menu** — avatar dropdown with language (en / zh-CN, persists to localStorage + `PATCH /me`) and theme (light / dark / system via `features/theme.tsx`) plus sign out.
+- Mutation feedback is toast-based (sonner `Toaster` mounted in the shell); destructive actions confirm via `ConfirmDialog`.
 
 ## The Auto-Generated Task Form (core contract)
 
@@ -44,27 +49,33 @@ This is the contract that makes "add a task type without frontend work" true: pu
 
 ## Live Run Detail
 
-`useRunEvents(runId)` opens the SSE stream (`/runs/:id/events`, browser `EventSource` handles `Last-Event-ID` reconnection) and patches the TanStack Query cache:
+`GET /runs/:id` embeds a **viewer-scoped projection of the pinned template plan** (`template: { slug, version, phases[{id, name, stepIds, approval}], budgets, modelRoles }` — structure and i18n names only, never step instructions or prompts), and `GET /runs/:id/steps` aggregates per-step spend from `token_usage` into each row's `usage`. On top of that, `useRunEvents(runId)` opens the SSE stream (`/runs/:id/events`, browser `EventSource` handles `Last-Event-ID` reconnection) and invalidates the run queries (debounced) as events arrive; the run also polls at 3–5 s while non-terminal as a fallback.
 
-- step/phase events → update the run-steps query → **phase/step timeline** re-renders (pending/running/succeeded/failed/skipped badges, per-step duration & cost).
-- `message.delta` → append to the streaming output pane for the active step.
-- `usage` → live cost/token meter vs. budget.
-- `artifact` → artifacts tab (markdown rendered inline; patch viewer with syntax highlighting; download for files).
-- `approval.required` → approval banner: presents the `present:` artifacts inline with Approve/Reject + comment.
+The page (`pages/RunDetailPage.tsx` composing `features/runs/*`):
 
-Terminal states close the stream and invalidate queries once — no polling.
+- **PhaseTimeline** — steps grouped under the template's phases (numbered, localized names; unstarted phases dimmed; runs without an embed fall back to grouping by `phaseId`), each step with status icon, duration, cost, attempt count, and its model-role chip; approval checkpoints render inline in their phase with their decision state.
+- **BudgetMeter** — cost vs. `maxCostUsd` and elapsed vs. `maxDurationMinutes` as progress meters (danger tint past 90%), plus per-phase caps.
+- **RunMetaCard** — pinned `slug@vN`, executor, and the frozen model resolution (role → provider model + tier).
+- **Streaming pane** — `message.delta` events accumulate into the output tab; step outputs are the fallback once the stream ends.
+- **Activity tab** (`features/runs/RunActivityFeed.tsx`) — the run's tool calls (error-tinted when the tool errored), subagent spawns, workspace checkout, step transitions, and approval requests, rebuilt from the SSE event stream.
+- **Artifact previews** (`components/artifacts/ArtifactPreview.tsx`) — markdown rendered inline (react-markdown + GFM, styled by the `.markdown-body` component layer), patches colorized by the hand-rolled `PatchView`, JSON pretty-printed, links clickable; anything over 256 KB (or of kind `file`) is download-only.
+- **ApprovalPanel** (`features/runs/ApprovalPanel.tsx`) — renders the checkpoint's `present:` artifacts inline with previews, plus Approve/Reject + comment with toast feedback; shared with the approvals inbox.
+- Cancel while running; retry (navigates to the new pinned run) once terminal.
+
+`useRunEvents` keeps one `EventSource` per run for the run's whole lifetime: the run status is read through a ref, not the effect deps, so status transitions don't tear down the stream (recreating it wiped accumulated activity mid-run); terminal `run.*` events still close it.
 
 ## Screens
 
-1. **Project dashboard** — recent runs (status, cost), usage vs. quota gauge, pending approvals, quick-submit shortcuts.
-2. **Scenario catalog** — 3 scenario sections × task-type cards (localized names/descriptions, default Faber avatar).
-3. **Task submission** — auto-generated form + budget preview (template `budgets` + current quota headroom) + submit → redirects to run detail.
-4. **Run detail** — as above; also params snapshot, pinned template version, model resolution, retry button.
-5. **Approvals inbox** — pending approvals across the user's projects; decide inline.
-6. **Resource admin** — registries for fabri / skills / MCP servers / models: list, status, versions, create/edit; secrets write-only masked.
-7. **Template editor** — CodeMirror YAML editor, `validate` (dry-run compile with inline errors), rendered **form preview** from compiled inputs, version list, publish (with diff vs. previous version from `source_yaml`).
-8. **Project settings** — members & roles, resource grants (checkbox matrix per resource type), repos, quota.
-9. **Usage & audit** — token/cost charts (per model / task type / member / period), audit log table with filters.
+1. **Project dashboard** — stat tiles (active runs, pending approvals with an inbox link, spend with a quota progress meter, totals), recent-tasks card, spend-by-model panel.
+2. **Scenario catalog** — scenario sections × task-type cards (localized names/descriptions, Faber avatar chips), searchable across both locales' text.
+3. **Task submission** — auto-generated form beside a sticky summary card (Faber, pinned template version, budgets) with the submit action; errors toast.
+4. **Run detail** — see "Live Run Detail" above.
+5. **Approvals inbox** — `GET /approvals/pending`, grouped by project; rows expand into the shared ApprovalPanel with presented-artifact previews and inline decide (viewers get read-only rows); sidebar badge carries the live count.
+6. **Resource admin** — per-resource pages (`pages/admin/`) with a shared dialog-form pattern: fabri / models / skills+versions / MCP servers, full create/edit, disable-without-delete, write-only masked secrets with an explicit clear affordance.
+7. **Template editor** — monospace YAML textarea (CodeMirror deliberately out of scope for now), `validate` (dry-run compile with inline errors), rendered **form preview** from compiled inputs, version browser (open any version; edits fork into the next draft), client-side diff between any two versions (`diff` + the shared PatchView), publish and deprecate with confirmation.
+8. **Project settings** — vertical section nav: General (rename/description + archive danger zone), members & roles, resource grants (toggle matrix per resource type), repos, quota; destructive actions confirm.
+9. **Usage** — per-project page: spend vs. quota, total tokens, daily-spend SVG bars, byModel/byTaskType proportion bars (all from `GET /projects/:id/usage`).
+10. **Audit log** — org-admin page over `GET /audit-logs`: actor/action/resource rows with project + action filters and expandable payloads.
 
 ## i18n in the SPA
 

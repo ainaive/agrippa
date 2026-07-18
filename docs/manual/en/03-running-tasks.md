@@ -2,7 +2,7 @@
 
 ## Submitting
 
-Open your project's **Catalog** tab, pick a task type, and fill in the form. The form is generated from the template's parameter schema — text fields, selects, switches, and repository pickers appear exactly as the template author declared them; required fields are marked `*`. Below the form you'll see the run's **budget preview** (max cost and duration) and the exact template version that will execute.
+Open **Catalog** in the project sidebar — task types are grouped by scenario and searchable. Pick one and fill in the form. The form is generated from the template's parameter schema — text fields, selects, switches, and repository pickers appear exactly as the template author declared them; required fields are marked `*`. The **summary panel** beside the form shows who will execute the task (the Faber), the exact template version, and the run's **budget** (max cost and duration) — review it before submitting.
 
 Submission can be rejected up front with a specific reason: a required skill or MCP server isn't granted to the project, no granted model satisfies a required tier, parameters fail validation, or a hard-stop quota is exhausted. Fix the cause under Settings and resubmit — nothing is persisted on a rejected submission.
 
@@ -10,11 +10,14 @@ Submission can be rejected up front with a specific reason: a required skill or 
 
 Submitting lands you on the **run detail** page, which updates live:
 
-- **Timeline** (left): every step with its phase, status, attempt count, and duration. Steps can be *skipped* (a condition was false or an optional integration is unavailable) — that's normal, not an error.
+- **Timeline** (left): steps grouped by the template's **phases**, each with status, duration, cost, attempt count, and the model role that executed it; approval checkpoints appear inline in their phase. Steps can be *skipped* (a condition was false or an optional integration is unavailable) — that's normal, not an error.
+- **Budget** panel: live meters of cost against the cost limit and elapsed time against the time limit, plus any per-phase caps.
+- **Details** panel: the pinned template version, the executor, and the frozen model resolution (which concrete model serves each role).
 - **Output** tab: the agent's streaming text while a step executes; after completion, each step's final output.
-- **Artifacts** tab: deliverables appear as they're produced; download any of them (reports as Markdown, code changes as patches, links as URLs).
+- **Activity** tab: the run's live event feed — tool calls, subagent spawns, workspace checkout, retries.
+- **Artifacts** tab: deliverables appear as they're produced and preview inline — Markdown rendered, patches colorized, JSON pretty-printed, links clickable; anything can also be downloaded.
 - **Parameters** tab: the exact input snapshot the run executes with.
-- The header shows live **cost** against the budget and total duration.
+- The header shows live **cost** and total duration.
 
 If you close the page, nothing is lost — reopening replays the full event history and re-attaches to the live stream.
 
@@ -22,7 +25,7 @@ If you close the page, nothing is lost — reopening replays the full event hist
 
 When a run reaches a checkpoint it pauses with an amber **approval banner** naming the checkpoint and presenting the relevant artifacts (e.g. the proposed fix plan). Any project *member* or *admin* can **Approve** (the run resumes where it paused) or **Reject** (the run fails with `approval_rejected`), optionally with a comment. Unattended checkpoints expire after the template's timeout — typically cancelling the run.
 
-The top-bar **Approvals** page is your cross-project inbox: every run waiting on you, in one list.
+The sidebar's **Approvals** page is your cross-project inbox: every pending checkpoint across your projects, grouped by project, with a live count badge on the sidebar entry. Expand **Review** on any row to see the presented artifacts and approve or reject right there — no need to open the run.
 
 ## Cancel, retry, and failures
 

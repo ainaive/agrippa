@@ -4,6 +4,8 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./lib/i18n";
 import "./index.css";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { ThemeProvider } from "./features/theme";
 import { ApiError } from "./lib/api";
 import { router } from "./router";
 
@@ -24,8 +26,13 @@ if (!root) throw new Error("missing #root element");
 
 createRoot(root).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        {/* radix Tooltip requires a provider; the sidebar's rail tooltips render one per button */}
+        <TooltipProvider>
+          <RouterProvider router={router} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </ThemeProvider>
   </StrictMode>,
 );

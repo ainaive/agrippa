@@ -178,6 +178,36 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
       await admin.request(`/api/v1/templates/${head.id}`),
     );
     expect(headAfter.latestPublishedVersionId).not.toBeNull();
+
+    // the latest published version cannot be deprecated (submissions pin it)
+    const guarded = await admin.request(`/api/v1/templates/${head.id}/versions/1/deprecate`, {
+      method: "POST",
+    });
+    expect(guarded.status).toBe(409);
+    expect((await jsonOf<{ code: string }>(guarded)).code).toBe("version_is_latest");
+
+    // publish v2, then v1 becomes deprecatable
+    await admin.request(`/api/v1/templates/${head.id}/versions`, {
+      method: "POST",
+      json: { sourceYaml: customTemplateYaml("swdev.custom-fix") },
+    });
+    await admin.request(`/api/v1/templates/${head.id}/versions/2/publish`, { method: "POST" });
+    const deprecated = await admin.request(`/api/v1/templates/${head.id}/versions/1/deprecate`, {
+      method: "POST",
+    });
+    expect(deprecated.status).toBe(200);
+    expect((await jsonOf<{ status: string }>(deprecated)).status).toBe("deprecated");
+
+    // drafts cannot be deprecated
+    await admin.request(`/api/v1/templates/${head.id}/versions`, {
+      method: "POST",
+      json: { sourceYaml: customTemplateYaml("swdev.custom-fix") },
+    });
+    const notPublished = await admin.request(`/api/v1/templates/${head.id}/versions/3/deprecate`, {
+      method: "POST",
+    });
+    expect(notPublished.status).toBe(409);
+    expect((await jsonOf<{ code: string }>(notPublished)).code).toBe("not_published");
   });
 
   it("validate endpoint dry-runs the compiler", async () => {
@@ -233,8 +263,12 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
     const denied = await member.request("/api/v1/audit-logs");
     expect(denied.status).toBe(403);
 
-    const all = await jsonOf<Array<{ action: string }>>(await admin.request("/api/v1/audit-logs"));
+    const all = await jsonOf<Array<{ action: string; actorEmail: string | null }>>(
+      await admin.request("/api/v1/audit-logs"),
+    );
     expect(all.length).toBeGreaterThan(0);
+    // actor identity is joined in for display
+    expect(all.some((row) => row.actorEmail !== null)).toBe(true);
 
     const filtered = await jsonOf<Array<{ action: string }>>(
       await admin.request("/api/v1/audit-logs?action=project.create"),
