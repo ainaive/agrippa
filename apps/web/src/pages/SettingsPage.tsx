@@ -182,7 +182,7 @@ function MembersSection({ projectId }: { projectId: string }) {
             <SelectItem value="viewer">{t("roles.viewer")}</SelectItem>
           </SelectContent>
         </Select>
-        <Button disabled={!email || add.isPending} onClick={() => add.mutate()}>
+        <Button variant="outline" disabled={!email || add.isPending} onClick={() => add.mutate()}>
           {t("members.add")}
         </Button>
       </div>
@@ -398,7 +398,7 @@ function ReposSection({ projectId }: { projectId: string }) {
             onChange={(e) => setToken(e.target.value)}
           />
         </div>
-        <Button disabled={!url || add.isPending} onClick={() => add.mutate()}>
+        <Button variant="outline" disabled={!url || add.isPending} onClick={() => add.mutate()}>
           {t("repos.add")}
         </Button>
       </div>
