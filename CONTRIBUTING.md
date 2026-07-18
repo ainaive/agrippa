@@ -39,7 +39,7 @@ bun run build                # SPA build
 ## Workflow
 
 - **Branching**: feature-scale work gets a `<type>/<topic>` branch off `main` merged as one reviewable unit; small fixes and doc edits go straight to `main`. Either way the gates must be green first.
-- **Commits**: Conventional Commits (`feat(api): …`, `fix(engine): …`). The subject says *what*; the body (required beyond trivial edits) says *why* — the problem, the decision, the trade-off. No AI-attribution trailers. commitlint enforces the format in CI.
+- **Commits**: Conventional Commits (`feat(api): …`, `fix(engine): …`). The subject says *what*; the body (required beyond trivial edits) says *why* — the problem, the decision, the trade-off. No AI-attribution trailers. commitlint enforces the format in CI (PR merge commits titled `Merge: … (#N)` are exempt; the PR's own commits are linted by the PR-range step).
 - **Docs and tests are part of the change**: new endpoints get integration tests (`apps/api/src/test/`); engine semantics changes extend the compliance suite (`packages/orchestration/src/engine/engine.integration.test.ts`). Update every doc that covers what you touched — the Docs map in [AGENTS.md](AGENTS.md) says what each one tracks — and add a `CHANGELOG.md` entry under `[Unreleased]` for notable changes.
 
 ## Recipes

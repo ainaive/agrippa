@@ -62,7 +62,7 @@ On PR + push to `main` / `feat/**`:
 1. `bun install` (cached)
 2. `biome ci .`
 3. `tsc -b` (project references across packages)
-4. commitlint (Conventional Commits)
+4. commitlint (Conventional Commits; `Merge: …` PR-merge subjects are exempt — the PR's own commits are linted by the PR-range step)
 5. unit tests (`bun test --filter unit` per package)
 6. integration tests with `services: postgres, redis`
 7. build web + api + worker

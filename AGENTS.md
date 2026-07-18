@@ -60,7 +60,7 @@ templates/ builtin agrippa/v1 YAML templates + shared prompts/skills
 
 ## Conventions
 
-- **Commits**: Conventional Commits; the body explains *why* (required beyond trivial edits). No `Co-Authored-By`/AI-attribution lines. `subject-case` is relaxed (proper nouns allowed); commitlint runs in CI.
+- **Commits**: Conventional Commits; the body explains *why* (required beyond trivial edits). No `Co-Authored-By`/AI-attribution lines. `subject-case` is relaxed (proper nouns allowed); commitlint runs in CI. PR merge commits titled `Merge: … (#N)` are exempt — the PR's own commits are linted by the PR-range step.
 - **Formatting/lint**: Biome, one root config; `bun run check` runs the identical commands CI does.
 - **i18n**: every user-facing string has **both** `en` and `zh-CN`. UI copy lives in `packages/i18n/locales/` (a parity test fails CI on missing keys); DB metadata uses `*_i18n` jsonb; template YAML labels require both locales (the compiler rejects otherwise). API error `message` localizes from the `errors` namespace by stable `code`.
 - **Templates**: builtin YAML in `templates/` must pass `bun run templates:validate` (CI gate). Editing a builtin's source publishes the next immutable version on boot; runs pin versions, so this is always safe.
