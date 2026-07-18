@@ -2,29 +2,22 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   Outlet,
   redirect,
 } from "@tanstack/react-router";
+import { Loader2Icon } from "lucide-react";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AdminLayout } from "./pages/admin/AdminLayout";
-import { AuditLogPage } from "./pages/admin/AuditLogPage";
-import { FabriPage } from "./pages/admin/FabriPage";
-import { McpServersPage } from "./pages/admin/McpServersPage";
-import { ModelsPage } from "./pages/admin/ModelsPage";
-import { SkillsPage } from "./pages/admin/SkillsPage";
-import { TemplatesListPage } from "./pages/admin/TemplatesListPage";
 import { CatalogPage } from "./pages/CatalogPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { HomeRedirect } from "./pages/HomeRedirect";
 import { LoginPage } from "./pages/LoginPage";
 import { ProjectLayout } from "./pages/ProjectLayout";
 import { RunDetailPage } from "./pages/RunDetailPage";
-import { SettingsPage } from "./pages/SettingsPage";
 import { Shell } from "./pages/Shell";
 import { SubmitTaskPage } from "./pages/SubmitTaskPage";
 import { TasksPage } from "./pages/TasksPage";
-import { TemplateEditorPage } from "./pages/TemplateEditorPage";
-import { UsagePage } from "./pages/UsagePage";
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> });
 
@@ -71,49 +64,52 @@ const adminIndexRoute = createRoute({
 const adminTemplatesRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/templates",
-  component: TemplatesListPage,
+  component: lazyRouteComponent(
+    () => import("./pages/admin/TemplatesListPage"),
+    "TemplatesListPage",
+  ),
   staticData: { crumb: "nav.templates" },
 });
 
 const templateEditorRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/templates/$templateId",
-  component: TemplateEditorPage,
+  component: lazyRouteComponent(() => import("./pages/TemplateEditorPage"), "TemplateEditorPage"),
   staticData: { crumb: "nav.templates" },
 });
 
 const adminFabriRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/fabri",
-  component: FabriPage,
+  component: lazyRouteComponent(() => import("./pages/admin/FabriPage"), "FabriPage"),
   staticData: { crumb: "nav.fabri" },
 });
 
 const adminModelsRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/models",
-  component: ModelsPage,
+  component: lazyRouteComponent(() => import("./pages/admin/ModelsPage"), "ModelsPage"),
   staticData: { crumb: "nav.models" },
 });
 
 const adminSkillsRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/skills",
-  component: SkillsPage,
+  component: lazyRouteComponent(() => import("./pages/admin/SkillsPage"), "SkillsPage"),
   staticData: { crumb: "nav.skills" },
 });
 
 const adminMcpRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/mcp-servers",
-  component: McpServersPage,
+  component: lazyRouteComponent(() => import("./pages/admin/McpServersPage"), "McpServersPage"),
   staticData: { crumb: "nav.mcp" },
 });
 
 const adminAuditRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/audit",
-  component: AuditLogPage,
+  component: lazyRouteComponent(() => import("./pages/admin/AuditLogPage"), "AuditLogPage"),
   staticData: { crumb: "nav.audit" },
 });
 
@@ -161,14 +157,14 @@ const runRoute = createRoute({
 const usageRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/usage",
-  component: UsagePage,
+  component: lazyRouteComponent(() => import("./pages/UsagePage"), "UsagePage"),
   staticData: { crumb: "nav.usage" },
 });
 
 const settingsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "/settings",
-  component: SettingsPage,
+  component: lazyRouteComponent(() => import("./pages/SettingsPage"), "SettingsPage"),
   staticData: { crumb: "nav.settings" },
 });
 
@@ -199,7 +195,15 @@ const routeTree = rootRoute.addChildren([
   ]),
 ]);
 
-export const router = createRouter({ routeTree });
+function RoutePending() {
+  return (
+    <div className="flex justify-center py-16">
+      <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+    </div>
+  );
+}
+
+export const router = createRouter({ routeTree, defaultPendingComponent: RoutePending });
 
 declare module "@tanstack/react-router" {
   interface Register {

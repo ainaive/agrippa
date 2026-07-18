@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLinkIcon, Loader2Icon } from "lucide-react";
+import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { PatchView } from "@/components/artifacts/PatchView";
+
+const MarkdownContent = lazy(() => import("@/components/artifacts/MarkdownContent"));
+
 import type { Artifact } from "@/lib/types";
 
 const MAX_PREVIEW_BYTES = 256 * 1024;
@@ -56,9 +58,11 @@ export function ArtifactPreview({ artifact }: { artifact: Artifact }) {
   switch (artifact.kind) {
     case "markdown":
       return (
-        <div className="markdown-body max-h-96 overflow-auto rounded-md border bg-card p-4">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-        </div>
+        <Suspense
+          fallback={<Loader2Icon className="my-3 size-4 animate-spin text-muted-foreground" />}
+        >
+          <MarkdownContent text={text} />
+        </Suspense>
       );
     case "patch":
       return <PatchView text={text} />;
