@@ -6,14 +6,19 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-18
+
+The web UI overhaul: a GitLab-style shell with Linear-grade polish and full management surfaces — plus executor security hardening and non-Docker VM deployment.
+
 ### Added
 
 - **Cross-project approvals inbox** — `GET /api/v1/approvals/pending` returns every pending checkpoint in the caller's projects (membership-scoped, with project role). The Approvals page now lists them grouped by project with inline review: presented artifacts preview in place and members can approve/reject without opening the run. The sidebar entry carries a live pending-count badge.
 - **Project usage analytics** — `GET /projects/:id/usage` now also returns `byTaskType` and `byDay` groupings (same monthly window as the quota gate, so all numbers agree), and a new per-project **Usage** page shows spend vs. quota, total tokens, a daily-spend chart, and per-model / per-task-type breakdowns.
 - **Audit log page** — `/admin/audit` surfaces the previously UI-less audit endpoint with project/action filters and expandable payloads; rows now include the joined actor name/email.
 - **Screenshot + browser smoke harness** — `bun scripts/screenshot.ts` (dev tool; Playwright devDependency) boots api/worker/vite on a throwaway database with the fake executor, seeds fixture runs, captures every page in light and dark, and fails on any browser console error — the render-level check that static gates can't provide.
+- **VM deployment without Docker** — `infra/vm/` ships an idempotent Ubuntu 22.04/24.04 installer (Bun, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets), a git-pull `deploy.sh`, and hardened systemd units. The api still migrates + seeds on boot; the worker gates its start on the api's `/healthz` so it never runs against a stale schema. The worker unit deliberately leaves namespaces unrestricted (bubblewrap needs them — the sandbox degrades silently otherwise). Docker Compose and local dev mode are unchanged.
 
-### Changed (web UI overhaul)
+### Changed
 
 - **Route-level code splitting** — admin pages, the template editor (`diff`), Usage, Settings, and the markdown renderer (`react-markdown`) now load on demand; the initial JS chunk drops from 974 kB to 395 kB (no chunk-size warning) with a shared pending spinner for lazy transitions.
 - **Linear-grade refinement** — a custom type ramp replaces the stock Tailwind scale (13px body, 15px card/dialog titles, 18px page titles, 22px stat values; mobile inputs keep 16px for iOS no-zoom), `--radius` tightens to 0.5rem with rounded-rect badges, and chrome goes neutral: hover/selected/active surfaces lose their indigo wash, with brand color reserved for the CTA, focus rings, links, progress, and the logo.
@@ -25,10 +30,9 @@ All notable changes to Agrippa are documented here. The format follows
 - **Template editor** — version browser (open any version; edits fork into the next draft), client-side diff between any two versions, and publish/deprecate with confirmation. New `POST /templates/:id/versions/:version/deprecate` refuses the latest published version (409) so submissions never break.
 - **Project settings** — vertical section nav with a new General section (rename/description) and a confirmed archive danger zone; member/repo removal now confirms; feedback is toast-based.
 - **Dashboard, catalog, tasks, submit** — stat tiles with a quota meter and pending-approvals link, searchable catalog, task list filters, two-column submission with a sticky Faber/version/budget summary, and skeleton/empty states throughout.
-
-### Added
-
-- **VM deployment without Docker** — `infra/vm/` ships an idempotent Ubuntu 22.04/24.04 installer (Bun, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets), a git-pull `deploy.sh`, and hardened systemd units. The api still migrates + seeds on boot; the worker gates its start on the api's `/healthz` so it never runs against a stale schema. The worker unit deliberately leaves namespaces unrestricted (bubblewrap needs them — the sandbox degrades silently otherwise). Docker Compose and local dev mode are unchanged.
+- **Dependency updates** — `lucide-react` 1.24 → 1.25, and `@commitlint/cli` / `@commitlint/config-conventional` 19 → 21 (dev-only, CI). Every runtime dependency was already current.
+- **Vite 8 + @vitejs/plugin-react 6** — Vite 8 makes **Rolldown** the default bundler (replacing esbuild-for-dev + Rollup-for-build), with Oxc for transforms and Lightning CSS for minification; `apps/web/vite.config.ts` needed no changes, and the SPA bundle got slightly smaller (612 kB / 187 kB gzip, from 622 kB / 195 kB) while the production build dropped from ~2.0s to ~0.36s. The two packages move together because `@vitejs/plugin-react@6` requires `vite: ^8` — v6 also drops Babel entirely (React Refresh and JSX now run through Oxc), which is a no-op here since we pass no `babel` options. **Note for consumers:** Vite 8 raises the default `build.target` — Chrome 107 → 111, Firefox 104 → 114, Safari 16.0 → 16.4. `@tailwindcss/vite` already supported Vite 8 and was unchanged.
+- **TypeScript 7** — the Go-native compiler rewrite, replacing 5.9. `tsc -b` across all ten composite projects, `${configDir}` resolution, and `declaration`/`declarationMap` emit were all verified against the real build. The headline breaking change — 7.0 ships **no compiler API** (the main export is now just `version`; the real API moved to `typescript/unstable/*`, with a stable API expected in 7.1) — does not affect us: nothing in the repo or its dependency tree imports `typescript` as a library. **Note for contributors:** 7.0 also ships no `tsserver`. Nothing in the repo pins an editor SDK, so CI and `bun run check` are unaffected, but an editor configured to "use workspace TypeScript version" will need `@typescript/typescript6` for its language server while `tsc -b` stays on 7.
 
 ### Security
 
@@ -54,12 +58,6 @@ All notable changes to Agrippa are documented here. The format follows
 - **SSE live gap** — the events stream subscribes and *awaits* the subscription being live before replaying, and treats the bus purely as a **wake-up** that triggers an ordered Postgres replay — so the cursor advances contiguously and a dropped event can't be skipped past (even on `Last-Event-ID` reconnect) (ADR-0007).
 - **Production Compose** — split into a worker-only `workspaces` volume and a shared `artifacts` volume; the `api` runs as the non-root `bun` user and mounts only `artifacts` (consistent ownership whichever service initializes it) and receives `AGRIPPA_EXECUTOR` (the API chooses the executor at submit).
 
-### Changed
-
-- **Dependency updates** — `lucide-react` 1.24 → 1.25, and `@commitlint/cli` / `@commitlint/config-conventional` 19 → 21 (dev-only, CI). Every runtime dependency was already current.
-- **Vite 8 + @vitejs/plugin-react 6** — Vite 8 makes **Rolldown** the default bundler (replacing esbuild-for-dev + Rollup-for-build), with Oxc for transforms and Lightning CSS for minification; `apps/web/vite.config.ts` needed no changes, and the SPA bundle got slightly smaller (612 kB / 187 kB gzip, from 622 kB / 195 kB) while the production build dropped from ~2.0s to ~0.36s. The two packages move together because `@vitejs/plugin-react@6` requires `vite: ^8` — v6 also drops Babel entirely (React Refresh and JSX now run through Oxc), which is a no-op here since we pass no `babel` options. **Note for consumers:** Vite 8 raises the default `build.target` — Chrome 107 → 111, Firefox 104 → 114, Safari 16.0 → 16.4. `@tailwindcss/vite` already supported Vite 8 and was unchanged.
-- **TypeScript 7** — the Go-native compiler rewrite, replacing 5.9. `tsc -b` across all ten composite projects, `${configDir}` resolution, and `declaration`/`declarationMap` emit were all verified against the real build. The headline breaking change — 7.0 ships **no compiler API** (the main export is now just `version`; the real API moved to `typescript/unstable/*`, with a stable API expected in 7.1) — does not affect us: nothing in the repo or its dependency tree imports `typescript` as a library. **Note for contributors:** 7.0 also ships no `tsserver`. Nothing in the repo pins an editor SDK, so CI and `bun run check` are unaffected, but an editor configured to "use workspace TypeScript version" will need `@typescript/typescript6` for its language server while `tsc -b` stays on 7.
-
 ## [0.1.0] — 2026-07-17
 
 The M1 milestone: all three layers of the platform, working end to end.
@@ -72,5 +70,6 @@ The M1 milestone: all three layers of the platform, working end to end.
 - **Executors** — the pluggable `Executor` contract (ADR-0005) with a FakeExecutor compliance suite; the Claude Agent SDK executor (subagents, skills, MCP, resume, workspace-scoped tool policy, artifact convention); a token-free demo executor.
 - **Platform** — better-auth with org/project RBAC and audit on every mutation, AES-256-GCM secrets store with write-only credentials, localized API errors, usage reporting, git workspaces with credential scrubbing, production Docker images + compose stack + GHCR release workflow.
 
-[Unreleased]: https://github.com/ainaive/agrippa/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ainaive/agrippa/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ainaive/agrippa/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ainaive/agrippa/releases/tag/v0.1.0
