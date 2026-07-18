@@ -46,7 +46,10 @@
     "commentPlaceholder": "备注（可选）…",
     "approve": "批准",
     "reject": "驳回",
-    "presented": "呈现的产出物"
+    "presented": "呈现的产出物",
+    "loadingArtifacts": "正在加载呈现的产出物…",
+    "artifactsUnavailable": "呈现的产出物加载失败——请谨慎审阅；仍可驳回。",
+    "artifactMissing": "未产出"
   },
   "approvalsInbox": {
     "title": "待办审批",

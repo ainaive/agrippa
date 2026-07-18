@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { clearLastProjectId } from "../features/lastProject";
 import { api } from "../lib/api";
 import { lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
@@ -69,6 +70,7 @@ function GeneralSection({ projectId }: { projectId: string }) {
     mutationFn: () => api(`/projects/${projectId}`, { method: "DELETE" }),
     onSuccess: async () => {
       toast.success(t("settings:general.archived"));
+      clearLastProjectId(); // or HomeRedirect bounces straight back here
       await queryClient.invalidateQueries({ queryKey: ["me"] });
       void navigate({ to: "/" });
     },

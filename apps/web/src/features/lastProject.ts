@@ -7,3 +7,7 @@ export function getLastProjectId(): string | null {
 export function setLastProjectId(projectId: string) {
   localStorage.setItem(STORAGE_KEY, projectId);
 }
+
+export function clearLastProjectId() {
+  localStorage.removeItem(STORAGE_KEY);
+}

@@ -19,7 +19,9 @@ export function HomeRedirect() {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
 
-  const target = me.projects.find((p) => p.projectId === getLastProjectId()) ?? me.projects[0];
+  // archived memberships still appear in /me — never land the user in one
+  const active = me.projects.filter((p) => p.status === "active");
+  const target = active.find((p) => p.projectId === getLastProjectId()) ?? active[0];
   useEffect(() => {
     if (target) {
       void navigate({ to: "/projects/$projectId", params: { projectId: target.projectId } });

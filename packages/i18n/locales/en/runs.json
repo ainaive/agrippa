@@ -46,7 +46,10 @@
     "commentPlaceholder": "Optional comment…",
     "approve": "Approve",
     "reject": "Reject",
-    "presented": "Presented artifacts"
+    "presented": "Presented artifacts",
+    "loadingArtifacts": "Loading presented artifacts…",
+    "artifactsUnavailable": "Presented artifacts could not be loaded — review with care; rejecting is still possible.",
+    "artifactMissing": "not produced"
   },
   "approvalsInbox": {
     "title": "Pending approvals",

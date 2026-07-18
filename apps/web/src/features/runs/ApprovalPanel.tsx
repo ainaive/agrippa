@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CirclePauseIcon } from "lucide-react";
+import { CirclePauseIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -20,11 +20,14 @@ export function ApprovalPanel({
   runId,
   approval,
   artifacts,
+  artifactsStatus,
   onDecided,
 }: {
   runId: string;
   approval: Approval;
   artifacts: Artifact[];
+  /** Status of the artifacts query — evidence must load before approving. */
+  artifactsStatus: "pending" | "error" | "success";
   onDecided?: () => void;
 }) {
   const { t } = useTranslation(["runs", "common"]);
@@ -48,9 +51,16 @@ export function ApprovalPanel({
     },
   });
 
-  const presented = (approval.payload.present ?? [])
-    .map((key) => artifacts.find((a) => a.artifactKey === key))
-    .filter((a): a is Artifact => a !== undefined);
+  const presentKeys = approval.payload.present ?? [];
+  const presented = presentKeys.map((key) => ({
+    key,
+    artifact: artifacts.find((a) => a.artifactKey === key),
+  }));
+  // Evidence gating only matters when the checkpoint presents something:
+  // while it loads, no decision; if it failed, approving blind is forbidden
+  // but rejecting must stay possible or a broken run deadlocks its checkpoint.
+  const evidencePending = presentKeys.length > 0 && artifactsStatus === "pending";
+  const evidenceFailed = presentKeys.length > 0 && artifactsStatus === "error";
 
   return (
     <Card className="border-status-warning/40 bg-status-warning/5">
@@ -62,17 +72,35 @@ export function ApprovalPanel({
       </CardHeader>
       <CardContent className="space-y-3">
         <p className="text-sm text-muted-foreground">{t("runs:approval.hint")}</p>
-        {presented.length > 0 ? (
+        {evidencePending ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2Icon className="size-4 animate-spin" />
+            {t("runs:approval.loadingArtifacts")}
+          </p>
+        ) : evidenceFailed ? (
+          <p className="flex items-center gap-2 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-sm">
+            <TriangleAlertIcon className="size-4 shrink-0 text-status-warning" />
+            {t("runs:approval.artifactsUnavailable")}
+          </p>
+        ) : presented.length > 0 ? (
           <div className="space-y-3">
             <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
               {t("runs:approval.presented")}
             </p>
-            {presented.map((artifact) => (
-              <div key={artifact.id}>
-                <p className="mb-1 text-sm font-medium">{artifact.artifactKey}</p>
-                <ArtifactPreview artifact={artifact} />
-              </div>
-            ))}
+            {presented.map(({ key, artifact }) =>
+              artifact ? (
+                <div key={key}>
+                  <p className="mb-1 text-sm font-medium">{artifact.artifactKey}</p>
+                  <ArtifactPreview artifact={artifact} />
+                </div>
+              ) : (
+                <p key={key} className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <TriangleAlertIcon className="size-4 shrink-0 text-status-warning" />
+                  <span className="font-medium">{key}</span>
+                  {t("runs:approval.artifactMissing")}
+                </p>
+              ),
+            )}
           </div>
         ) : null}
         <Textarea
@@ -82,13 +110,17 @@ export function ApprovalPanel({
           onChange={(e) => setComment(e.target.value)}
         />
         <div className="flex gap-2">
-          <Button size="sm" disabled={decide.isPending} onClick={() => decide.mutate("approved")}>
+          <Button
+            size="sm"
+            disabled={decide.isPending || evidencePending || evidenceFailed}
+            onClick={() => decide.mutate("approved")}
+          >
             {t("runs:approval.approve")}
           </Button>
           <Button
             size="sm"
             variant="destructive"
-            disabled={decide.isPending}
+            disabled={decide.isPending || evidencePending}
             onClick={() => decide.mutate("rejected")}
           >
             {t("runs:approval.reject")}

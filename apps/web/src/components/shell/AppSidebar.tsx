@@ -24,6 +24,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { getLastProjectId } from "@/features/lastProject";
 import { useMe } from "@/features/me";
@@ -34,13 +35,18 @@ export function AppSidebar({ currentProjectId }: { currentProjectId: string | nu
   const me = useMe();
   const matchRoute = useMatchRoute();
   const pendingApprovals = usePendingApprovals().data?.length ?? 0;
+  const { isMobile, setOpenMobile } = useSidebar();
+  const closeMobile = () => {
+    if (isMobile) setOpenMobile(false);
+  };
 
   // Keep project navigation visible while on org-level pages (approvals, admin)
   // by falling back to the last-visited project, GitLab-context style.
+  const active = me.projects.filter((p) => p.status === "active");
   const membership =
-    me.projects.find((p) => p.projectId === currentProjectId) ??
-    me.projects.find((p) => p.projectId === getLastProjectId()) ??
-    me.projects[0] ??
+    me.projects.find((p) => p.projectId === currentProjectId) ?? // even archived: it's on screen
+    active.find((p) => p.projectId === getLastProjectId()) ??
+    active[0] ??
     null;
 
   return (
@@ -49,7 +55,7 @@ export function AppSidebar({ currentProjectId }: { currentProjectId: string | nu
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton asChild size="lg" tooltip={t("appName")}>
-              <Link to="/">
+              <Link to="/" onClick={closeMobile}>
                 <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
                   <HammerIcon className="size-4" />
                 </div>
@@ -81,7 +87,11 @@ export function AppSidebar({ currentProjectId }: { currentProjectId: string | nu
                           }),
                         )}
                       >
-                        <Link to={item.to} params={{ projectId: membership.projectId }}>
+                        <Link
+                          to={item.to}
+                          params={{ projectId: membership.projectId }}
+                          onClick={closeMobile}
+                        >
                           <item.icon />
                           <span>{t(`nav.${item.key}`)}</span>
                         </Link>
@@ -102,7 +112,7 @@ export function AppSidebar({ currentProjectId }: { currentProjectId: string | nu
                   tooltip={t("nav.approvals")}
                   isActive={Boolean(matchRoute({ to: "/approvals" }))}
                 >
-                  <Link to="/approvals">
+                  <Link to="/approvals" onClick={closeMobile}>
                     <CircleCheckBigIcon />
                     <span>{t("nav.approvals")}</span>
                   </Link>
@@ -128,7 +138,7 @@ export function AppSidebar({ currentProjectId }: { currentProjectId: string | nu
                       tooltip={t(`nav.${item.key}`)}
                       isActive={Boolean(matchRoute({ to: item.to, fuzzy: true }))}
                     >
-                      <Link to={item.to}>
+                      <Link to={item.to} onClick={closeMobile}>
                         <item.icon />
                         <span>{t(`nav.${item.key}`)}</span>
                       </Link>

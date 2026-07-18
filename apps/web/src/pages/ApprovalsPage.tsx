@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { QueryErrorState } from "@/components/QueryErrorState";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -29,7 +30,14 @@ function InlineDecision({ item }: { item: PendingApproval }) {
     requestedAt: item.requestedAt,
     comment: null,
   };
-  return <ApprovalPanel runId={item.runId} approval={approval} artifacts={artifacts.data ?? []} />;
+  return (
+    <ApprovalPanel
+      runId={item.runId}
+      approval={approval}
+      artifacts={artifacts.data ?? []}
+      artifactsStatus={artifacts.status}
+    />
+  );
 }
 
 function InboxRow({ item }: { item: PendingApproval }) {
@@ -92,6 +100,8 @@ export function ApprovalsPage() {
       <PageHeader title={t("approvalsInbox.title")} />
       {pending.isLoading ? (
         <TableSkeleton rows={3} />
+      ) : pending.isError ? (
+        <QueryErrorState onRetry={() => void pending.refetch()} />
       ) : (pending.data ?? []).length === 0 ? (
         <EmptyState icon={CircleCheckBigIcon} title={t("approvalsInbox.empty")} />
       ) : (

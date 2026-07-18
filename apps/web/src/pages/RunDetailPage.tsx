@@ -177,7 +177,12 @@ export function RunDetailPage() {
       )}
 
       {pendingApproval && (
-        <ApprovalPanel runId={runId} approval={pendingApproval} artifacts={artifacts.data ?? []} />
+        <ApprovalPanel
+          runId={runId}
+          approval={pendingApproval}
+          artifacts={artifacts.data ?? []}
+          artifactsStatus={artifacts.status}
+        />
       )}
 
       <div className="grid items-start gap-4 lg:grid-cols-[340px_1fr]">
