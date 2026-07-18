@@ -15,6 +15,8 @@ export type ProjectUsage = {
     tokens: number;
   }>;
   byDay: Array<{ day: string; costUsd: number; tokens: number }>;
+  /** Month window boundaries from the database clock — the same calendar byDay is grouped in. */
+  period: { start: string; today: string };
 };
 
 /**
@@ -57,6 +59,13 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
     .where(where)
     .groupBy(taskTypes.id, taskTypes.nameI18n);
 
+  const [period] = await db
+    .select({
+      start: sql<string>`to_char(date_trunc('month', now()), 'YYYY-MM-DD')`,
+      today: sql<string>`to_char(now(), 'YYYY-MM-DD')`,
+    })
+    .from(sql`(select 1) as clock`);
+
   const byDay = await db
     .select({
       day: sql<string>`to_char(date_trunc('day', ${tokenUsage.occurredAt}), 'YYYY-MM-DD')`,
@@ -87,6 +96,7 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
       costUsd: Number(row.cost),
       tokens: Number(row.tokens),
     })),
+    period: { start: period?.start ?? "", today: period?.today ?? "" },
   };
 }
 

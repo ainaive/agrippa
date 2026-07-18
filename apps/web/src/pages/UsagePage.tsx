@@ -24,24 +24,37 @@ type Usage = {
     tokens: number;
   }>;
   byDay: Array<{ day: string; costUsd: number; tokens: number }>;
+  period: { start: string; today: string };
 };
 
-/** Month-to-date day keys (YYYY-MM-DD, local) so zero-usage days keep time linear. */
-function monthToDateDays(): string[] {
-  const now = new Date();
+/**
+ * Day keys from period.start to period.today inclusive, so zero-usage days
+ * keep time linear. Both bounds come from the database clock — the browser's
+ * timezone plays no part. Date.UTC here is inert string arithmetic.
+ */
+function periodDays(period: { start: string; today: string }): string[] {
+  const parse = (value: string) => {
+    const [y, m, d] = value.split("-").map(Number);
+    return Date.UTC(y ?? 1970, (m ?? 1) - 1, d ?? 1);
+  };
   const days: string[] = [];
-  for (let d = 1; d <= now.getDate(); d++) {
-    const date = new Date(now.getFullYear(), now.getMonth(), d);
-    days.push(
-      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
-    );
+  for (let ts = parse(period.start); ts <= parse(period.today); ts += 86_400_000) {
+    days.push(new Date(ts).toISOString().slice(0, 10));
   }
   return days;
 }
 
 /** Single-series daily bars: one hue, muted baseline, rounded data-ends, hover titles. */
-function DailyBars({ byDay, label }: { byDay: Usage["byDay"]; label: string }) {
-  const days = monthToDateDays();
+function DailyBars({
+  byDay,
+  period,
+  label,
+}: {
+  byDay: Usage["byDay"];
+  period: Usage["period"];
+  label: string;
+}) {
+  const days = periodDays(period);
   const byKey = new Map(byDay.map((row) => [row.day, row]));
   const max = Math.max(...byDay.map((row) => row.costUsd), 0.000001);
 
@@ -166,10 +179,16 @@ export function UsagePage() {
   if (!data) return null;
 
   const costLimit = quota.data?.costLimitUsd ? Number(quota.data.costLimitUsd) : null;
-  const period = new Date().toLocaleDateString(i18n.language, {
-    year: "numeric",
-    month: "long",
-  });
+  // header label from the database's month, not the browser's
+  const [py, pm] = (data?.period.start ?? "").split("-").map(Number);
+  const period =
+    py && pm
+      ? new Date(Date.UTC(py, pm - 1, 1)).toLocaleDateString(i18n.language, {
+          year: "numeric",
+          month: "long",
+          timeZone: "UTC",
+        })
+      : "";
 
   return (
     <div className="space-y-6">
@@ -215,7 +234,7 @@ export function UsagePage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <DailyBars byDay={data.byDay} label={t("usage:daily")} />
+              <DailyBars byDay={data.byDay} period={data.period} label={t("usage:daily")} />
             </CardContent>
           </Card>
 

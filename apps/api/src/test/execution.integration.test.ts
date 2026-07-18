@@ -295,6 +295,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       byModel: Array<{ model: string; tokens: number }>;
       byTaskType: Array<{ taskTypeNameI18n: Record<string, string> | null; tokens: number }>;
       byDay: Array<{ day: string; tokens: number }>;
+      period: { start: string; today: string };
     }>(await viewer.request(`/api/v1/projects/${projectId}/usage`));
     // the fake executor recorded 500+200 and 800+300 tokens
     expect(usage.tokens).toBe(1800);
@@ -304,6 +305,10 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(usage.byDay).toHaveLength(1);
     expect(usage.byDay[0]?.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(usage.byDay[0]?.tokens).toBe(1800);
+    // period bounds come from the same DB clock that grouped byDay
+    expect(usage.period.start).toMatch(/^\d{4}-\d{2}-01$/);
+    expect((usage.byDay[0]?.day as string) >= usage.period.start).toBe(true);
+    expect((usage.byDay[0]?.day as string) <= usage.period.today).toBe(true);
   });
 
   it("replays the full event log over SSE, honoring Last-Event-ID", async () => {
