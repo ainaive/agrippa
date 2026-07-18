@@ -9,6 +9,7 @@ import { PatchView } from "@/components/artifacts/PatchView";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { QueryErrorState } from "@/components/QueryErrorState";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -208,6 +209,7 @@ export function TemplateEditorPage() {
     onError: toastApiError,
   });
 
+  if (template.isError) return <QueryErrorState onRetry={() => void template.refetch()} />;
   if (!template.data) return <DetailSkeleton />;
 
   return (

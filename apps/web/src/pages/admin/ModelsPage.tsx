@@ -241,7 +241,12 @@ export function ModelsPage() {
                     <StatusBadge status={model.status} />
                   </TableCell>
                   <TableCell>
-                    <Button size="icon-sm" variant="ghost" onClick={() => openDialog(model)}>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={t("common:actions.edit")}
+                      onClick={() => openDialog(model)}
+                    >
                       <PencilIcon />
                     </Button>
                   </TableCell>

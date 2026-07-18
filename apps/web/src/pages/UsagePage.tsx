@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { QueryErrorState } from "@/components/QueryErrorState";
 import { StatCard } from "@/components/StatCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -17,6 +18,7 @@ type Usage = {
   tokens: number;
   byModel: Array<{ model: string; costUsd: number; tokens: number }>;
   byTaskType: Array<{
+    taskTypeId: string | null;
     taskTypeNameI18n: Record<string, string> | null;
     costUsd: number;
     tokens: number;
@@ -107,7 +109,7 @@ function BreakdownCard({
   rows,
 }: {
   title: string;
-  rows: Array<{ label: string; costUsd: number; tokens: number }>;
+  rows: Array<{ key: string; label: string; costUsd: number; tokens: number }>;
 }) {
   const { t } = useTranslation("usage");
   const max = Math.max(...rows.map((row) => row.costUsd), 0.000001);
@@ -121,7 +123,7 @@ function BreakdownCard({
           <p className="text-sm text-muted-foreground">{t("empty")}</p>
         ) : (
           rows.map((row) => (
-            <div key={row.label} className="space-y-1">
+            <div key={row.key} className="space-y-1">
               <div className="flex items-baseline justify-between gap-2 text-sm">
                 <span className="min-w-0 truncate">{row.label}</span>
                 <span className="shrink-0 font-medium tabular-nums">
@@ -159,6 +161,7 @@ export function UsagePage() {
   });
 
   if (usage.isLoading) return <DetailSkeleton />;
+  if (usage.isError) return <QueryErrorState onRetry={() => void usage.refetch()} />;
   const data = usage.data;
   if (!data) return null;
 
@@ -172,7 +175,7 @@ export function UsagePage() {
     <div className="space-y-6">
       <PageHeader title={t("usage:title")} description={t("usage:period", { period })} />
 
-      {data.tokens === 0 ? (
+      {data.tokens === 0 && data.costUsd === 0 ? (
         <EmptyState icon={BarChart3Icon} title={t("usage:noUsage")} />
       ) : (
         <>
@@ -220,6 +223,7 @@ export function UsagePage() {
             <BreakdownCard
               title={t("usage:byModel")}
               rows={data.byModel.map((row) => ({
+                key: row.model,
                 label: row.model,
                 costUsd: row.costUsd,
                 tokens: row.tokens,
@@ -228,6 +232,7 @@ export function UsagePage() {
             <BreakdownCard
               title={t("usage:byTaskType")}
               rows={data.byTaskType.map((row) => ({
+                key: row.taskTypeId ?? "unknown",
                 label: row.taskTypeNameI18n ? lt(row.taskTypeNameI18n) : "—",
                 costUsd: row.costUsd,
                 tokens: row.tokens,

@@ -216,11 +216,15 @@ export const templateRoutes = new Hono<AppEnv>()
         "The latest published version cannot be deprecated; publish a newer version first",
       );
     }
+    // conditional on status so a concurrent transition can't be clobbered
     const [deprecated] = await db
       .update(templateVersions)
       .set({ status: "deprecated" })
-      .where(eq(templateVersions.id, row.id))
+      .where(and(eq(templateVersions.id, row.id), eq(templateVersions.status, "published")))
       .returning();
+    if (!deprecated) {
+      throw AppError.conflict("not_published", "Version changed state concurrently");
+    }
     await audit(c, {
       action: "template.version.deprecate",
       resourceType: "template_version",

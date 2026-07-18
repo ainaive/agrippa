@@ -179,7 +179,12 @@ export function FabriPage() {
                     </span>
                   </span>
                 </CardTitle>
-                <Button size="icon-sm" variant="ghost" onClick={() => openDialog(faber)}>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={t("common:actions.edit")}
+                  onClick={() => openDialog(faber)}
+                >
                   <PencilIcon />
                 </Button>
               </CardHeader>

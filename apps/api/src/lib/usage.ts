@@ -8,7 +8,12 @@ export type ProjectUsage = {
   costUsd: number;
   tokens: number;
   byModel: Array<{ model: string; costUsd: number; tokens: number }>;
-  byTaskType: Array<{ taskTypeNameI18n: LocalizedText | null; costUsd: number; tokens: number }>;
+  byTaskType: Array<{
+    taskTypeId: string | null;
+    taskTypeNameI18n: LocalizedText | null;
+    costUsd: number;
+    tokens: number;
+  }>;
   byDay: Array<{ day: string; costUsd: number; tokens: number }>;
 };
 
@@ -37,8 +42,10 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
     .where(where)
     .groupBy(models.displayName);
 
+  // grouped by id, not display name — two task types may share a name
   const byTaskType = await db
     .select({
+      taskTypeId: taskTypes.id,
       nameI18n: taskTypes.nameI18n,
       cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
       tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
@@ -48,7 +55,7 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
     .leftJoin(tasks, eq(runs.taskId, tasks.id))
     .leftJoin(taskTypes, eq(tasks.taskTypeId, taskTypes.id))
     .where(where)
-    .groupBy(taskTypes.nameI18n);
+    .groupBy(taskTypes.id, taskTypes.nameI18n);
 
   const byDay = await db
     .select({
@@ -70,6 +77,7 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
       tokens: Number(row.tokens),
     })),
     byTaskType: byTaskType.map((row) => ({
+      taskTypeId: row.taskTypeId ?? null,
       taskTypeNameI18n: (row.nameI18n as LocalizedText | null) ?? null,
       costUsd: Number(row.cost),
       tokens: Number(row.tokens),

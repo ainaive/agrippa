@@ -95,7 +95,9 @@ export function PhaseTimeline({
     attemptCounts.set(row.stepId, Math.max(attemptCounts.get(row.stepId) ?? 0, row.attempt));
   }
 
-  if (groups.length === 0 || steps.length === 0) {
+  // A queued run with a template embed has groups but no steps yet — still
+  // show the planned phases (each renders "Not started yet") and checkpoints.
+  if (groups.length === 0) {
     return <p className="text-sm text-muted-foreground">{t("noSteps")}</p>;
   }
 

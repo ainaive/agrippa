@@ -35,6 +35,7 @@ type AuditRow = {
 type ProjectRow = { id: string; name: string };
 
 function AuditRowItem({ row, projectName }: { row: AuditRow; projectName?: string }) {
+  const { t } = useTranslation("common");
   const hasPayload = Object.keys(row.payload ?? {}).length > 0;
   return (
     <Collapsible>
@@ -55,7 +56,12 @@ function AuditRowItem({ row, projectName }: { row: AuditRow; projectName?: strin
         </div>
         {hasPayload ? (
           <CollapsibleTrigger asChild>
-            <Button size="icon-sm" variant="ghost" className="group/trigger">
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              className="group/trigger"
+              aria-label={t("actions.expand")}
+            >
               <ChevronDownIcon className="transition-transform group-data-[state=open]/trigger:rotate-180" />
             </Button>
           </CollapsibleTrigger>

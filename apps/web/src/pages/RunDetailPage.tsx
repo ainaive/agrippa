@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 import { ArtifactPreview, isPreviewable } from "@/components/artifacts/ArtifactPreview";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
+import { QueryErrorState } from "@/components/QueryErrorState";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -112,6 +113,7 @@ export function RunDetailPage() {
     },
   });
 
+  if (run.isError) return <QueryErrorState onRetry={() => void run.refetch()} />;
   if (!run.data) return <DetailSkeleton />;
   const current = run.data;
   const pendingApproval = (approvals.data ?? []).find((a) => a.status === "pending");

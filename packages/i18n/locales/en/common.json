@@ -47,7 +47,11 @@
     "close": "Close",
     "retry": "Retry",
     "copy": "Copy",
-    "search": "Search"
+    "search": "Search",
+    "expand": "Expand"
+  },
+  "error": {
+    "title": "Couldn't load this page"
   },
   "feedback": {
     "saved": "Changes saved",

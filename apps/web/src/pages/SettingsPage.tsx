@@ -212,7 +212,12 @@ function MembersSection({ projectId }: { projectId: string }) {
                   <SelectItem value="viewer">{t("roles.viewer")}</SelectItem>
                 </SelectContent>
               </Select>
-              <Button size="icon-sm" variant="ghost" onClick={() => setRemoving(member)}>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                aria-label={t("members.remove")}
+                onClick={() => setRemoving(member)}
+              >
                 <XIcon />
               </Button>
             </div>
@@ -412,7 +417,12 @@ function ReposSection({ projectId }: { projectId: string }) {
                 {repo.defaultBranch} · {repo.hasCredential ? t("repos.private") : t("repos.public")}
               </p>
             </div>
-            <Button size="icon-sm" variant="ghost" onClick={() => setRemoving(repo)}>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={t("repos.remove")}
+              onClick={() => setRemoving(repo)}
+            >
               <XIcon />
             </Button>
           </li>

@@ -15,7 +15,9 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { type Browser, chromium } from "playwright";
 
-const DB_NAME = "agrippa_shot";
+// per-run name: never drops a database this run didn't create, and two
+// harness runs can't stomp each other's data
+const DB_NAME = `agrippa_shot_${process.pid}`;
 const PG = process.env.SHOT_PG_URL ?? "postgres://localhost:5432";
 const API = "http://localhost:3000";
 const WEB = "http://localhost:5173";
@@ -237,6 +239,12 @@ async function capture(browser: Browser, f: Fixtures) {
     if (anon) {
       await anon.addInitScript(`localStorage.setItem("agrippa.theme", "${theme}")`);
       const loginPage = await anon.newPage();
+      loginPage.on("console", (msg) => {
+        if (msg.type() === "error" && !IGNORED_CONSOLE.some((re) => re.test(msg.text()))) {
+          errors.push(`[${theme}] login console: ${msg.text()}`);
+        }
+      });
+      loginPage.on("pageerror", (err) => errors.push(`[${theme}] login pageerror: ${err.message}`));
       await loginPage.goto(`${WEB}/login`, { waitUntil: "domcontentloaded" });
       await loginPage.waitForTimeout(800);
       await loginPage.screenshot({ path: path.join(outDir, `${theme}-login.png`), fullPage: true });
@@ -294,9 +302,12 @@ try {
   if (errors.length > 0) {
     console.error(`\n✗ ${errors.length} browser error(s):`);
     for (const error of errors) console.error(`  ${error}`);
-    process.exit(1);
+    // exitCode, not process.exit(): exit() would skip the finally cleanup and
+    // leave the app processes and scratch database behind
+    process.exitCode = 1;
+  } else {
+    console.log("✓ all pages captured with no browser errors");
   }
-  console.log("✓ all pages captured with no browser errors");
 } finally {
   await cleanup();
 }

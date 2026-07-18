@@ -47,7 +47,11 @@
     "close": "关闭",
     "retry": "重试",
     "copy": "复制",
-    "search": "搜索"
+    "search": "搜索",
+    "expand": "展开"
+  },
+  "error": {
+    "title": "页面加载失败"
   },
   "feedback": {
     "saved": "已保存",

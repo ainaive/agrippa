@@ -220,7 +220,12 @@ export function McpServersPage() {
               <Badge variant={server.hasAuth ? "secondary" : "outline"}>
                 {server.hasAuth ? t("admin:mcp.authed") : t("admin:mcp.noAuth")}
               </Badge>
-              <Button size="icon-sm" variant="ghost" onClick={() => openDialog(server)}>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                aria-label={t("common:actions.edit")}
+                onClick={() => openDialog(server)}
+              >
                 <PencilIcon />
               </Button>
             </div>
