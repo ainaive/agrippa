@@ -2,6 +2,14 @@
 FROM oven/bun:1.3
 WORKDIR /app
 
+# Optional: swap Debian apt to a closer mirror (e.g. https://mirrors.aliyun.com
+# from a CN host) so the apt-get below doesn't crawl deb.debian.org. No-op when
+# unset. The base image is Debian (trixie), which uses deb822 sources.
+ARG APT_MIRROR=
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s|deb.debian.org|$APT_MIRROR|g" /etc/apt/sources.list.d/debian.sources; \
+    fi
+
 # git for run workspaces (clone/diff); ripgrep helps agent search; bubblewrap
 # backs the SDK command sandbox (without it, sandboxing silently degrades)
 RUN apt-get update \

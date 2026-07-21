@@ -39,6 +39,7 @@ infra/docker-compose.yml
 | `WORKSPACE_ROOT` | per-run workspaces volume (default `/work/runs`) |
 | `ARTIFACT_STORAGE_ROOT` | large-artifact volume |
 | `WORKER_EGRESS_ALLOWLIST` | optional outbound-network restriction for agent Bash |
+| `APT_MIRROR` | optional **build-time** mirror for the worker image's apt packages (e.g. `https://mirrors.aliyun.com` from a host where `deb.debian.org` is slow/blocked); no-op when empty |
 
 Secrets policy: provider API keys and the master key live only in `api`/`worker` env (compose `env_file`), never in the DB; user-registered credentials (git tokens, MCP auth) live encrypted in the `secrets` table keyed by `AGRIPPA_SECRET_KEY`.
 
