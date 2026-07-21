@@ -7,6 +7,9 @@ Hono server (`apps/api`), REST under `/api/v1`, request/response validation via 
 ## Authentication
 
 - **M1**: email + password (better-auth), session cookies for the SPA. SSO/OIDC is a later drop-in (better-auth plugin).
+- **Invite-only onboarding; self-registration is closed.** `POST /api/auth/sign-up/*` is guarded in `apps/api/src/app.ts` and returns `403 registration_closed` (localized). The only ways a user joins the org:
+  - **Bootstrap admin** — `bun --env-file=../../.env.local apps/api/src/cli/bootstrap-admin.ts` reads `AGRIPPA_BOOTSTRAP_EMAIL` / `AGRIPPA_BOOTSTRAP_PASSWORD` and creates the first `org_admin` (idempotent on email). The password is hashed with better-auth's `hashPassword`, so the account signs in via the normal `/api/auth/sign-in/email` flow.
+  - **Invitation** — an `org_admin` calls `POST /api/v1/invitations` with an email; the system returns a one-time `?token=…` link (the token is stored **hashed** — sha256 — so a DB leak can't be replayed). The invitee opens `/accept-invite?token=…` (public, no session), sets name + password; `POST /api/auth/accept-invite` validates the token, creates the `users` + `accounts` rows directly (again `hashPassword`), marks the invitation accepted, and writes an audit row (actor = the inviter). No session is issued — the invitee signs in via `/api/auth/sign-in/email`. `GET /api/v1/invitations` lists invitations; `DELETE /api/v1/invitations/:id` revokes a pending one. No email infra exists; the admin shares the link out-of-band. The first-user→org_admin `user.create` hook in `auth.ts` is retained as a safety net but is superseded by `bootstrap-admin`.
 - **API keys** for programmatic access: `Authorization: Bearer agr_<key>`. Keys are hashed at rest (`api_keys.key_hash`), carry explicit `scopes` (e.g. `tasks:write`, `runs:read`, `resources:read`) and an optional project binding. Key middleware resolves them to a principal equivalent to a user context with restricted scopes.
 - **Locale middleware** resolves the request locale (`?lang=` → user profile → `Accept-Language` → `en`) and localizes error `message`; the machine-readable `code` is stable regardless of locale.
 
@@ -35,7 +38,12 @@ Stable `code` slugs (localizable message via i18next backend instance). Validati
 
 ### Me & auth
 ```
-POST/GET /api/auth/*                      # better-auth (sign-up, sign-in, session)
+POST/GET /api/auth/*                      # better-auth (sign-in, sign-out, session)
+POST     /api/auth/sign-up/*              # 403 registration_closed — self-registration is disabled
+GET/POST /api/auth/accept-invite          # public invite-accept flow (no session; token-gated)
+POST     /api/v1/invitations              # org_admin: create invite → { inviteUrl, token }
+GET      /api/v1/invitations              # org_admin: list invites
+DELETE   /api/v1/invitations/:id         # org_admin: revoke a pending invite
 GET   /me                                 # profile + org role + project memberships
 PATCH /me                                 # name, locale
 ```

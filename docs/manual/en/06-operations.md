@@ -11,6 +11,28 @@
 | `postgres` | System of record | Also carries the job queue (pg-boss) — no separate broker |
 | `redis` | Live-event fan-out only | **Disposable**: if it's down, live streams degrade to replay/polling; correctness is unaffected |
 
+## First-run: create the admin
+
+Self-registration is **closed** — the instance is invite-only, so the very first user can't sign up. Create the org admin out-of-band, exactly once, then sign in:
+
+```sh
+# Docker: the env file is infra/env/.env
+# VM: /etc/agrippa/agrippa.env
+AGRIPPA_BOOTSTRAP_EMAIL=you@example.com
+AGRIPPA_BOOTSTRAP_PASSWORD='choose-a-strong-password'
+```
+
+```sh
+# Docker — run the script in the api image against the live compose stack:
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm \
+  api bun apps/api/src/cli/bootstrap-admin.ts
+
+# VM (from /opt/agrippa, reading /etc/agrippa/agrippa.env):
+sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
+```
+
+The script is idempotent on email (re-running with the same address is a no-op), hashes the password with the same routine the login flow uses, and writes an audit row. After it prints `org_admin created`, sign in at the instance URL. Subsequent members join only via invitation (Admin → Members) — see [Administration](04-administration.md#accounts--onboarding).
+
 ## VM (systemd) deployment
 
 The same stack installed by `infra/vm/install.sh` on one Ubuntu host (no Docker; see [Getting Started](01-getting-started.md#deploy-on-a-vm-systemd-no-docker)):

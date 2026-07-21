@@ -33,7 +33,14 @@ bun apps/worker/src/index.ts   # worker
 cd apps/web && bun run dev     # SPA :5173 (proxies /api → :3000)
 ```
 
-Sign up (the first user becomes org admin), create a project, grant models/skills under Settings → Resources, then submit a task from the catalog. For real runs set `AGRIPPA_EXECUTOR=claude-agent-sdk` and `ANTHROPIC_API_KEY` in `.env.local` — and keep the file: `AGRIPPA_SECRET_KEY` encrypts credentials you store, so regenerating it orphans them (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Self-registration is **closed** — create the first admin out-of-band, then sign in:
+
+```sh
+# .env.local (git-ignored): AGRIPPA_BOOTSTRAP_EMAIL / AGRIPPA_BOOTSTRAP_PASSWORD
+bun apps/api/src/cli/bootstrap-admin.ts   # idempotent; creates the first org_admin
+```
+
+Sign in at :5173 with that account, create a project, grant models/skills under Settings → Resources, then submit a task from the catalog. To invite teammates (the only other way in), use Admin → Members. For real runs set `AGRIPPA_EXECUTOR=claude-agent-sdk` and `ANTHROPIC_API_KEY` in `.env.local` — and keep the file: `AGRIPPA_SECRET_KEY` encrypts credentials you store, so regenerating it orphans them (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 **Self-hosted** (Docker):
 

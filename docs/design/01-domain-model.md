@@ -48,6 +48,13 @@ api_keys  (id pk, org_id fk, project_id fk null,              -- null = org-wide
            scopes jsonb,                                      -- ["tasks:write","runs:read",...]
            created_by fk users, expires_at, revoked_at, last_used_at)
 
+invitations (id pk, org_id fk, email,                         -- invite-only onboarding
+           token_hash unique,                                -- sha256 of one-time token; plaintext never stored
+           role text not null default 'org_member',           -- only org_member is granted via invite
+           created_by fk users, expires_at,                   -- default +7d
+           accepted_at null, accepted_user_id fk users null)  -- null = pending
+           -- self-registration is closed (05); this is the only path a new member joins
+
 secrets   (id pk, org_id fk, kind text,                       -- 'mcp_auth' | 'git_credential' | ...
            ciphertext bytea, created_by fk, created_at, rotated_at)
            -- AES-256-GCM via node:crypto; key from AGRIPPA_SECRET_KEY env
@@ -212,4 +219,4 @@ audit_logs (id pk, org_id fk, project_id fk null,
 
 ## Drizzle Package Layout
 
-`packages/db/src/schema/` — one file per aggregate: `orgs.ts`, `projects.ts`, `catalog.ts` (scenarios/task_types), `resources.ts` (fabri/skills/mcp/models), `templates.ts`, `runs.ts` (tasks/runs/steps/events/approvals/artifacts), `usage.ts`, `audit.ts`, `secrets.ts`. Generated SQL migrations are committed under `packages/db/drizzle/`. Seed data (`packages/db/src/seed/`) upserts the builtin org, scenarios, task types, fabri, models, and compiles+publishes builtin templates from `templates/` (checksum-guarded so re-seeding is idempotent).
+`packages/db/src/schema/` — one file per aggregate: `orgs.ts`, `auth.ts` (users/sessions/accounts + better-auth extensions), `invitations.ts`, `projects.ts`, `catalog.ts` (scenarios/task_types), `resources.ts` (fabri/skills/mcp/models), `templates.ts`, `runs.ts` (tasks/runs/steps/events/approvals/artifacts), `usage.ts`, `audit.ts`, `secrets.ts`. Generated SQL migrations are committed under `packages/db/drizzle/`. Seed data (`packages/db/src/seed/`) upserts the builtin org, scenarios, task types, fabri, models, and compiles+publishes builtin templates from `templates/` (checksum-guarded so re-seeding is idempotent).

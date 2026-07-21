@@ -11,6 +11,28 @@
 | `postgres` | 事实来源 | 同时承载任务队列（pg-boss）——无需额外消息中间件 |
 | `redis` | 仅用于实时事件分发 | **可丢弃**：宕机时实时流降级为回放/轮询，正确性不受影响 |
 
+## 首次运行：创建管理员
+
+自助注册已**关闭**——实例采用邀请制，因此第一位用户无法自行注册。需要离线创建一次组织管理员，然后登录：
+
+```sh
+# Docker：env 文件为 infra/env/.env
+# VM：/etc/agrippa/agrippa.env
+AGRIPPA_BOOTSTRAP_EMAIL=you@example.com
+AGRIPPA_BOOTSTRAP_PASSWORD='设置一个强密码'
+```
+
+```sh
+# Docker —— 在 api 镜像中运行脚本，连到当前 compose 栈：
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm \
+  api bun apps/api/src/cli/bootstrap-admin.ts
+
+# VM（在 /opt/agrippa 下，读取 /etc/agrippa/agrippa.env）：
+sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
+```
+
+脚本对邮箱幂等（同地址重复运行不会重复创建），用与登录流程一致的哈希算法存储密码，并写一条审计记录。看到 `org_admin created` 后即可在实例地址登录。之后其他成员只能通过邀请加入（管理 → 成员），参见[管理](04-administration.md#账号与接入)。
+
 ## 虚拟机（systemd）部署
 
 由 `infra/vm/install.sh` 在单台 Ubuntu 主机上安装的同一套服务栈（无需 Docker；参见[快速开始](01-getting-started.md#部署到虚拟机systemd无需-docker)）：
