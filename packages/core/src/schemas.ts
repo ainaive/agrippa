@@ -31,6 +31,19 @@ export const memberUpdateSchema = z.object({
   role: z.enum(PROJECT_ROLES),
 });
 
+/** Org admin invites a new member by email. role is fixed to org_member for now. */
+export const invitationCreateSchema = z.object({
+  email: z.email(),
+  expiresDays: z.number().int().min(1).max(90).optional(),
+});
+
+/** Invitee accepts: token from the invite link, picks name + password. */
+export const acceptInviteSchema = z.object({
+  token: z.string().min(1),
+  name: z.string().min(1).max(100),
+  password: z.string().min(8).max(128),
+});
+
 export const quotaUpdateSchema = z.object({
   tokenLimit: z.number().int().positive().nullable().optional(),
   costLimitUsd: z.number().positive().nullable().optional(),
@@ -40,6 +53,8 @@ export const quotaUpdateSchema = z.object({
 export type ProjectCreateInput = z.infer<typeof projectCreateSchema>;
 export type ProjectUpdateInput = z.infer<typeof projectUpdateSchema>;
 export type MemberAddInput = z.infer<typeof memberAddSchema>;
+export type InvitationCreateInput = z.infer<typeof invitationCreateSchema>;
+export type AcceptInviteInput = z.infer<typeof acceptInviteSchema>;
 export type QuotaUpdateInput = z.infer<typeof quotaUpdateSchema>;
 
 // ── Resource layer ────────────────────────────────────────────────────────────

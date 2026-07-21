@@ -4,7 +4,20 @@ Two admin surfaces exist: **org administration** (the sidebar's *Admin* section,
 
 ## Org roles
 
-The first account ever created is the **org admin**; everyone else signs up as **org member**. Org admins manage the registries below and can read the audit log; they get *no* implicit access inside projects — project membership is always explicit.
+Two org roles exist: **org admin** and **org member**. Org admins manage the registries below, invite new members, and can read the audit log; they get *no* implicit access inside projects — project membership is always explicit.
+
+## Accounts & onboarding
+
+Self-registration is **closed** — onboarding is invite-only, so the instance isn't open to arbitrary sign-ups.
+
+- **First admin** — created out-of-band via the bootstrap script, not through the UI:
+  ```sh
+  AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  AGRIPPA_BOOTSTRAP_PASSWORD='choose-a-strong-password' \
+  bun --env-file=../../.env.local apps/api/src/cli/bootstrap-admin.ts
+  ```
+  It's idempotent on email, so re-running with the same address is a no-op. The password is hashed with the same routine the login flow uses, so the account signs in at the login page immediately.
+- **Inviting members** — org admins open **Admin → Members**, enter an invitee's email, and generate a one-time invite link (valid 7 days). Share the link out-of-band (Agrippa has no email sender). The invitee opens it, sets their name and password, and is created as an **org member** — then signs in normally. Pending invitations show in the list and can be revoked before they're used. Each token is stored hashed, so a database leak alone can't redeem an invite.
 
 ## Registries (Admin section)
 

@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import { createDb, type Db, migrateDb, seed } from "@agrippa/db";
+import { accounts, createDb, type Db, migrateDb, orgs, seed, users, uuidv7 } from "@agrippa/db";
 import { seedBuiltinTemplates } from "@agrippa/orchestration";
-import { sql } from "drizzle-orm";
+import { hashPassword } from "better-auth/crypto";
+import { count, eq, sql } from "drizzle-orm";
 import type { App } from "../app";
 
 process.env.AGRIPPA_SECRET_KEY ??= randomBytes(32).toString("base64");
@@ -52,18 +53,50 @@ export type TestClient = {
   email: string;
 };
 
-/** Signs up a user via the real better-auth endpoint and returns a cookie-bound client. */
+/**
+ * Creates a test user and returns a cookie-bound client. Self-sign-up is
+ * closed in app.ts, so users are created directly (mirroring the
+ * bootstrap-admin / accept-invite path) and then signed in via the real
+ * /api/auth/sign-in/email endpoint to get a genuine session cookie. The first
+ * user becomes org_admin, the rest org_member — matching the bootstrap
+ * convention.
+ */
 export async function signUp(app: App, name: string, email: string): Promise<TestClient> {
-  const res = await app.request("/api/auth/sign-up/email", {
+  const db = testDb();
+  const [row] = await db.select({ n: count() }).from(users);
+  const orgRole = (row?.n ?? 0) === 0 ? "org_admin" : "org_member";
+  const [org] = await db.select().from(orgs).where(eq(orgs.slug, "default"));
+  if (!org) throw new Error("test db: default org missing — did freshTestDb() run?");
+
+  const userId = uuidv7();
+  const password = "correct-horse-battery";
+  const hash = await hashPassword(password);
+  await db.insert(users).values({
+    id: userId,
+    name,
+    email,
+    orgId: org.id,
+    orgRole,
+    locale: "en",
+  } as typeof users.$inferInsert);
+  await db.insert(accounts).values({
+    id: uuidv7(),
+    userId,
+    providerId: "credential",
+    accountId: userId,
+    password: hash,
+  } as typeof accounts.$inferInsert);
+
+  const res = await app.request("/api/auth/sign-in/email", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name, email, password: "correct-horse-battery" }),
+    body: JSON.stringify({ email, password }),
   });
   if (res.status !== 200) {
-    throw new Error(`sign-up failed (${res.status}): ${await res.text()}`);
+    throw new Error(`sign-in failed (${res.status}): ${await res.text()}`);
   }
   const setCookie = res.headers.get("set-cookie");
-  if (!setCookie) throw new Error("sign-up returned no session cookie");
+  if (!setCookie) throw new Error("sign-in returned no session cookie");
   const cookie = setCookie
     .split(",")
     .map((part) => part.split(";")[0]?.trim())

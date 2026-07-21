@@ -45,6 +45,7 @@ Secrets policy: provider API keys and the master key live only in `api`/`worker`
 
 ## Operations
 
+- **First-run onboarding**: self-registration is closed (invite-only — see [05](05-api-and-auth.md#authentication)). The api/worker do **not** create users on boot. An operator runs `apps/api/src/cli/bootstrap-admin.ts` once (reads `AGRIPPA_BOOTSTRAP_EMAIL`/`PASSWORD` from the env file, creates the first `org_admin`, idempotent on email) — then signs in and invites members from the UI. Runbook in [Operations → First-run](../manual/en/06-operations.md#first-run-create-the-admin).
 - **Backup**: Postgres volume (pg_dump schedule is the operator's choice) + `ARTIFACT_STORAGE_ROOT` volume + the `AGRIPPA_SECRET_KEY`. Redis is disposable.
 - **Upgrade**: pull images → `docker compose up -d` → api entrypoint migrates. Workers drain gracefully (in-flight runs resume on new workers via step-granular resume — see [04](04-execution-runtime.md)).
 - **TLS / ingress**: out of scope; operators front the stack with their own reverse proxy. SSE requires the proxy to disable response buffering for `/api/v1/runs/*/events`.

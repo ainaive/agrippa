@@ -27,5 +27,10 @@
   "already_terminal": "该执行已结束",
   "already_decided": "该审批已有决定",
   "approval_rejected": "检查点被驳回",
-  "budget_exceeded": "执行预算已超限"
+  "budget_exceeded": "执行预算已超限",
+  "registration_closed": "自助注册已关闭，请联系管理员获取邀请",
+  "invite_invalid": "该邀请无效或已被撤销",
+  "invite_expired": "该邀请已过期",
+  "invite_already_accepted": "该邀请已被使用",
+  "invite_self": "不能邀请自己"
 }

@@ -56,3 +56,37 @@ export const authApi = {
     request<unknown>("/api/auth/sign-in/email", { method: "POST", json: input }),
   signOut: () => request<unknown>("/api/auth/sign-out", { method: "POST", json: {} }),
 };
+
+/** Public invite-accept flow (no session). */
+export const inviteApi = {
+  preview: (token: string) =>
+    request<{ email: string; expiresAt: string }>(
+      `/api/auth/accept-invite?token=${encodeURIComponent(token)}`,
+    ),
+  accept: (input: { token: string; name: string; password: string }) =>
+    request<{ ok: true }>("/api/auth/accept-invite", { method: "POST", json: input }),
+};
+
+export type InvitationRow = {
+  id: string;
+  email: string;
+  role: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  createdAt: string;
+};
+
+export type InvitationCreated = {
+  id: string;
+  email: string;
+  expiresAt: string;
+  inviteUrl: string;
+  token: string;
+};
+
+export const invitationsApi = {
+  list: () => api<InvitationRow[]>("/invitations"),
+  create: (email: string) =>
+    api<InvitationCreated>("/invitations", { method: "POST", json: { email } }),
+  revoke: (id: string) => api<{ ok: true }>(`/invitations/${id}`, { method: "DELETE" }),
+};
