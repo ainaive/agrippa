@@ -45,6 +45,10 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.worker
+      args:
+        # closer apt mirror for hosts where deb.debian.org is slow/blocked
+        # (e.g. APT_MIRROR=https://mirrors.aliyun.com in .env); no-op when empty
+        APT_MIRROR: ${APT_MIRROR:-}
     image: ghcr.io/ainaive/agrippa-worker:${AGRIPPA_VERSION:-latest}
     environment:
       DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:-agrippa}@postgres:5432/agrippa

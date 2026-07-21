@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`APT_MIRROR` build arg for the worker image** — `infra/Dockerfile.worker` now accepts an optional `APT_MIRROR` build arg that swaps Debian apt to a closer mirror before `apt-get install` (the worker image needs git/ripgrep/bubblewrap). `docker-compose.yml` threads it through as `build.args.APT_MIRROR: ${APT_MIRROR:-}`, documented in `infra/env/.env.example`. No-op when unset; set `APT_MIRROR=https://mirrors.aliyun.com` (or similar) for hosts where `deb.debian.org` is slow or blocked.
+
 ## [0.2.0] — 2026-07-18
 
 The web UI overhaul: a GitLab-style shell with Linear-grade polish and full management surfaces — plus executor security hardening and non-Docker VM deployment.
