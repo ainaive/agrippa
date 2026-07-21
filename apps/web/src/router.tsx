@@ -7,6 +7,7 @@ import {
   redirect,
 } from "@tanstack/react-router";
 import { Loader2Icon } from "lucide-react";
+import { AcceptInvitePage } from "./pages/AcceptInvitePage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { AdminLayout } from "./pages/admin/AdminLayout";
 import { CatalogPage } from "./pages/CatalogPage";
@@ -25,6 +26,12 @@ const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
   component: LoginPage,
+});
+
+const acceptInviteRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/accept-invite",
+  component: AcceptInvitePage,
 });
 
 const shellRoute = createRoute({
@@ -113,6 +120,13 @@ const adminAuditRoute = createRoute({
   staticData: { crumb: "nav.audit" },
 });
 
+const adminMembersRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/members",
+  component: lazyRouteComponent(() => import("./pages/admin/InvitationsPage"), "InvitationsPage"),
+  staticData: { crumb: "nav.members" },
+});
+
 const projectRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/projects/$projectId",
@@ -170,6 +184,7 @@ const settingsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
+  acceptInviteRoute,
   shellRoute.addChildren([
     homeRoute,
     approvalsRoute,
@@ -181,6 +196,7 @@ const routeTree = rootRoute.addChildren([
       adminModelsRoute,
       adminSkillsRoute,
       adminMcpRoute,
+      adminMembersRoute,
       adminAuditRoute,
     ]),
     projectRoute.addChildren([

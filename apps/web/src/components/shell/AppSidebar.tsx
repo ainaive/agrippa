@@ -7,6 +7,7 @@ import {
   HammerIcon,
   PlugIcon,
   ScrollTextIcon,
+  UserPlusIcon,
   WrenchIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -161,5 +162,6 @@ const adminNav = [
   { key: "models", icon: CpuIcon, to: "/admin/models" },
   { key: "skills", icon: WrenchIcon, to: "/admin/skills" },
   { key: "mcp", icon: PlugIcon, to: "/admin/mcp-servers" },
+  { key: "members", icon: UserPlusIcon, to: "/admin/members" },
   { key: "audit", icon: ScrollTextIcon, to: "/admin/audit" },
 ];

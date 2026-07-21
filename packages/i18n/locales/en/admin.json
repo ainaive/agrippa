@@ -63,6 +63,20 @@
     "actionFilter": "Filter by action, e.g. task.submit",
     "empty": "No audit entries match the current filters."
   },
+  "invitations": {
+    "title": "Members",
+    "hint": "Self-registration is closed. Invite teammates by email — they set their own password via the link.",
+    "inviteEmail": "Invitee email",
+    "invite": "Generate invite link",
+    "inviteUrl": "Invite link (share once, expires in 7 days)",
+    "copied": "Invite link copied",
+    "pending": "Pending",
+    "accepted": "Accepted",
+    "expired": "Expired",
+    "revoke": "Revoke",
+    "empty": "No invitations yet.",
+    "revokeConfirm": "Revoke this pending invite?"
+  },
   "editor": {
     "source": "Template source (YAML)",
     "validate": "Validate",

@@ -63,6 +63,20 @@
     "actionFilter": "按操作筛选，如 task.submit",
     "empty": "没有符合筛选条件的审计记录。"
   },
+  "invitations": {
+    "title": "成员",
+    "hint": "自助注册已关闭。按邮箱邀请队友——他们通过链接自行设置密码。",
+    "inviteEmail": "受邀邮箱",
+    "invite": "生成邀请链接",
+    "inviteUrl": "邀请链接（转发一次，7 天后过期）",
+    "copied": "邀请链接已复制",
+    "pending": "待接受",
+    "accepted": "已接受",
+    "expired": "已过期",
+    "revoke": "撤销",
+    "empty": "暂无邀请记录。",
+    "revokeConfirm": "确认撤销该待接受邀请？"
+  },
   "editor": {
     "source": "模板源码（YAML）",
     "validate": "校验",
