@@ -1,8 +1,10 @@
-# 02 — Orchestration Template Format (`agrippa/v1`)
+# 02 — Orchestration Template Format (`agrippa/v1` & `agrippa/v2`)
 
-> Status: draft for review · Last updated: 2026-07-17
+> Status: living · Last updated: 2026-07-23
 
-Templates are the contract between the scenario layer (auto-generated forms), the orchestration engine (phases, approvals, budgets), and executors (single-step agent invocations). They are authored in **YAML**, compiled to **zod-validated JSON**, and published as **immutable versions** ([ADR-0006](../adr/0006-yaml-template-format.md)).
+Templates are the contract between the scenario layer (auto-generated forms), the orchestration engine (phases, checkpoints, budgets), and executors (single-step agent invocations). They are authored in **YAML**, compiled to **zod-validated JSON**, and published as **immutable versions** ([ADR-0006](../adr/0006-yaml-template-format.md)).
+
+Two authoring versions exist: `agrippa/v1` (linear phases, phase-level approvals) and `agrippa/v2` (agent slots, checkpoint steps, bounded loops, SCM actions — [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)). Both compile to one v2-shaped IR (`CompiledTemplate`); a pure `upgradeV1ToV2` runs at compile time and when loading stored compiled rows, so v1 templates keep working unchanged and no data migration ever happens.
 
 ## Lifecycle
 
@@ -163,6 +165,67 @@ outputs:
 ```
 
 The engine fails a run that completes its steps without producing all `required` artifacts — an explicit quality gate, so "succeeded" always means "produced the contracted outputs".
+
+## `agrippa/v2` additions ([ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md))
+
+v2 keeps everything above (inputs, workspace, resources, models, budgets, outputs) and changes the execution vocabulary. `templates/swdev/requirement-delivery.yaml` is the reference example.
+
+### Agent slots (replaces `spec.faber`)
+
+```yaml
+spec:
+  agents:
+    implementer:
+      label: { en: "Implementer", zh-CN: "实现者" }
+      faber: forge                  # default persona (registry slug)
+      executor: claude-agent-sdk    # default engine (core EXECUTOR_CATALOG id)
+      # overridable: true           # default — submitter may swap faber/executor
+    reviewer:
+      label: { en: "Reviewer", zh-CN: "评审者" }
+      faber: arbiter
+      executor: codex-cli
+```
+
+Agent steps bind to a slot via `agent: <slot>` (default: the first declared slot). At submit, `resolveAgentBindings` freezes each slot to a concrete faber + executor onto `runs.agent_bindings` (user overrides on overridable slots; capability checks against the catalog — e.g. a codex-bound step may not declare subagents/skills/MCP; per-slot model resolution filtered by the executor's provider list). When the deployment default executor is `fake` (the token-free demo switch), every slot binds to it. v1 upgrades to one non-overridable `main` slot on the deployment default.
+
+### Checkpoint steps (replaces phase-level `approval:`)
+
+Checkpoints are steps (`kind: checkpoint`), so they can sit anywhere in a phase and reuse the step idempotency/resume machinery:
+
+```yaml
+- id: confirm-plan
+  kind: checkpoint
+  checkpoint:
+    kind: approval                 # approval | input | review-gate
+    present: [implementation-plan] # artifact keys shown to the responder
+    title: { en: ..., zh-CN: ... }
+    timeout: 48h
+    onTimeout: cancel              # approval also allows reject | approve
+```
+
+- `approval` — approve / reject; inside a loop also **request_changes** (comment required — it re-enters the run as `checkpoints.<id>.comment`).
+- `input` — `source:` names a **json questions artifact** the preceding agent step produced (`{"questions":[{id,text,kind,options,required,recommended}]}`). The responder answers via an auto-generated form; **auto-passes** when the list is absent or empty.
+- `review-gate` — `source:` names a **json review-report artifact** (`{"summary","findings":[{id,severity,file,line,title,detail,suggestion}]}`). The responder picks findings to fix (`outcome: fix`, the rest are explicitly accepted) or accepts them all (`outcome: pass`); auto-passes on zero findings.
+
+Decisions store a structured `response` on the checkpoint row, exposed as the `checkpoints.<id>` expression root (e.g. `${checkpoints.review-gate.selectedFindings}` interpolates the full finding objects into the fix step's prompt). The schemas live in `@agrippa/core` (`interaction-schemas.ts`) and are shared by the engine, API, and SPA.
+
+### Bounded loops
+
+```yaml
+- kind: loop
+  id: review-fix
+  name: { en: "Review & fix", zh-CN: "评审与修复" }
+  maxIterations: 3                 # static, 1–10 — compiler totality preserved
+  until: checkpoints.review-gate.outcome == 'pass'
+  onMaxIterations: continue        # or fail
+  phases: [...]                    # plain phases; no nested loops
+```
+
+`until` is evaluated after each iteration. `run_steps`/`checkpoints`/`artifacts` carry an `iteration` column; expression reads (`steps.*`, `artifacts.*`, `checkpoints.*`) resolve to the **latest** iteration, and a forward reference to a same-loop checkpoint resolves to the *previous* iteration's response (empty on iteration 1) — how a clarify round reads the answers to the previous round's questions. `budgets.perPhase` caps a phase's cumulative spend across iterations.
+
+### System actions & new expression roots
+
+`kind: system` actions in v2: `workspace.checkout`, `git.branch`, `git.push`, `pr.open` (the latter three require a `readWrite` workspace and run through the platform SCM service — [ADR-0011](../adr/0011-codex-executor-and-platform-scm.md)). Each takes an interpolable `with:` map; `pr.open` must produce exactly one `link` artifact and appends the accepted-findings waiver section to the PR body. New context roots: `checkpoints.<id>`, `artifacts.<key>` (latest inline content), plus `run.workBranch` and `run.taskTitle`.
 
 ## Full Example — `templates/swdev/bug-localize-fix.yaml`
 
@@ -337,6 +400,7 @@ spec:
 | Project management | `pm.plan-breakdown` | PRD/goal input → milestone & task breakdown with estimates (approval gate before publishing) |
 | Software development | `swdev.requirements-dev` | Requirement text → clarifying analysis → design proposal → approval → implementation plan or scaffold |
 | Software development | `swdev.bug-localize-fix` | The full example above |
+| Software development | `swdev.requirement-delivery` | **agrippa/v2 flagship**: clarify Q&A loop → plan loop with request-changes → implement on a platform branch → cross-agent review-fix loop (implementer=Claude Code, reviewer=Codex) → platform push + PR |
 | Test & verification | `test.test-plan` | Feature/change description → risk-based test plan + case matrix |
 | Test & verification | `test.regression-verify` | Repo + change ref → run suites, compare, verdict report |
 

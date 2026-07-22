@@ -1,6 +1,6 @@
 # 04 — Execution Runtime
 
-> Status: draft for review · Last updated: 2026-07-17
+> Status: living · Last updated: 2026-07-23
 
 How a submitted task becomes a finished run: queueing, the run state machine, resumability, approvals, cancellation, budgets, and live progress. Queue: **pg-boss** ([ADR-0003](../adr/0003-pg-boss-over-bullmq.md)); live progress: **SSE** ([ADR-0007](../adr/0007-sse-over-websocket.md)).
 
@@ -9,7 +9,7 @@ How a submitted task becomes a finished run: queueing, the run state machine, re
 `POST /projects/:id/tasks` validates params against the compiled template inputs, verifies each `repoRef` points at a repo connection **owned by the project**, checks resource grants and quota headroom, then in **one Postgres transaction**:
 
 1. insert `tasks` row,
-2. insert `runs` row (`status = queued`, pinned `template_version_id`, `params_snapshot`, frozen `model_resolution`, a pinned `resource_manifest` of the skills/MCP the run is authorized to use, computed `budget`).
+2. insert `runs` row (`status = queued`, pinned `template_version_id`, `params_snapshot`, frozen slot-keyed `model_resolution`, frozen `agent_bindings` (slot → faber + executor, from template defaults + submit-time overrides — see [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)), a pinned `resource_manifest` of the skills/MCP the run is authorized to use, computed `budget`).
 
 After the transaction commits, the handler enqueues the pg-boss job `run.execute({runId})`. The `resource_manifest` is the authorization boundary: required grants are enforced at submit and optional resources are included **only when granted**, so the worker resolves skills/MCP strictly from the manifest and never re-reads the mutable global registry — an ungranted optional resource is simply unavailable (see [ADR-0009](../adr/0009-security-correctness-deep-modules.md)).
 
@@ -48,21 +48,26 @@ Graceful shutdown: stop fetching → abort in-flight runs via their `AbortContro
 ## Engine Loop (per run)
 
 ```
-load run + compiled template + model_resolution
+load run + compiled template (v1 rows upgraded to the v2 IR) + agent bindings
 provision workspace (git clone if spec'd; else scratch dir)   [skipped on resume if intact]
-for each phase:
-  if phase.approval and not yet approved:
-      create approvals row → emit approval.required → set run waiting_approval
-      → COMPLETE the pg-boss job (worker slot freed) → return
-  for each step:
-    if step already succeeded (resume): skip
+for each flow node (phase | loop):
+  loop → derive start iteration from persisted rows, run inner phases per
+         iteration, evaluate `until` after each; exhaustion → fail | continue
+  for each step of the phase (rows keyed (stepId, iteration)):
+    if step already succeeded/skipped (resume): skip
     if when:false or requires: unmet on optional resource: mark skipped
-    kind system → run platform action
-    kind agent  → resolve request (prompt interpolation, priorContext, resources, secrets)
+    kind checkpoint → no row: auto-pass (empty source) or insert pending row +
+                      waiting_approval step row → emit checkpoint.required →
+                      set run waiting_approval → COMPLETE the job → return
+                      decided: fold response into the expression context
+                      (checkpoints.<id>), settle the step row, continue
+    kind system → platform action (workspace.checkout | git.branch | git.push |
+                  pr.open via EngineDeps.scm; pr.open appends the waiver section)
+    kind agent  → resolve the slot binding (executor + faber prompt) + request
                   → executor.executeStep(req, ctx)
                   → persist every event to run_events (seq++), publish to Redis,
                     update run_steps, record token_usage, feed BudgetMeter
-enforce output contract (required artifacts present?) → succeeded | failed
+enforce output contract (required artifacts present? latest iteration wins)
 finalize: usage_totals, workspace cleanup, terminal event
 ```
 
@@ -75,15 +80,20 @@ Steps are the idempotency unit. On retry/resume, the engine loads `run_steps`, *
 
 Budget correctness on resume: the `BudgetMeter` initializes from **persisted** `token_usage` totals, and usage rows are keyed by `(run_id, step_id, attempt)` — a partially-executed attempt's cost is counted, never double-counted.
 
-### Approvals
+### Checkpoints (approvals, questions, review gates)
 
-Approvals **do not hold a worker slot**. When a checkpoint is hit: `approvals` row created (with the artifact keys to present), run → `waiting_approval`, current pg-boss job completes, expiry job scheduled. `POST /runs/:id/approvals/:approvalId {decision}`:
+Checkpoints **do not hold a worker slot**. When a checkpoint step pauses: a `checkpoints` row is created (kind, iteration, and a payload snapshot — the questions or findings the responder will see), run → `waiting_approval`, current pg-boss job completes, expiry job scheduled. `input` and `review-gate` checkpoints whose source artifact is absent or empty **auto-pass** without pausing. `POST /runs/:id/checkpoints/:checkpointId/respond` (kind-discriminated payload):
 
-- `approved` → re-enqueue `run.execute`; engine resumes at the gated phase.
-- `rejected` → run → `failed` with `error.code = "approval_rejected"`.
-- expiry → per-template `onTimeout` (`cancel | reject | approve`).
+- approval `approved` / input answers / review-gate decision → the structured `response` is stored on the row (full finding objects for fix/accept splits), a `checkpoint.decided` event and audit row commit in the same transaction, and the run re-enqueues; the engine folds the response into the `checkpoints.<id>` expression root on resume.
+- approval `request_changes` (loop checkpoints only) → stored as an approved row whose outcome keeps the loop going; the comment re-enters the run for the revision step.
+- approval `rejected` → run → `failed` with `error.code = "approval_rejected"`.
+- expiry → per-template `onTimeout` (`cancel | reject | approve` for approvals; `cancel` otherwise).
 
-Decisions are a compare-and-swap on `status = 'pending'` (`run-lifecycle.decideApproval`), so a user decision and the expiry worker can't overwrite each other. The decision is durable before the resume enqueue; if that enqueue is lost, the reconciliation sweeper re-enqueues any `waiting_approval` run whose approval is already decided, so a run can't be stranded.
+Decisions are a compare-and-swap on `status = 'pending'` (`run-lifecycle.decideCheckpoint`), so a user decision and the expiry worker can't overwrite each other. The decision is durable before the resume enqueue; if that enqueue is lost, the reconciliation sweeper re-enqueues any `waiting_approval` run whose checkpoints are all decided, so a run can't be stranded.
+
+### Loops
+
+`kind: loop` nodes repeat their phases up to a static `maxIterations`, evaluating `until` after each iteration. All step/checkpoint/artifact rows carry an `iteration`; the resume iteration is **derived** from those rows (no extra state table), so crash recovery inside a loop reuses the ordinary skip-succeeded logic. Expression reads resolve to the latest iteration; loop lifecycle events (`loop.iteration.started`, `loop.completed`, `loop.exhausted`) consult the event log so resumes never re-emit them. `budgets.perPhase` caps a phase's **cumulative** spend across iterations; the run budget plus the static bound cap the loop as a whole.
 
 ### Cancellation
 

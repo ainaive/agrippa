@@ -1,8 +1,10 @@
 # 03 — Executor Abstraction
 
-> Status: draft for review · Last updated: 2026-07-17
+> Status: living · Last updated: 2026-07-23
 
-The `Executor` interface (`@agrippa/executor-core`) is the hinge of the architecture: everything above it (templates, engine, API, UI) is engine-agnostic; everything below it is engine-specific. First implementation: **Claude Agent SDK** (`@agrippa/executor-claude`). Granularity decision: **one step = one executor invocation** ([ADR-0005](../adr/0005-executor-step-granularity.md)).
+The `Executor` interface (`@agrippa/executor-core`) is the hinge of the architecture: everything above it (templates, engine, API, UI) is engine-agnostic; everything below it is engine-specific. Implementations: **Claude Agent SDK** (`@agrippa/executor-claude`) and the **OpenAI Codex CLI** (`@agrippa/executor-codex`, [ADR-0011](../adr/0011-codex-executor-and-platform-scm.md)). Granularity decision: **one step = one executor invocation** ([ADR-0005](../adr/0005-executor-step-granularity.md)).
+
+Since agrippa/v2 (ADR-0010), a run may use **several executors** — one per agent slot, resolved from `runs.agent_bindings`. The API/SPA-visible registry is the static `EXECUTOR_CATALOG` in `@agrippa/core` (id → label, provider filter, capability flags); the worker registers concrete executors and asserts them against the catalog at boot, so capability drift fails fast instead of surfacing as runtime template errors. `StepExecutionRequest` carries `iteration` and `agentSlot` so executors and scripted fakes can distinguish loop rounds and slots.
 
 ## Interface
 
@@ -106,6 +108,22 @@ All executor work happens in the **worker container** (`apps/worker`), one run p
 - MCP secrets resolve lazily at server spawn and are not logged; `run_events` payloads are redacted against known secret values (the provider key, resolved MCP tokens) before they are persisted or streamed (`SecretRedactor`). Note: the provider `ANTHROPIC_API_KEY` still lives in the agent subprocess env (the SDK needs it) and one worker UID is shared across runs — keeping the key out of the subprocess and isolating runs from each other require the container layer below.
 
 **Explicitly deferred**: per-run container/micro-VM isolation and a fully non-root, network-egress-restricted sandbox. The isolation seam localizes this — the engine hands the executor a `workspaceDir`, an `access` mode, and a signal; whether that directory lives in the worker's filesystem or a jailed container is invisible above the interface. The static containment plus env-scrub plus OS sandbox is adequate for a trusted org running semi-trusted repositories; hostile multi-tenant inputs need the container layer, which is risk #2 in [00-overview](00-overview.md).
+
+## Codex CLI Mapping
+
+`@agrippa/executor-codex` wraps `codex exec --json` (non-interactive; JSONL event shapes pinned against codex-cli 0.145.0 — samples in the package README):
+
+| Request concept | Codex CLI |
+|---|---|
+| `instructions` + `systemPrompt` + `priorContext` | one stdin prompt (`## Role` preamble + prior-step block + instructions + artifact directions) |
+| `model` | `--model <providerModelId>` |
+| `toolPolicy.access` | `--sandbox read-only` \| `--sandbox workspace-write` (native Seatbelt/Landlock), `-c sandbox_workspace_write.network_access=false`, `-c approval_policy=never` |
+| Streaming | `thread.started` → `step.started{sessionId}`; `item.*` agent messages / command executions → `message.completed` / `tool.*` |
+| Usage | `turn.completed.usage` — `input_tokens` is cached-inclusive and split into `inputTokens`/`cacheReadTokens` |
+| Resume | `codex exec resume <thread_id>` (same-step crash recovery only, per ADR-0005) |
+| Env | `buildScrubbedEnv` (OPENAI_API_KEY/CODEX_API_KEY on the provider-auth allow-list) |
+
+Capabilities: `{ subagents: false, mcp: false, skills: false, resume: true, streaming: true }` — the compiler and `resolveAgentBindings` reject steps assigning unsupported resources to a codex-bound slot. **Not enforceable:** the per-tool-call `evaluateToolCall` hook (`codex exec` has no callback surface); containment relies on the native OS sandbox. Artifacts follow the shared `.agrippa/artifacts` file convention (helpers now live in `executor-core/artifacts.ts`, shared with the Claude adapter); in `read-only` mode the agent cannot write files, so a declared json artifact is synthesized from the final message's fenced json block and a markdown artifact from the final message itself.
 
 ## FakeExecutor — the Compliance Contract
 

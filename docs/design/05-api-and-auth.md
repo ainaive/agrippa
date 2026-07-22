@@ -1,6 +1,6 @@
 # 05 — API, Auth & RBAC
 
-> Status: draft for review · Last updated: 2026-07-17
+> Status: living · Last updated: 2026-07-23
 
 Hono server (`apps/api`), REST under `/api/v1`, request/response validation via `@hono/zod-validator` with all schemas imported from `@agrippa/core` (the SPA consumes the same schemas — one source of truth). Auth: **better-auth** with its Drizzle adapter ([ADR-0004](../adr/0004-better-auth.md)), mounted at `/api/auth/*`.
 
@@ -22,7 +22,7 @@ Two layers, deliberately simple:
 | Org | `org_admin`, `org_member` | Resource layer writes (registries, template publish), org settings, user management |
 | Project | `admin`, `member`, `viewer` | Everything project-scoped |
 
-Project-role capabilities: **viewer** = read everything in the project; **member** = viewer + submit tasks, cancel own runs, decide approvals; **admin** = member + manage members, resource grants, quota, repos, project settings.
+Project-role capabilities: **viewer** = read everything in the project (including run comments and the timeline); **member** = viewer + submit tasks (with agent-slot overrides), cancel own runs, respond to checkpoints (approve/request-changes/reject, answer questions, decide review findings), post run comments; **admin** = member + manage members, resource grants, quota, repos, project settings.
 
 Enforcement: a single middleware `requireRole(scope, minRole)` — scope is `org` or a project id resolved from the route; it reads `project_members` (or `users.org_role`) and rejects with `403 {code: "forbidden"}`. Every mutating handler writes an `audit_logs` row (actor, action, resource, payload diff, IP) via a shared audit helper — auditing is not optional per-route.
 
@@ -69,19 +69,25 @@ GET /task-types/:id                       # includes compiled input schema → f
 
 ### Execution
 ```
-POST /projects/:id/tasks                  # {taskTypeId, title, params} → 202 {taskId, runId}
+POST /projects/:id/tasks                  # {taskTypeId, title, params, agents?} → 202 {taskId, runId}
 GET  /projects/:id/tasks?status=&taskType=
-GET  /tasks/:id                           POST /tasks/:id/retry     # → new run
-GET  /runs/:id                            # embeds a viewer-scoped template plan (phases/budgets/modelRoles — no prompts)
-GET  /runs/:id/steps                      # each row carries usage {costUsd, tokens} aggregated from token_usage
+GET  /tasks/:id                           POST /tasks/:id/retry     # → new run (bindings copied)
+GET  /runs/:id                            # embeds a viewer-scoped template plan (phases/loops/checkpoints/budgets/modelRoles —
+                                          # no prompts), per-slot agent metadata, and all checkpoint rows with decider names
+GET  /runs/:id/steps                      # each row carries iteration + usage {costUsd, tokens}
 GET  /runs/:id/events                     # SSE; Last-Event-ID replay (see 04)
 POST /runs/:id/cancel
-GET  /approvals/pending                   # cross-project inbox: pending checkpoints in the caller's projects
-GET  /runs/:id/approvals                  POST /runs/:id/approvals/:approvalId  # {decision, comment}
+GET  /checkpoints/pending                 # cross-project "waiting on you" inbox (kind, iteration, payload snapshot)
+GET  /runs/:id/checkpoints                # all checkpoint rows for the run
+POST /runs/:id/checkpoints/:checkpointId/respond   # kind-discriminated: approval {decision, comment} |
+                                                   # input {answers} | review-gate {outcome, selectedFindingIds}
+GET  /runs/:id/comments                   POST /runs/:id/comments   # {body} → also a comment.added run event
 GET  /runs/:id/artifacts                  GET /artifacts/:id/download
 ```
 
-Submission authorizes the resources a task references before persisting: a `repoRef` param must name a repo connection **owned by the project** (else `400 {code: "repo_not_in_project"}`), and the run's authorized skills/MCP are pinned into a resource manifest (see [04](04-execution-runtime.md) and [ADR-0009](../adr/0009-security-correctness-deep-modules.md)). Approval decisions are a compare-and-swap on the pending status: a decision that lost the race (already decided, or expired) returns `409 {code: "already_decided"}`.
+Submission authorizes the resources a task references before persisting: a `repoRef` param must name a repo connection **owned by the project** (else `400 {code: "repo_not_in_project"}`), the run's authorized skills/MCP are pinned into a resource manifest (see [04](04-execution-runtime.md) and [ADR-0009](../adr/0009-security-correctness-deep-modules.md)), and every agent slot resolves to a concrete faber + executor (`resolveAgentBindings`: overrides on overridable slots only — `400 slot_not_overridable`/`slot_unknown`/`executor_unknown`/`faber_unknown`, capability checks against the executor catalog — `400 executor_capability`, provider-filtered per-slot model resolution — `400 model_unresolvable`).
+
+Checkpoint responses validate against the pending row's kind (`409 checkpoint_kind_mismatch`) and its snapshot (unknown/missing answers or finding ids → `400 validation_failed`); `request_changes` outside a loop → `409 request_changes_unsupported`. Decisions are a compare-and-swap on the pending status: a response that lost the race returns `409 {code: "already_decided"}`. The decision, its `checkpoint.decided` event, and the audit row commit in one transaction; comments likewise commit with their `comment.added` event so the SSE timeline and the thread can never disagree.
 
 ### Resource layer (org_admin writes; members read)
 ```
