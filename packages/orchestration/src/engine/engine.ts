@@ -1,4 +1,12 @@
-import { isTerminalRunStatus, type RunStatus, type StepStatus } from "@agrippa/core";
+import {
+  type CheckpointStoredResponse,
+  isTerminalRunStatus,
+  questionsArtifactSchema,
+  type ReviewFinding,
+  type RunStatus,
+  reviewReportSchema,
+  type StepStatus,
+} from "@agrippa/core";
 import {
   artifacts,
   checkpoints,
@@ -11,6 +19,7 @@ import {
   tasks,
   templateVersions,
   tokenUsage,
+  users,
 } from "@agrippa/db";
 import {
   BudgetExceededError,
@@ -27,22 +36,38 @@ import {
   type StepExecutionRequest,
   type UsageDelta,
 } from "@agrippa/executor-core";
-import { and, eq, gte, max, ne, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, max, ne, sql } from "drizzle-orm";
+import { upgradeCompiledTemplate } from "../compile";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
-import type { ModelResolution } from "../resolve";
+import type { ModelResolutionEntry } from "../resolve";
 import {
+  type CompiledTemplate,
   durationToMinutes,
-  type TemplateDoc,
-  type TemplatePhase,
-  type TemplateStep,
+  flattenPhases,
+  isLoopNode,
+  type LoopNode,
+  type TemplatePhaseV2,
+  type TemplateStepV2,
 } from "../template-schema";
 import type { EngineDeps, RunOutcome } from "./deps";
 import { appendRunEvent, finalizeRun, transitionRun } from "./run-lifecycle";
 
 type RunRow = typeof runs.$inferSelect;
 type StepRow = typeof runSteps.$inferSelect;
+type CheckpointRow = typeof checkpoints.$inferSelect;
+type AgentStep = TemplateStepV2 & { kind: "agent" };
+type SystemStep = TemplateStepV2 & { kind: "system" };
+type CheckpointStep = TemplateStepV2 & { kind: "checkpoint" };
 
 type AbortReason = "cancelled" | "timed_out" | "budget_exceeded";
+
+/** A run's per-slot execution binding, resolved once at pickup. */
+type SlotBinding = {
+  faberId: string;
+  executorId: string;
+  systemPrompt: string;
+  executor: Executor;
+};
 
 class RunFailure extends Error {
   constructor(
@@ -79,6 +104,16 @@ function mcpSecretValues(server: ResolvedMcpServer): string[] {
   return values;
 }
 
+/** Inline artifact values may be stored as JSON text (disk store) or raw values. */
+function jsonValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Executes (or resumes) one run to its next stopping point: a terminal state
  * or a waiting_approval pause. Steps are the idempotency unit — on resume,
@@ -97,20 +132,36 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
     .from(templateVersions)
     .where(eq(templateVersions.id, run.templateVersionId));
   if (!versionRow) throw new Error(`template version for run ${runId} not found`);
-  const template = versionRow.compiled as unknown as TemplateDoc;
+  const template = upgradeCompiledTemplate(versionRow.compiled);
 
   const [task] = await db.select().from(tasks).where(eq(tasks.id, run.taskId));
   const [project] = await db.select().from(projects).where(eq(projects.id, run.projectId));
-  const [faber] = await db.select().from(fabri).where(eq(fabri.id, run.faberId));
-  if (!task || !project || !faber) throw new Error(`run ${runId}: task/project/faber missing`);
+  if (!task || !project) throw new Error(`run ${runId}: task/project missing`);
 
-  const executor = deps.executors[run.executorId];
-  if (!executor) throw new Error(`executor '${run.executorId}' not registered`);
+  // Per-slot bindings: stored on the run at submit (agrippa/v2); slots without
+  // a stored binding — every run submitted before slots existed — fall back to
+  // the run's primary faber/executor, which preserves v1 behavior exactly.
+  const stored = run.agentBindings ?? {};
+  const slotIds = Object.keys(template.spec.agents);
+  const faberIds = [...new Set(slotIds.map((slot) => stored[slot]?.faberId ?? run.faberId))];
+  const faberRows = await db.select().from(fabri).where(inArray(fabri.id, faberIds));
+  const fabersById = new Map(faberRows.map((f) => [f.id, f]));
 
-  const engine = new RunEngine(deps, executor, run, template, {
+  const bindings: Record<string, SlotBinding> = {};
+  for (const slot of slotIds) {
+    const faberId = stored[slot]?.faberId ?? run.faberId;
+    const executorId = stored[slot]?.executorId ?? run.executorId;
+    const executor = deps.executors[executorId];
+    if (!executor) throw new Error(`executor '${executorId}' not registered`);
+    const faber = fabersById.get(faberId);
+    if (!faber) throw new Error(`run ${runId}: faber ${faberId} for slot '${slot}' missing`);
+    bindings[slot] = { faberId, executorId, systemPrompt: faber.systemPrompt, executor };
+  }
+
+  const engine = new RunEngine(deps, run, template, bindings, {
     orgId: task.orgId,
+    taskTitle: task.title,
     project: { id: project.id, slug: project.slug, name: project.name },
-    faberSystemPrompt: faber.systemPrompt,
   });
   return await engine.execute();
 }
@@ -122,29 +173,33 @@ class RunEngine {
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribeControl: (() => void) | null = null;
   private workspaceDir = "";
-  private stepRows = new Map<string, StepRow>(); // stepId → latest attempt row
+  private stepRows = new Map<string, StepRow>(); // `${stepId}#${iteration}` → latest attempt row
   private stepOutputs: Record<string, { outputs: Record<string, unknown> }> = {};
   private modelPrices = new Map<string, { input: number; output: number; modelId?: string }>();
   private currentStepRowId: string | null = null;
+  private currentIteration = 1;
   private producedArtifacts = new Set<string>();
-  // stepId → crashed-attempt count + last executor session, for crash resume
+  /** Latest inline value per artifact key — the `artifacts.<key>` expression root. */
+  private artifactValues: Record<string, unknown> = {};
+  /** Latest decided response per checkpoint id — the `checkpoints.<id>` root. */
+  private checkpointResponses: Record<string, CheckpointStoredResponse> = {};
+  // rowKey → crashed-attempt count + last executor session, for crash resume
   private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
   // scrubs known secret values from event payloads before persist/publish
   private readonly redactor: SecretRedactor = createSecretRedactor(collectEnvSecretValues());
 
   constructor(
     private readonly deps: EngineDeps,
-    private readonly executor: Executor,
     private readonly run: RunRow,
-    private readonly template: TemplateDoc,
+    private readonly template: CompiledTemplate,
+    private readonly bindings: Record<string, SlotBinding>,
     private readonly refs: {
       orgId: string;
+      taskTitle: string;
       project: { id: string; slug: string; name: string };
-      faberSystemPrompt: string;
     },
   ) {
-    const resolution = run.modelResolution as unknown as ModelResolution;
-    for (const entry of Object.values(resolution)) {
+    for (const entry of this.allResolutionEntries()) {
       this.modelPrices.set(entry.providerModelId, {
         input: entry.inputCostPerMtok,
         output: entry.outputCostPerMtok,
@@ -157,10 +212,44 @@ class RunEngine {
     return this.deps.db;
   }
 
+  private rowKey(stepId: string, iteration = this.currentIteration): string {
+    return `${stepId}#${iteration}`;
+  }
+
+  /**
+   * runs.model_resolution is flat (role → entry) for runs submitted before
+   * slots existed, slot-keyed (slot → role → entry) afterwards. Normalize on
+   * read so both shapes execute identically.
+   */
+  private resolutionFor(slot: string): Record<string, ModelResolutionEntry> {
+    const raw = this.run.modelResolution as Record<string, unknown>;
+    const values = Object.values(raw);
+    const flat = values.every(
+      (v) => v !== null && typeof v === "object" && "providerModelId" in (v as object),
+    );
+    if (flat) return raw as Record<string, ModelResolutionEntry>;
+    const bySlot = raw as Record<string, Record<string, ModelResolutionEntry>>;
+    return bySlot[slot] ?? (Object.values(bySlot)[0] as Record<string, ModelResolutionEntry>) ?? {};
+  }
+
+  private allResolutionEntries(): ModelResolutionEntry[] {
+    const raw = this.run.modelResolution as Record<string, unknown>;
+    const entries: ModelResolutionEntry[] = [];
+    for (const value of Object.values(raw)) {
+      if (value === null || typeof value !== "object") continue;
+      if ("providerModelId" in (value as object)) {
+        entries.push(value as ModelResolutionEntry);
+      } else {
+        entries.push(...Object.values(value as Record<string, ModelResolutionEntry>));
+      }
+    }
+    return entries;
+  }
+
   async execute(): Promise<RunOutcome> {
     try {
       await this.initialize();
-      const outcome = await this.runPhases();
+      const outcome = await this.runFlow();
       return outcome;
     } catch (err) {
       // another worker owns the run — leave it entirely to them, finalize nothing
@@ -206,8 +295,10 @@ class RunEngine {
       number: run.number,
     });
 
-    // steps already recorded (resume)
+    // steps already recorded (resume) — ascending (iteration, attempt) so the
+    // latest iteration's output wins in stepOutputs
     const existing = await db.select().from(runSteps).where(eq(runSteps.runId, run.id));
+    existing.sort((a, b) => a.iteration - b.iteration || a.attempt - b.attempt);
     for (const row of existing) {
       // a row still 'running' means the previous worker died mid-step
       if (row.status === "running") {
@@ -225,22 +316,37 @@ class RunEngine {
       // a crash is an interrupted attempt, not a consumed retry: track it so the
       // step gets an extra attempt and resumes the executor session
       if (row.status === "failed" && (row.error as { code?: string } | null)?.code === "crashed") {
-        const rec = this.crashRecovery.get(row.stepId) ?? { crashed: 0, sessionId: null };
+        const key = `${row.stepId}#${row.iteration}`;
+        const rec = this.crashRecovery.get(key) ?? { crashed: 0, sessionId: null };
         rec.crashed += 1;
         if (row.executorSessionId) rec.sessionId = row.executorSessionId;
-        this.crashRecovery.set(row.stepId, rec);
+        this.crashRecovery.set(key, rec);
       }
-      const current = this.stepRows.get(row.stepId);
-      if (!current || row.attempt > current.attempt) this.stepRows.set(row.stepId, row);
+      const key = `${row.stepId}#${row.iteration}`;
+      const current = this.stepRows.get(key);
+      if (!current || row.attempt > current.attempt) this.stepRows.set(key, row);
       if (row.status === "succeeded") {
         this.stepOutputs[row.stepId] = { outputs: { result: row.output ?? "" } };
       }
     }
     const priorArtifacts = await db
-      .select({ key: artifacts.artifactKey })
+      .select()
       .from(artifacts)
-      .where(eq(artifacts.runId, run.id));
-    for (const a of priorArtifacts) this.producedArtifacts.add(a.key);
+      .where(eq(artifacts.runId, run.id))
+      .orderBy(artifacts.createdAt);
+    for (const a of priorArtifacts) {
+      this.producedArtifacts.add(a.artifactKey);
+      this.artifactValues[a.artifactKey] = a.inline ?? "";
+    }
+    // decided checkpoint responses re-enter the expression context on resume
+    const decidedCheckpoints = await db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, run.id), eq(checkpoints.status, "approved")))
+      .orderBy(checkpoints.iteration);
+    for (const row of decidedCheckpoints) {
+      this.checkpointResponses[row.checkpointId] = this.responseOf(row);
+    }
 
     // budget meter from persisted totals — no double counting across resume
     const [usageTotals] = await db
@@ -335,39 +441,11 @@ class RunEngine {
 
   // ── Main loop ────────────────────────────────────────────────────────────────
 
-  private async runPhases(): Promise<RunOutcome> {
-    for (const phase of this.template.spec.phases) {
+  private async runFlow(): Promise<RunOutcome> {
+    for (const node of this.template.spec.phases) {
       await this.checkInterrupts();
-
-      if (phase.approval) {
-        const gate = await this.approvalGate(phase);
-        if (gate === "waiting") return await this.pauseForApproval(phase);
-        if (gate === "rejected") {
-          throw new RunFailure(
-            "approval_rejected",
-            `checkpoint ${phase.approval.checkpoint} rejected`,
-          );
-        }
-      }
-
-      this.meter.enterPhase(phase.id);
-      const phaseSteps = phase.steps.filter((s) => this.stepRows.get(s.id)?.status !== "succeeded");
-      if (phaseSteps.length > 0) await this.emit("phase.started", { phaseId: phase.id });
-
-      for (const step of phase.steps) {
-        const existing = this.stepRows.get(step.id);
-        if (existing && (existing.status === "succeeded" || existing.status === "skipped")) {
-          continue;
-        }
-        await this.checkInterrupts();
-        // re-read project quota each step so concurrent runs can't collectively
-        // overspend by each checking only a stale start-of-run snapshot
-        const quota = await this.quotaHeadroom();
-        this.meter.refreshQuota(quota.costUsd, quota.tokens);
-        this.meter.check();
-        await this.executeStepWithRetry(phase, step);
-      }
-      await this.emit("phase.completed", { phaseId: phase.id });
+      const outcome = isLoopNode(node) ? await this.runLoop(node) : await this.runPhase(node, 1);
+      if (outcome === "waiting") return await this.pauseRun();
     }
 
     // output contract — succeeded must mean "produced the contracted outputs"
@@ -385,69 +463,314 @@ class RunEngine {
     return "succeeded";
   }
 
-  // ── Approvals ────────────────────────────────────────────────────────────────
-
-  private async approvalGate(phase: TemplatePhase): Promise<"approved" | "waiting" | "rejected"> {
-    const approval = phase.approval;
-    if (!approval) return "approved";
-    const [row] = await this.db
-      .select()
-      .from(checkpoints)
-      .where(
-        and(eq(checkpoints.runId, this.run.id), eq(checkpoints.checkpointId, approval.checkpoint)),
-      );
-    if (!row) return "waiting";
-    if (row.status === "approved") return "approved";
-    if (row.status === "rejected") return "rejected";
-    if (row.status === "expired") {
-      if (approval.onTimeout === "approve") return "approved";
-      if (approval.onTimeout === "reject") return "rejected";
-      throw new RunFailure("approval_expired", "approval checkpoint expired", "cancelled");
+  private async runLoop(node: LoopNode): Promise<"done" | "waiting"> {
+    const loopStepIds = node.phases.flatMap((p) => p.steps.map((s) => s.id));
+    // derive the resume iteration from persisted rows — no extra state table
+    let startIter = 1;
+    for (const [key, row] of this.stepRows) {
+      const stepId = key.slice(0, key.lastIndexOf("#"));
+      if (loopStepIds.includes(stepId)) startIter = Math.max(startIter, row.iteration);
     }
-    return "waiting"; // pending
+
+    for (let iter = startIter; iter <= node.maxIterations; iter++) {
+      const announced = loopStepIds.some((id) => this.stepRows.has(`${id}#${iter}`));
+      if (!announced) {
+        await this.emit("loop.iteration.started", {
+          loopId: node.id,
+          iteration: iter,
+          maxIterations: node.maxIterations,
+        });
+      }
+      for (const phase of node.phases) {
+        const outcome = await this.runPhase(phase, iter);
+        if (outcome === "waiting") return "waiting";
+      }
+      if (evaluateCondition(node.until, this.expressionContext())) {
+        await this.emit("loop.completed", { loopId: node.id, iterations: iter });
+        this.currentIteration = 1;
+        return "done";
+      }
+      if (iter === node.maxIterations) {
+        await this.emit("loop.exhausted", { loopId: node.id, iterations: iter });
+        if (node.onMaxIterations === "fail") {
+          throw new RunFailure(
+            "loop_exhausted",
+            `loop ${node.id} exhausted after ${iter} iterations`,
+          );
+        }
+      }
+    }
+    this.currentIteration = 1;
+    return "done";
   }
 
-  private async pauseForApproval(phase: TemplatePhase): Promise<RunOutcome> {
-    const approval = phase.approval;
-    if (!approval) throw new Error("pauseForApproval without approval spec");
-    const [existing] = await this.db
-      .select()
-      .from(checkpoints)
-      .where(
-        and(eq(checkpoints.runId, this.run.id), eq(checkpoints.checkpointId, approval.checkpoint)),
-      );
-    if (!existing) {
-      await this.db.insert(checkpoints).values({
-        runId: this.run.id,
-        checkpointId: approval.checkpoint,
-        payload: {
-          title: approval.title,
-          present: approval.present,
-          phaseId: phase.id,
-          timeoutMinutes: durationToMinutes(approval.timeout),
-          onTimeout: approval.onTimeout,
-        },
-      });
-      await this.emit("approval.required", {
-        checkpointId: approval.checkpoint,
-        phaseId: phase.id,
-        title: approval.title,
-        present: approval.present,
-      });
+  private async runPhase(phase: TemplatePhaseV2, iteration: number): Promise<"done" | "waiting"> {
+    this.currentIteration = iteration;
+    this.meter.enterPhase(phase.id);
+    const pending = phase.steps.filter((s) => {
+      const row = this.stepRows.get(this.rowKey(s.id));
+      return !(row && (row.status === "succeeded" || row.status === "skipped"));
+    });
+    if (pending.length > 0) {
+      await this.emit("phase.started", { phaseId: phase.id, iteration });
     }
+
+    for (const step of phase.steps) {
+      const existing = this.stepRows.get(this.rowKey(step.id));
+      if (existing && (existing.status === "succeeded" || existing.status === "skipped")) {
+        continue;
+      }
+      await this.checkInterrupts();
+      // re-read project quota each step so concurrent runs can't collectively
+      // overspend by each checking only a stale start-of-run snapshot
+      const quota = await this.quotaHeadroom();
+      this.meter.refreshQuota(quota.costUsd, quota.tokens);
+      this.meter.check();
+      if (step.kind === "checkpoint") {
+        const outcome = await this.runCheckpointStep(phase, step, iteration);
+        if (outcome === "waiting") return "waiting";
+        continue;
+      }
+      await this.executeStepWithRetry(phase, step);
+    }
+    await this.emit("phase.completed", { phaseId: phase.id, iteration });
+    return "done";
+  }
+
+  private async pauseRun(): Promise<RunOutcome> {
     await this.transition("running", "waiting_approval");
     return "waiting_approval";
   }
 
+  // ── Checkpoints ──────────────────────────────────────────────────────────────
+
+  /** The response a decided row carries; synthesizes one for legacy approval rows. */
+  private responseOf(row: CheckpointRow): CheckpointStoredResponse {
+    if (row.response) return row.response;
+    if (row.kind === "input") return { kind: "input", outcome: "pass" };
+    if (row.kind === "review-gate") {
+      return {
+        kind: "review-gate",
+        outcome: "pass",
+        selectedFindings: [],
+        acceptedFindings: [],
+        acceptedFindingIds: [],
+      };
+    }
+    return {
+      kind: "approval",
+      outcome: row.status === "rejected" ? "rejected" : "approved",
+      comment: row.comment ?? undefined,
+    };
+  }
+
+  /** Auto-pass response when the source artifact is absent or empty; null = must pause. */
+  private autoPassResponse(spec: CheckpointStep["checkpoint"]): CheckpointStoredResponse | null {
+    if (spec.kind === "approval") return null;
+    const value = jsonValue(this.artifactValues[spec.source]);
+    if (spec.kind === "input") {
+      const parsed = questionsArtifactSchema.safeParse(value ?? { questions: [] });
+      const questions = parsed.success ? parsed.data.questions : [];
+      return questions.length === 0 ? { kind: "input", outcome: "pass", auto: true } : null;
+    }
+    const parsed = reviewReportSchema.safeParse(value ?? { findings: [] });
+    const findings = parsed.success ? parsed.data.findings : [];
+    return findings.length === 0
+      ? {
+          kind: "review-gate",
+          outcome: "pass",
+          selectedFindings: [],
+          acceptedFindings: [],
+          acceptedFindingIds: [],
+          auto: true,
+        }
+      : null;
+  }
+
+  /** The parsed source content snapshotted into the pending row for the UI. */
+  private sourceSnapshot(spec: CheckpointStep["checkpoint"]): Record<string, unknown> {
+    if (spec.kind === "approval") return {};
+    const value = jsonValue(this.artifactValues[spec.source]);
+    if (spec.kind === "input") {
+      const parsed = questionsArtifactSchema.safeParse(value ?? { questions: [] });
+      return { questions: parsed.success ? parsed.data.questions : [] };
+    }
+    const parsed = reviewReportSchema.safeParse(value ?? { findings: [] });
+    return parsed.success ? { summary: parsed.data.summary, findings: parsed.data.findings } : {};
+  }
+
+  /**
+   * One checkpoint step of one iteration. No row yet → auto-pass (empty
+   * source) or insert pending + pause. Pending → pause again (re-delivery).
+   * Decided → fold the response into the context and mark the step done.
+   * Pausing completes the job — no worker slot is held while humans decide.
+   */
+  private async runCheckpointStep(
+    phase: TemplatePhaseV2,
+    step: CheckpointStep,
+    iteration: number,
+  ): Promise<"done" | "waiting"> {
+    const spec = step.checkpoint;
+    if (step.when && !evaluateCondition(step.when, this.expressionContext())) {
+      await this.markSkipped(phase, step, "when_false");
+      return "done";
+    }
+
+    const [row] = await this.db
+      .select()
+      .from(checkpoints)
+      .where(
+        and(
+          eq(checkpoints.runId, this.run.id),
+          eq(checkpoints.checkpointId, step.id),
+          eq(checkpoints.iteration, iteration),
+        ),
+      );
+
+    if (!row) {
+      const auto = this.autoPassResponse(spec);
+      if (auto) {
+        await this.db.insert(checkpoints).values({
+          runId: this.run.id,
+          checkpointId: step.id,
+          kind: spec.kind,
+          iteration,
+          status: "approved",
+          response: auto,
+          decidedAt: new Date(),
+          payload: { title: spec.title, phaseId: phase.id, iteration, auto: true },
+        });
+        this.checkpointResponses[step.id] = auto;
+        const prior = this.stepRows.get(this.rowKey(step.id));
+        const stepRow = await this.insertStepRow(phase, step, (prior?.attempt ?? 0) + 1, null);
+        await this.completeStep(stepRow, JSON.stringify(auto));
+        await this.emit("checkpoint.decided", {
+          checkpointId: step.id,
+          kind: spec.kind,
+          phaseId: phase.id,
+          iteration,
+          outcome: auto.outcome,
+          auto: true,
+        });
+        return "done";
+      }
+      const snapshot = this.sourceSnapshot(spec);
+      await this.db.insert(checkpoints).values({
+        runId: this.run.id,
+        checkpointId: step.id,
+        kind: spec.kind,
+        iteration,
+        payload: {
+          kind: spec.kind,
+          title: spec.title,
+          present: spec.present,
+          phaseId: phase.id,
+          iteration,
+          timeoutMinutes: durationToMinutes(spec.timeout),
+          onTimeout: spec.onTimeout,
+          ...snapshot,
+        },
+      });
+      await this.ensureWaitingStepRow(phase, step);
+      await this.emit("checkpoint.required", {
+        checkpointId: step.id,
+        kind: spec.kind,
+        phaseId: phase.id,
+        iteration,
+        title: spec.title,
+        present: spec.present,
+        ...snapshot,
+      });
+      return "waiting";
+    }
+
+    if (row.status === "pending") {
+      // re-delivery while the human still hasn't decided — pause again
+      await this.ensureWaitingStepRow(phase, step);
+      return "waiting";
+    }
+
+    if (row.status === "rejected") {
+      await this.resolveWaitingStepRow(phase, step, "failed", {
+        code: "approval_rejected",
+        message: `checkpoint ${step.id} rejected`,
+      });
+      throw new RunFailure("approval_rejected", `checkpoint ${step.id} rejected`);
+    }
+
+    if (row.status === "expired") {
+      if (spec.kind === "approval" && spec.onTimeout === "approve") {
+        const response: CheckpointStoredResponse = { kind: "approval", outcome: "approved" };
+        this.checkpointResponses[step.id] = response;
+        await this.resolveWaitingStepRow(phase, step, "succeeded", null, JSON.stringify(response));
+        return "done";
+      }
+      if (spec.kind === "approval" && spec.onTimeout === "reject") {
+        await this.resolveWaitingStepRow(phase, step, "failed", {
+          code: "approval_rejected",
+          message: `checkpoint ${step.id} expired (onTimeout: reject)`,
+        });
+        throw new RunFailure("approval_rejected", `checkpoint ${step.id} expired`);
+      }
+      await this.resolveWaitingStepRow(phase, step, "cancelled", {
+        code: "approval_expired",
+        message: `checkpoint ${step.id} expired`,
+      });
+      throw new RunFailure("approval_expired", "approval checkpoint expired", "cancelled");
+    }
+
+    // approved
+    const response = this.responseOf(row);
+    this.checkpointResponses[step.id] = response;
+    await this.resolveWaitingStepRow(phase, step, "succeeded", null, JSON.stringify(response));
+    return "done";
+  }
+
+  /** Pending checkpoints keep a waiting_approval step row so the timeline shows the pause. */
+  private async ensureWaitingStepRow(phase: TemplatePhaseV2, step: CheckpointStep): Promise<void> {
+    const existing = this.stepRows.get(this.rowKey(step.id));
+    if (existing && existing.status === "waiting_approval") return;
+    const row = await this.insertStepRow(phase, step, (existing?.attempt ?? 0) + 1, null);
+    await this.db
+      .update(runSteps)
+      .set({ status: "waiting_approval" })
+      .where(eq(runSteps.id, row.id));
+    row.status = "waiting_approval";
+  }
+
+  /** Settle the checkpoint's step row once the human (or expiry) decided. */
+  private async resolveWaitingStepRow(
+    phase: TemplatePhaseV2,
+    step: CheckpointStep,
+    status: Extract<StepStatus, "succeeded" | "failed" | "cancelled">,
+    error: { code: string; message: string } | null,
+    output?: string,
+  ): Promise<void> {
+    let row = this.stepRows.get(this.rowKey(step.id));
+    if (!row) row = await this.insertStepRow(phase, step, 1, null);
+    else if (row.status !== "waiting_approval") {
+      row = await this.insertStepRow(phase, step, row.attempt + 1, null);
+    }
+    await this.db
+      .update(runSteps)
+      .set({ status, output: output ?? null, error, finishedAt: new Date() })
+      .where(eq(runSteps.id, row.id));
+    row.status = status;
+    if (output !== undefined) row.output = output;
+  }
+
   // ── Steps ────────────────────────────────────────────────────────────────────
 
-  private async executeStepWithRetry(phase: TemplatePhase, step: TemplateStep): Promise<void> {
+  private async executeStepWithRetry(
+    phase: TemplatePhaseV2,
+    step: AgentStep | SystemStep,
+  ): Promise<void> {
     // crashes don't consume the retry budget — each adds one extra attempt so a
     // no-retry step that died mid-run still re-executes instead of silently
     // being skipped (its loop would otherwise be `for (2; 2 <= 1)`)
-    const recovery = this.crashRecovery.get(step.id);
+    const recovery = this.crashRecovery.get(this.rowKey(step.id));
     const maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0);
-    const startAttempt = (this.stepRows.get(step.id)?.attempt ?? 0) + 1;
+    const startAttempt = (this.stepRows.get(this.rowKey(step.id))?.attempt ?? 0) + 1;
 
     // conditional / requires gating
     if (step.when && !evaluateCondition(step.when, this.expressionContext())) {
@@ -485,7 +808,7 @@ class RunEngine {
       this.currentStepRowId = row.id;
       try {
         if (step.kind === "system") {
-          await this.runSystemStep(step);
+          await this.runSystemStep(phase, step, row);
           await this.completeStep(row, "");
         } else {
           const output = await this.runAgentStep(phase, step, row, attempt);
@@ -500,13 +823,18 @@ class RunEngine {
             await this.emit("step.retrying", {
               phaseId: phase.id,
               stepId: step.id,
+              iteration: this.currentIteration,
               attempt,
               error: err.errorPayload,
             });
             continue;
           }
           if (step.onFailure === "continue") {
-            await this.emit("step.continued", { phaseId: phase.id, stepId: step.id });
+            await this.emit("step.continued", {
+              phaseId: phase.id,
+              stepId: step.id,
+              iteration: this.currentIteration,
+            });
             return;
           }
           throw new RunFailure(err.errorPayload.code, `step ${step.id}: ${err.message}`);
@@ -518,32 +846,166 @@ class RunEngine {
     }
   }
 
-  private async runSystemStep(step: TemplateStep & { kind: "system" }): Promise<void> {
+  /** The workspace's resolved repoRef input value (what checkout used). */
+  private workspaceRepoValue(): unknown {
+    const spec = this.template.spec.workspace;
+    if (!spec) return null;
+    const wrapped = /^\$\{(.*)\}$/.exec(spec.repo.trim());
+    return wrapped ? evaluateExpression(wrapped[1] as string, this.expressionContext()) : spec.repo;
+  }
+
+  private async runSystemStep(
+    phase: TemplatePhaseV2,
+    step: SystemStep,
+    row: StepRow,
+  ): Promise<void> {
+    const ctx = this.expressionContext();
+
     if (step.action === "workspace.checkout") {
       const spec = this.template.spec.workspace;
       if (!spec) return;
-      // `repo: ${inputs.repo}` resolves to the structured repoRef value, not a string
-      const wrapped = /^\$\{(.*)\}$/.exec(spec.repo.trim());
-      const repo = wrapped
-        ? evaluateExpression(wrapped[1] as string, this.expressionContext())
-        : spec.repo;
-      const ref = spec.ref ? interpolate(spec.ref, this.expressionContext()) : undefined;
+      const ref = spec.ref ? interpolate(spec.ref, ctx) : undefined;
       await this.deps.workspace.checkout(this.run.id, {
-        repo,
+        repo: this.workspaceRepoValue(),
         ref,
         access: spec.access,
         projectId: this.run.projectId,
       });
       await this.emit("workspace.ready", { ref });
+      return;
+    }
+
+    const scm = this.deps.scm;
+    if (!scm) {
+      throw new StepFailed(`${step.action} requires an SCM service`, {
+        code: "internal",
+        message: `worker has no SCM service configured for ${step.action}`,
+      });
+    }
+
+    if (step.action === "git.branch") {
+      const name = interpolate(step.with.name ?? "agrippa/run-${run.number}", ctx);
+      await this.wrapScm(step, () => scm.createBranch(this.run.id, name));
+      await this.db.update(runs).set({ workBranch: name }).where(eq(runs.id, this.run.id));
+      this.run.workBranch = name;
+      await this.emit("branch.created", { branch: name });
+      return;
+    }
+
+    const branch = this.run.workBranch;
+    if (!branch) {
+      throw new StepFailed(`${step.action} needs a work branch (run git.branch first)`, {
+        code: "internal",
+        message: "runs.work_branch is not set",
+      });
+    }
+
+    if (step.action === "git.push") {
+      await this.wrapScm(step, () =>
+        scm.push(this.run.id, {
+          projectId: this.run.projectId,
+          repo: this.workspaceRepoValue(),
+          branch,
+        }),
+      );
+      await this.emit("branch.pushed", { branch });
+      return;
+    }
+
+    // pr.open
+    const base =
+      interpolate(step.with.base ?? "", ctx) ||
+      (this.template.spec.workspace?.ref
+        ? interpolate(this.template.spec.workspace.ref, ctx)
+        : "main");
+    const title = interpolate(step.with.title ?? "", ctx) || this.refs.taskTitle;
+    const body = await this.composePrBody(step, ctx);
+    const { url } = await this.wrapScm(step, () =>
+      scm.openPullRequest(this.run.id, {
+        projectId: this.run.projectId,
+        repo: this.workspaceRepoValue(),
+        head: branch,
+        base,
+        title,
+        body,
+      }),
+    );
+    const key = step.produces[0] as string;
+    await this.emit(
+      "artifact",
+      {
+        phaseId: phase.id,
+        stepId: step.id,
+        iteration: this.currentIteration,
+        key,
+        kind: "link",
+      },
+      row.id,
+    );
+    await this.storeArtifact(row, { key, kind: "link", inline: url });
+    await this.emit("pr.opened", { url, branch, base });
+  }
+
+  /** SCM failures are step failures (retryable per the template), not engine crashes. */
+  private async wrapScm<T>(step: SystemStep, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      throw new StepFailed(`${step.action} failed: ${String(err)}`, {
+        code: "tool_error",
+        message: `${step.action}: ${String((err as Error).message ?? err).slice(0, 500)}`,
+      });
     }
   }
 
+  /**
+   * PR body = the template's interpolated `with.body` plus an explicit waiver
+   * section: findings the team accepted instead of fixing, with who accepted
+   * them — honest to human reviewers, and already part of the run record.
+   */
+  private async composePrBody(step: SystemStep, ctx: Record<string, unknown>): Promise<string> {
+    let body = interpolate(step.with.body ?? "", ctx);
+    const gateRows = await this.db
+      .select({ row: checkpoints, deciderName: users.name, deciderEmail: users.email })
+      .from(checkpoints)
+      .leftJoin(users, eq(checkpoints.decidedBy, users.id))
+      .where(
+        and(
+          eq(checkpoints.runId, this.run.id),
+          eq(checkpoints.kind, "review-gate"),
+          eq(checkpoints.status, "approved"),
+        ),
+      )
+      .orderBy(checkpoints.iteration);
+    // latest decision per checkpoint id carries the final waiver set
+    const latest = new Map<string, (typeof gateRows)[number]>();
+    for (const entry of gateRows) latest.set(entry.row.checkpointId, entry);
+    const waivers: Array<{ finding: ReviewFinding; acceptedBy: string }> = [];
+    for (const entry of latest.values()) {
+      const response = entry.row.response;
+      if (response?.kind !== "review-gate") continue;
+      const acceptedBy = entry.deciderName ?? entry.deciderEmail ?? "Agrippa";
+      for (const finding of response.acceptedFindings) waivers.push({ finding, acceptedBy });
+    }
+    if (waivers.length > 0) {
+      const lines = waivers.map(({ finding, acceptedBy }) => {
+        const where = finding.file
+          ? ` (\`${finding.file}${finding.line ? `:${finding.line}` : ""}\`)`
+          : "";
+        return `- **${finding.severity}** ${finding.title}${where} — accepted by ${acceptedBy}`;
+      });
+      body += `\n\n## Accepted review findings\n\n${lines.join("\n")}`;
+    }
+    return body.trim();
+  }
+
   private async runAgentStep(
-    phase: TemplatePhase,
-    step: TemplateStep & { kind: "agent" },
+    phase: TemplatePhaseV2,
+    step: AgentStep,
     row: StepRow,
     attempt: number,
   ): Promise<string> {
+    const binding = this.bindingFor(step);
     const request = await this.buildRequest(step, row, attempt);
     const ctx: ExecutionContext = {
       signal: this.abort.signal,
@@ -559,7 +1021,7 @@ class RunEngine {
     let output: string | null = null;
     let failure: StepFailed | null = null;
 
-    for await (const event of this.executor.executeStep(request, ctx)) {
+    for await (const event of binding.executor.executeStep(request, ctx)) {
       await this.persistExecutorEvent(phase, step, row, event);
       if (event.type === "step.completed") output = event.output;
       if (event.type === "step.failed") {
@@ -591,7 +1053,7 @@ class RunEngine {
 
     // engine-side patch artifacts: produced keys of kind patch the executor didn't emit
     for (const key of step.produces) {
-      if (this.producedArtifacts.has(key)) continue;
+      if (this.producedThisIteration(key, row)) continue;
       const contract = this.template.spec.outputs.artifacts.find((a) => a.key === key);
       if (contract?.kind === "patch") {
         const diff = await this.deps.workspace.diff(this.run.id);
@@ -603,13 +1065,33 @@ class RunEngine {
     return output;
   }
 
+  /** Whether the key was produced by this step row (loop rounds re-produce keys). */
+  private producedThisIteration(key: string, row: StepRow): boolean {
+    if (!this.producedArtifacts.has(key)) return false;
+    if (this.currentIteration === 1) return true;
+    // inside a loop the key may exist from an earlier round; re-diff each round
+    return this.artifactRowsThisStep.get(row.id)?.has(key) ?? false;
+  }
+
+  /** Artifact keys stored per step row id in this process life. */
+  private artifactRowsThisStep = new Map<string, Set<string>>();
+
+  private bindingFor(step: AgentStep): SlotBinding {
+    const slot = step.agent ?? (Object.keys(this.bindings)[0] as string);
+    const binding = this.bindings[slot];
+    if (!binding) throw new Error(`agent slot '${slot}' has no binding`);
+    return binding;
+  }
+
   private async buildRequest(
-    step: TemplateStep & { kind: "agent" },
+    step: AgentStep,
     row: StepRow,
     _attempt: number,
   ): Promise<StepExecutionRequest> {
     const ctx = this.expressionContext();
-    const resolution = this.run.modelResolution as unknown as ModelResolution;
+    const binding = this.bindingFor(step);
+    const slot = step.agent ?? (Object.keys(this.bindings)[0] as string);
+    const resolution = this.resolutionFor(slot);
 
     const modelFor = (role: string): ResolvedModel => {
       const entry = resolution[role];
@@ -673,8 +1155,10 @@ class RunEngine {
     return {
       runId: this.run.id,
       stepId: step.id,
+      iteration: this.currentIteration,
+      agentSlot: slot,
       instructions: interpolate(step.instructions, ctx),
-      systemPrompt: this.refs.faberSystemPrompt,
+      systemPrompt: binding.systemPrompt,
       model: modelFor(step.model.role),
       subagents,
       skills,
@@ -712,7 +1196,14 @@ class RunEngine {
     return {
       inputs: this.run.paramsSnapshot,
       steps: this.stepOutputs,
-      run: { id: this.run.id, number: this.run.number },
+      checkpoints: this.checkpointResponses,
+      artifacts: this.artifactValues,
+      run: {
+        id: this.run.id,
+        number: this.run.number,
+        workBranch: this.run.workBranch,
+        taskTitle: this.refs.taskTitle,
+      },
       project: this.refs.project,
     };
   }
@@ -720,8 +1211,8 @@ class RunEngine {
   // ── Event & row bookkeeping ─────────────────────────────────────────────────
 
   private async persistExecutorEvent(
-    phase: TemplatePhase,
-    step: TemplateStep,
+    phase: TemplatePhaseV2,
+    step: TemplateStepV2,
     row: StepRow,
     event: ExecutorEvent,
   ): Promise<void> {
@@ -745,6 +1236,7 @@ class RunEngine {
         {
           phaseId: phase.id,
           stepId: step.id,
+          iteration: this.currentIteration,
           key: event.key,
           kind: contractKind,
           path: event.path,
@@ -756,7 +1248,11 @@ class RunEngine {
     }
 
     const { type, ...payload } = event as { type: string } & Record<string, unknown>;
-    await this.emit(type, { phaseId: phase.id, stepId: step.id, ...payload }, row.id);
+    await this.emit(
+      type,
+      { phaseId: phase.id, stepId: step.id, iteration: this.currentIteration, ...payload },
+      row.id,
+    );
     if (event.type === "step.started" && event.sessionId) {
       await this.db
         .update(runSteps)
@@ -784,6 +1280,7 @@ class RunEngine {
       runId: this.run.id,
       stepId: row.id,
       artifactKey: event.key,
+      iteration: this.currentIteration,
       kind: event.kind as never,
       name: event.key,
       mime: stored.mime,
@@ -792,6 +1289,18 @@ class RunEngine {
       inline: stored.inline ?? null,
     });
     this.producedArtifacts.add(event.key);
+    const perRow = this.artifactRowsThisStep.get(row.id) ?? new Set<string>();
+    perRow.add(event.key);
+    this.artifactRowsThisStep.set(row.id, perRow);
+    if (stored.inline !== null) {
+      this.artifactValues[event.key] = stored.inline;
+    } else {
+      this.deps.logger.warn("artifact too large for the expression context", {
+        runId: this.run.id,
+        key: event.key,
+      });
+      this.artifactValues[event.key] = "";
+    }
   }
 
   private async recordUsage(event: UsageDelta, row: StepRow, attempt: number): Promise<void> {
@@ -817,8 +1326,8 @@ class RunEngine {
   }
 
   private async insertStepRow(
-    phase: TemplatePhase,
-    step: TemplateStep,
+    phase: TemplatePhaseV2,
+    step: TemplateStepV2,
     attempt: number,
     resumeSessionId: string | null = null,
   ): Promise<StepRow> {
@@ -828,23 +1337,29 @@ class RunEngine {
         runId: this.run.id,
         phaseId: phase.id,
         stepId: step.id,
+        iteration: this.currentIteration,
         attempt,
         seq: this.stepSeq(step.id),
         status: "running",
-        agentRef: step.kind === "agent" ? step.model.role : step.action,
+        agentRef:
+          step.kind === "agent"
+            ? (step.agent ?? Object.keys(this.bindings)[0] ?? null)
+            : step.kind === "system"
+              ? step.action
+              : "checkpoint",
         // carry the crashed attempt's session so buildRequest can resume it
         executorSessionId: resumeSessionId,
         startedAt: new Date(),
       })
       .returning();
     if (!row) throw new Error("run_steps insert returned no row");
-    this.stepRows.set(step.id, row);
+    this.stepRows.set(this.rowKey(step.id), row);
     return row;
   }
 
   private stepSeq(stepId: string): number {
     let index = 0;
-    for (const phase of this.template.spec.phases) {
+    for (const { phase } of flattenPhases(this.template.spec.phases)) {
       for (const step of phase.steps) {
         if (step.id === stepId) return index;
         index++;
@@ -872,8 +1387,8 @@ class RunEngine {
   }
 
   private async markSkipped(
-    phase: TemplatePhase,
-    step: TemplateStep,
+    phase: TemplatePhaseV2,
+    step: TemplateStepV2,
     reason: string,
   ): Promise<void> {
     const [row] = await this.db
@@ -882,14 +1397,20 @@ class RunEngine {
         runId: this.run.id,
         phaseId: phase.id,
         stepId: step.id,
-        attempt: (this.stepRows.get(step.id)?.attempt ?? 0) + 1,
+        iteration: this.currentIteration,
+        attempt: (this.stepRows.get(this.rowKey(step.id))?.attempt ?? 0) + 1,
         seq: this.stepSeq(step.id),
         status: "skipped",
         finishedAt: new Date(),
       })
       .returning();
-    if (row) this.stepRows.set(step.id, row);
-    await this.emit("step.skipped", { phaseId: phase.id, stepId: step.id, reason });
+    if (row) this.stepRows.set(this.rowKey(step.id), row);
+    await this.emit("step.skipped", {
+      phaseId: phase.id,
+      stepId: step.id,
+      iteration: this.currentIteration,
+      reason,
+    });
   }
 
   private async emit(

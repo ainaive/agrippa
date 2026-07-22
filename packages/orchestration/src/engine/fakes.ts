@@ -2,7 +2,14 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Logger, ResolvedMcpServer, ResolvedSkill } from "@agrippa/executor-core";
-import type { ArtifactStore, ResourceMaterializer, StoredArtifact, WorkspaceManager } from "./deps";
+import type {
+  ArtifactStore,
+  PullRequestSpec,
+  ResourceMaterializer,
+  ScmService,
+  StoredArtifact,
+  WorkspaceManager,
+} from "./deps";
 
 /** In-memory engine dependencies for the integration suite and local dev. */
 
@@ -93,6 +100,38 @@ export class InMemoryArtifactStore implements ArtifactStore {
       return { inline: content, storageRef: null, size: content.length, mime: file.type || null };
     }
     return { inline: null, storageRef: null, size: 0, mime: null };
+  }
+}
+
+export class FakeScmService implements ScmService {
+  readonly branches: Array<{ runId: string; name: string }> = [];
+  readonly pushes: Array<{ runId: string; branch: string }> = [];
+  readonly pullRequests: Array<{ runId: string; spec: PullRequestSpec }> = [];
+  /** Set to make the next call of that action throw once (retry testing). */
+  failNext: Partial<Record<"branch" | "push" | "pr", number>> = {};
+
+  private consumeFailure(kind: "branch" | "push" | "pr"): void {
+    const left = this.failNext[kind] ?? 0;
+    if (left > 0) {
+      this.failNext[kind] = left - 1;
+      throw new Error(`fake scm ${kind} failure`);
+    }
+  }
+
+  async createBranch(runId: string, name: string): Promise<void> {
+    this.consumeFailure("branch");
+    this.branches.push({ runId, name });
+  }
+
+  async push(runId: string, spec: { branch: string }): Promise<void> {
+    this.consumeFailure("push");
+    this.pushes.push({ runId, branch: spec.branch });
+  }
+
+  async openPullRequest(runId: string, spec: PullRequestSpec): Promise<{ url: string }> {
+    this.consumeFailure("pr");
+    this.pullRequests.push({ runId, spec });
+    return { url: `https://fake.scm/pr/${this.pullRequests.length}` };
   }
 }
 

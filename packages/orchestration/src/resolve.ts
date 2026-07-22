@@ -2,7 +2,7 @@ import type { ModelTier } from "@agrippa/core";
 import { type Db, models, projectResourceGrants, repoConnections } from "@agrippa/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
-import type { TemplateDoc, TemplateInput } from "./template-schema";
+import type { CompiledTemplate, TemplateInput } from "./template-schema";
 
 /**
  * Submit-time resolution (docs/design/04): validate params against the
@@ -79,7 +79,7 @@ export type ModelResolution = Record<string, ModelResolutionEntry>;
 export async function resolveModelRoles(
   db: Db,
   projectId: string,
-  spec: TemplateDoc["spec"]["models"],
+  spec: CompiledTemplate["spec"]["models"],
 ): Promise<ModelResolution> {
   const grants = await db
     .select({ resourceId: projectResourceGrants.resourceId })
@@ -149,7 +149,7 @@ export type ResourceManifest = { mcpServers: string[]; skills: string[] };
 export async function authorizeResources(
   db: Db,
   projectId: string,
-  compiled: TemplateDoc,
+  compiled: CompiledTemplate,
   registry: {
     skillIdBySlug: Map<string, string>;
     mcpIdBySlug: Map<string, string>;

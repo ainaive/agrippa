@@ -55,6 +55,31 @@ export interface ArtifactStore {
   ): Promise<StoredArtifact>;
 }
 
+export type PullRequestSpec = {
+  /** The run's project — the repo credential is loaded scoped to it. */
+  projectId: string;
+  /** Resolved repoRef input value (same shape as WorkspaceSpec.repo). */
+  repo: unknown;
+  head: string;
+  base: string;
+  title: string;
+  body: string;
+};
+
+/**
+ * Platform-side git write-path (ADR-0011): branch creation before the
+ * implementer runs, credentialed push, and PR creation via the provider REST
+ * API — deterministic, never delegated to an agent.
+ */
+export interface ScmService {
+  /** `git checkout -b <name>` inside the run workspace. */
+  createBranch(runId: string, name: string): Promise<void>;
+  /** Push the branch using the stored repo credential (inject → scrub). */
+  push(runId: string, spec: { projectId: string; repo: unknown; branch: string }): Promise<void>;
+  /** Open a PR/MR; returns its web URL. */
+  openPullRequest(runId: string, spec: PullRequestSpec): Promise<{ url: string }>;
+}
+
 export type EngineDeps = {
   db: Db;
   executors: Record<string, Executor>;
@@ -62,6 +87,8 @@ export type EngineDeps = {
   workspace: WorkspaceManager;
   resources: ResourceMaterializer;
   artifacts: ArtifactStore;
+  /** Required for templates using git.branch / git.push / pr.open steps. */
+  scm?: ScmService;
   logger: Logger;
 };
 

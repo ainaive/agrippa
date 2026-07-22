@@ -272,6 +272,8 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
       ["setup", "succeeded"],
       ["reproduce-bug", "succeeded"],
       ["find-root-cause", "succeeded"],
+      // the approval gate is a checkpoint step now — its pause is a step row
+      ["approve-fix-plan", "waiting_approval"],
     ]);
     // system step performed the checkout with the resolved repoRef object
     expect(workspace.checkouts).toHaveLength(1);
@@ -307,7 +309,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(events[0]?.type).toBe("run.started");
     expect(events.at(-1)?.type).toBe("run.succeeded");
     expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
-    expect(events.some((e) => e.type === "approval.required")).toBe(true);
+    expect(events.some((e) => e.type === "checkpoint.required")).toBe(true);
     expect(events.some((e) => e.type === "run.resumed")).toBe(true);
 
     // workspace cleaned up on terminal state
@@ -618,7 +620,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(seen[0]).toBe("run.started");
     expect(seen).toContain("step.started");
     expect(seen).toContain("usage");
-    expect(seen).toContain("approval.required");
+    expect(seen).toContain("checkpoint.required");
   });
 
   it("redacts known secret values from persisted events", async () => {

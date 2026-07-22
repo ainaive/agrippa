@@ -25,9 +25,10 @@ import {
   authorizeResources,
   buildParamsValidator,
   decideCheckpoint,
+  flattenPhases,
   resolveModelRoles,
   SubmitError,
-  type TemplateDoc,
+  upgradeCompiledTemplate,
   verifyRepoRefs,
 } from "@agrippa/orchestration";
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
@@ -82,7 +83,7 @@ export const executionRoutes = new Hono<AppEnv>()
         .from(templateVersions)
         .where(eq(templateVersions.id, template.latestPublishedVersionId));
       if (!version) throw AppError.notFound("Template version");
-      const compiled = version.compiled as unknown as TemplateDoc;
+      const compiled = upgradeCompiledTemplate(version.compiled);
 
       // params validated against the same compiled schema the SPA renders from
       const parsed = buildParamsValidator(compiled.spec.inputs).safeParse(input.params);
@@ -265,23 +266,45 @@ export const executionRoutes = new Hono<AppEnv>()
           eq(orchestrationTemplates.id, templateVersions.templateId),
         )
         .where(eq(templateVersions.id, run.templateVersionId));
-      const spec = (row?.compiled as TemplateDoc | undefined)?.spec;
+      const spec = row ? upgradeCompiledTemplate(row.compiled).spec : null;
       if (row && spec) {
         template = {
           slug: row.slug,
           version: row.version,
-          phases: spec.phases.map((phase) => ({
-            id: phase.id,
-            name: phase.name,
-            stepIds: phase.steps.map((step) => step.id),
-            approval: phase.approval
-              ? {
-                  checkpoint: phase.approval.checkpoint,
-                  title: phase.approval.title,
-                  present: phase.approval.present,
-                }
-              : null,
-          })),
+          agents: Object.fromEntries(
+            Object.entries(spec.agents).map(([slot, agent]) => [
+              slot,
+              { label: agent.label, overridable: agent.overridable },
+            ]),
+          ),
+          phases: flattenPhases(spec.phases).map(({ phase, loop }) => {
+            const checkpointSteps = phase.steps.filter((step) => step.kind === "checkpoint");
+            const firstApproval = checkpointSteps.find(
+              (step) => step.checkpoint.kind === "approval",
+            );
+            return {
+              id: phase.id,
+              name: phase.name,
+              loop: loop
+                ? { id: loop.id, name: loop.name, maxIterations: loop.maxIterations }
+                : null,
+              stepIds: phase.steps.map((step) => step.id),
+              checkpoints: checkpointSteps.map((step) => ({
+                id: step.id,
+                kind: step.checkpoint.kind,
+                title: step.checkpoint.title,
+                present: step.checkpoint.present,
+              })),
+              // legacy projection retained for the current phase-timeline UI
+              approval: firstApproval
+                ? {
+                    checkpoint: firstApproval.id,
+                    title: firstApproval.checkpoint.title,
+                    present: firstApproval.checkpoint.present,
+                  }
+                : null,
+            };
+          }),
           budgets: spec.budgets,
           modelRoles: spec.models.roles,
         };

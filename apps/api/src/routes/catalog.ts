@@ -1,6 +1,6 @@
 import { AppError } from "@agrippa/core";
 import { fabri, orchestrationTemplates, scenarios, taskTypes, templateVersions } from "@agrippa/db";
-import type { TemplateDoc } from "@agrippa/orchestration";
+import { upgradeCompiledTemplate } from "@agrippa/orchestration";
 import { asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
@@ -63,7 +63,7 @@ export const catalogRoutes = new Hono<AppEnv>()
         .from(templateVersions)
         .where(eq(templateVersions.id, template.latestPublishedVersionId));
       if (row) {
-        const compiled = row.compiled as unknown as TemplateDoc;
+        const compiled = upgradeCompiledTemplate(row.compiled);
         version = { id: row.id, version: row.version, compiled: row.compiled };
         inputs = compiled.spec.inputs;
         budgets = compiled.spec.budgets;

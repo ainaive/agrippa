@@ -209,7 +209,14 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(run.template.version).toBeGreaterThanOrEqual(1);
     expect(run.template.phases.length).toBeGreaterThan(0);
     for (const phase of run.template.phases) {
-      expect(Object.keys(phase).sort()).toEqual(["approval", "id", "name", "stepIds"]);
+      expect(Object.keys(phase).sort()).toEqual([
+        "approval",
+        "checkpoints",
+        "id",
+        "loop",
+        "name",
+        "stepIds",
+      ]);
       expect(Array.isArray(phase.stepIds)).toBe(true);
     }
     const withApproval = run.template.phases.find((p) => p.approval !== null);
@@ -316,7 +323,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(full.status).toBe(200);
     const text = await full.text();
     expect(text).toContain("event: run.started");
-    expect(text).toContain("event: approval.required");
+    expect(text).toContain("event: checkpoint.required");
     expect(text).toContain("event: run.succeeded");
 
     // resume from the middle: only later events are replayed
