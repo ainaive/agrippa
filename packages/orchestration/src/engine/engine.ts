@@ -471,6 +471,20 @@ class RunEngine {
       const stepId = key.slice(0, key.lastIndexOf("#"));
       if (loopStepIds.includes(stepId)) startIter = Math.max(startIter, row.iteration);
     }
+    // a loop closes exactly once per run — resumes that walk back through a
+    // finished loop must not re-emit its lifecycle events
+    const lifecycleRows = await this.db
+      .select({ payload: runEvents.payload })
+      .from(runEvents)
+      .where(
+        and(
+          eq(runEvents.runId, this.run.id),
+          inArray(runEvents.type, ["loop.completed", "loop.exhausted"]),
+        ),
+      );
+    const alreadyClosed = lifecycleRows.some(
+      (e) => (e.payload as { loopId?: string }).loopId === node.id,
+    );
 
     for (let iter = startIter; iter <= node.maxIterations; iter++) {
       const announced = loopStepIds.some((id) => this.stepRows.has(`${id}#${iter}`));
@@ -486,12 +500,16 @@ class RunEngine {
         if (outcome === "waiting") return "waiting";
       }
       if (evaluateCondition(node.until, this.expressionContext())) {
-        await this.emit("loop.completed", { loopId: node.id, iterations: iter });
+        if (!alreadyClosed) {
+          await this.emit("loop.completed", { loopId: node.id, iterations: iter });
+        }
         this.currentIteration = 1;
         return "done";
       }
       if (iter === node.maxIterations) {
-        await this.emit("loop.exhausted", { loopId: node.id, iterations: iter });
+        if (!alreadyClosed) {
+          await this.emit("loop.exhausted", { loopId: node.id, iterations: iter });
+        }
         if (node.onMaxIterations === "fail") {
           throw new RunFailure(
             "loop_exhausted",
@@ -977,16 +995,20 @@ class RunEngine {
         ),
       )
       .orderBy(checkpoints.iteration);
-    // latest decision per checkpoint id carries the final waiver set
-    const latest = new Map<string, (typeof gateRows)[number]>();
-    for (const entry of gateRows) latest.set(entry.row.checkpointId, entry);
-    const waivers: Array<{ finding: ReviewFinding; acceptedBy: string }> = [];
-    for (const entry of latest.values()) {
+    // Waivers accumulate across rounds: a finding accepted in round N stays
+    // waived unless a later round selected it for fixing. Walking iterations
+    // in order keeps the last human decision per finding id.
+    const waiverById = new Map<string, { finding: ReviewFinding; acceptedBy: string }>();
+    for (const entry of gateRows) {
       const response = entry.row.response;
       if (response?.kind !== "review-gate") continue;
       const acceptedBy = entry.deciderName ?? entry.deciderEmail ?? "Agrippa";
-      for (const finding of response.acceptedFindings) waivers.push({ finding, acceptedBy });
+      for (const finding of response.acceptedFindings) {
+        waiverById.set(finding.id, { finding, acceptedBy });
+      }
+      for (const finding of response.selectedFindings) waiverById.delete(finding.id);
     }
+    const waivers = [...waiverById.values()];
     if (waivers.length > 0) {
       const lines = waivers.map(({ finding, acceptedBy }) => {
         const where = finding.file
@@ -1053,7 +1075,7 @@ class RunEngine {
 
     // engine-side patch artifacts: produced keys of kind patch the executor didn't emit
     for (const key of step.produces) {
-      if (this.producedThisIteration(key, row)) continue;
+      if (await this.stepProducedArtifact(step.id, key)) continue;
       const contract = this.template.spec.outputs.artifacts.find((a) => a.key === key);
       if (contract?.kind === "patch") {
         const diff = await this.deps.workspace.diff(this.run.id);
@@ -1065,16 +1087,27 @@ class RunEngine {
     return output;
   }
 
-  /** Whether the key was produced by this step row (loop rounds re-produce keys). */
-  private producedThisIteration(key: string, row: StepRow): boolean {
-    if (!this.producedArtifacts.has(key)) return false;
-    if (this.currentIteration === 1) return true;
-    // inside a loop the key may exist from an earlier round; re-diff each round
-    return this.artifactRowsThisStep.get(row.id)?.has(key) ?? false;
+  /**
+   * Whether THIS template step already stored the key in the current iteration
+   * (executor emission just now, or an earlier attempt/resume). Keyed per step
+   * so a loop's fix round re-diffs even though the key exists from before.
+   */
+  private async stepProducedArtifact(stepId: string, key: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ id: artifacts.id })
+      .from(artifacts)
+      .innerJoin(runSteps, eq(artifacts.stepId, runSteps.id))
+      .where(
+        and(
+          eq(artifacts.runId, this.run.id),
+          eq(artifacts.artifactKey, key),
+          eq(runSteps.stepId, stepId),
+          eq(runSteps.iteration, this.currentIteration),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
   }
-
-  /** Artifact keys stored per step row id in this process life. */
-  private artifactRowsThisStep = new Map<string, Set<string>>();
 
   private bindingFor(step: AgentStep): SlotBinding {
     const slot = step.agent ?? (Object.keys(this.bindings)[0] as string);
@@ -1289,9 +1322,6 @@ class RunEngine {
       inline: stored.inline ?? null,
     });
     this.producedArtifacts.add(event.key);
-    const perRow = this.artifactRowsThisStep.get(row.id) ?? new Set<string>();
-    perRow.add(event.key);
-    this.artifactRowsThisStep.set(row.id, perRow);
     if (stored.inline !== null) {
       this.artifactValues[event.key] = stored.inline;
     } else {

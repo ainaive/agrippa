@@ -55,8 +55,9 @@ export class FakeExecutor implements Executor {
 
   constructor(private readonly script: Record<string, FakeStepBehavior> = {}) {}
 
-  behaviorFor(stepId: string): FakeStepBehavior {
-    return this.script[stepId] ?? { kind: "succeed" };
+  /** `<stepId>@<iteration>` keys override the bare step id (loop-round scripting). */
+  behaviorFor(stepId: string, iteration = 1): FakeStepBehavior {
+    return this.script[`${stepId}@${iteration}`] ?? this.script[stepId] ?? { kind: "succeed" };
   }
 
   async *executeStep(
@@ -66,7 +67,7 @@ export class FakeExecutor implements Executor {
     this.requests.push(req);
     const attempt = (this.attempts.get(req.stepId) ?? 0) + 1;
     this.attempts.set(req.stepId, attempt);
-    const behavior = this.behaviorFor(req.stepId);
+    const behavior = this.behaviorFor(req.stepId, req.iteration ?? 1);
 
     yield { type: "step.started", sessionId: `fake-${req.stepId}-${attempt}` };
 

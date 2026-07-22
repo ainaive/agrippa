@@ -23,6 +23,7 @@ import {
 } from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import { and, asc, eq, sql } from "drizzle-orm";
+import { compileTemplate } from "../compile";
 import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
@@ -31,6 +32,7 @@ import type { EngineDeps } from "./deps";
 import { executeRun } from "./engine";
 import {
   FakeResourceMaterializer,
+  FakeScmService,
   FakeWorkspaceManager,
   InMemoryArtifactStore,
   silentLogger,
@@ -783,5 +785,630 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
       .from(checkpoints)
       .where(eq(checkpoints.id, id));
     expect(row?.status).toBe("approved");
+  });
+});
+
+// ── agrippa/v2: slots, checkpoints, loops, SCM (requirement-delivery spine) ──
+
+const V2_FIXTURE_YAML = `
+apiVersion: agrippa/v2
+kind: OrchestrationTemplate
+metadata:
+  slug: swdev.v2-loop-fixture
+  scenario: software-development
+  name: { en: "V2 Fixture", zh-CN: "V2 夹具" }
+  description: { en: "engine compliance fixture", zh-CN: "引擎合规夹具" }
+spec:
+  agents:
+    implementer: { label: { en: "Implementer", zh-CN: "实现者" }, faber: forge, executor: fake }
+    reviewer: { label: { en: "Reviewer", zh-CN: "评审者" }, faber: sentinel, executor: fake }
+  inputs:
+    - { key: requirement, type: text, required: true, label: { en: "Requirement", zh-CN: "需求" } }
+    - { key: repo, type: repoRef, required: true, label: { en: "Repo", zh-CN: "仓库" } }
+  workspace: { repo: "\${inputs.repo}", access: readWrite }
+  models:
+    roles:
+      coding: { tier: strong }
+      review: { tier: balanced }
+  phases:
+    - id: setup
+      name: { en: "Setup", zh-CN: "准备" }
+      steps:
+        - { id: checkout, kind: system, action: workspace.checkout }
+        - { id: branch, kind: system, action: git.branch, with: { name: "agrippa/run-\${run.number}" } }
+    - kind: loop
+      id: clarify
+      name: { en: "Clarify", zh-CN: "澄清" }
+      maxIterations: 2
+      until: checkpoints.clarify-qa.outcome == 'pass'
+      onMaxIterations: continue
+      phases:
+        - id: clarify-round
+          name: { en: "Round", zh-CN: "轮次" }
+          steps:
+            - id: analyze
+              kind: agent
+              agent: implementer
+              model: { role: coding }
+              instructions: "Analyze. Prior answers: \${checkpoints.clarify-qa.answers}"
+              produces: [questions]
+            - id: clarify-qa
+              kind: checkpoint
+              checkpoint: { kind: input, source: questions, title: { en: "Questions", zh-CN: "问题" } }
+    - id: plan
+      name: { en: "Plan", zh-CN: "规划" }
+      steps:
+        - id: draft-plan
+          kind: agent
+          agent: implementer
+          model: { role: coding }
+          instructions: "Plan it"
+          produces: [implementation-plan]
+        - id: confirm-plan
+          kind: checkpoint
+          checkpoint: { kind: approval, present: [implementation-plan], title: { en: "Confirm", zh-CN: "确认" } }
+    - id: implement
+      name: { en: "Implement", zh-CN: "实现" }
+      steps:
+        - id: implement
+          kind: agent
+          agent: implementer
+          model: { role: coding }
+          instructions: "Implement it"
+          produces: [changes]
+    - kind: loop
+      id: review-fix
+      name: { en: "Review", zh-CN: "评审" }
+      maxIterations: 3
+      until: checkpoints.review-gate.outcome == 'pass'
+      onMaxIterations: continue
+      phases:
+        - id: review-round
+          name: { en: "Round", zh-CN: "轮次" }
+          steps:
+            - id: review
+              kind: agent
+              agent: reviewer
+              model: { role: review }
+              instructions: "Review the diff"
+              produces: [review-report]
+            - id: review-gate
+              kind: checkpoint
+              checkpoint: { kind: review-gate, source: review-report, title: { en: "Findings", zh-CN: "评审结果" } }
+            - id: fix
+              kind: agent
+              agent: implementer
+              model: { role: coding }
+              when: checkpoints.review-gate.outcome == 'fix'
+              instructions: "Fix: \${checkpoints.review-gate.selectedFindings}"
+              produces: [changes]
+    - id: publish
+      name: { en: "Publish", zh-CN: "发布" }
+      steps:
+        - id: confirm-publish
+          kind: checkpoint
+          when: checkpoints.review-gate.outcome == 'fix'
+          checkpoint: { kind: approval, title: { en: "Publish anyway?", zh-CN: "仍要发布？" } }
+        - { id: push, kind: system, action: git.push, retry: { max: 2 } }
+        - id: open-pr
+          kind: system
+          action: pr.open
+          with: { title: "\${run.taskTitle}", body: "Delivered: \${inputs.requirement}" }
+          produces: [pull-request]
+  outputs:
+    artifacts:
+      - { key: questions, kind: json, required: false }
+      - { key: implementation-plan, kind: markdown, required: true }
+      - { key: changes, kind: patch, required: true }
+      - { key: review-report, kind: json, required: true }
+      - { key: pull-request, kind: link, required: true }
+    summary: { from: implementation-plan }
+`;
+
+type V2Fixture = {
+  db: Db;
+  runId: string;
+  userId: string;
+  scm: FakeScmService;
+  makeDeps: (
+    implScript: Record<string, FakeStepBehavior>,
+    revScript: Record<string, FakeStepBehavior>,
+  ) => EngineDeps & { impl: FakeExecutor; rev: FakeExecutor };
+};
+
+async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> {
+  const db = sharedDb;
+  await db.execute(sql`drop schema public cascade`);
+  await db.execute(sql`create schema public`);
+  await db.execute(sql`drop schema if exists drizzle cascade`);
+  await migrateDb(db);
+  await seed(db);
+
+  const orgRows = (await db.execute(sql`select id from orgs limit 1`)) as Array<{ id: string }>;
+  const orgId = orgRows[0]?.id as string;
+  const [user] = await db
+    .insert(users)
+    .values({
+      id: Bun.randomUUIDv7(),
+      name: "Engine Tester",
+      email: `engine-${Bun.randomUUIDv7()}@example.com`,
+      orgId,
+    })
+    .returning();
+  if (!user) throw new Error("fixture: user insert failed");
+  const [project] = await db
+    .insert(projects)
+    .values({ orgId, slug: "v2-test", name: "V2 Test", createdBy: user.id })
+    .returning();
+  if (!project) throw new Error("fixture: project insert failed");
+  const allModels = await db.select().from(models);
+  await db.insert(projectResourceGrants).values(
+    allModels.map((m) => ({
+      projectId: project.id,
+      resourceType: "model" as const,
+      resourceId: m.id,
+      grantedBy: user.id,
+    })),
+  );
+
+  const { compiled, checksum } = compileTemplate(sourceYaml);
+  const [scenario] = (await db.execute(
+    sql`select id from scenarios where slug = 'software-development'`,
+  )) as Array<{ id: string }>;
+  const [head] = await db
+    .insert(orchestrationTemplates)
+    .values({
+      slug: compiled.metadata.slug,
+      scenarioId: scenario?.id as string,
+      nameI18n: compiled.metadata.name,
+    })
+    .returning();
+  if (!head) throw new Error("fixture: template head insert failed");
+  const [version] = await db
+    .insert(templateVersions)
+    .values({
+      templateId: head.id,
+      version: 1,
+      status: "published",
+      sourceYaml,
+      compiled: compiled as unknown as Record<string, unknown>,
+      checksum,
+      publishedAt: new Date(),
+    })
+    .returning();
+  if (!version) throw new Error("fixture: version insert failed");
+
+  const fabriRows = (await db.execute(sql`select id, slug from fabri`)) as Array<{
+    id: string;
+    slug: string;
+  }>;
+  const forge = fabriRows.find((f) => f.slug === "forge")?.id as string;
+  const sentinel = fabriRows.find((f) => f.slug === "sentinel")?.id as string;
+
+  const [anyTaskType] = await db.select().from(taskTypes).limit(1);
+  if (!anyTaskType) throw new Error("fixture: no task type");
+  const params = {
+    requirement: "Add dark mode",
+    repo: { repoConnectionId: Bun.randomUUIDv7() },
+  };
+  const modelResolution = await resolveModelRoles(db, project.id, compiled.spec.models);
+  const [task] = await db
+    .insert(tasks)
+    .values({
+      orgId,
+      projectId: project.id,
+      taskTypeId: anyTaskType.id,
+      title: "Deliver dark mode",
+      params,
+      createdBy: user.id,
+    })
+    .returning();
+  if (!task) throw new Error("fixture: task insert failed");
+  const [run] = await db
+    .insert(runs)
+    .values({
+      taskId: task.id,
+      projectId: project.id,
+      number: 1,
+      templateVersionId: version.id,
+      faberId: forge,
+      executorId: "fake-impl",
+      agentBindings: {
+        implementer: { faberId: forge, executorId: "fake-impl" },
+        reviewer: { faberId: sentinel, executorId: "fake-rev" },
+      },
+      paramsSnapshot: params,
+      modelResolution: { implementer: modelResolution, reviewer: modelResolution },
+      resourceManifest: { mcpServers: [], skills: [] },
+      budget: {},
+      createdBy: user.id,
+    })
+    .returning();
+  if (!run) throw new Error("fixture: run insert failed");
+
+  const bus = new InProcessEventBus();
+  const workspace = new FakeWorkspaceManager();
+  const scm = new FakeScmService();
+  const makeDeps: V2Fixture["makeDeps"] = (implScript, revScript) => {
+    const impl = new FakeExecutor(implScript);
+    const rev = new FakeExecutor(revScript);
+    return {
+      db,
+      executors: { "fake-impl": impl, "fake-rev": rev },
+      impl,
+      rev,
+      bus,
+      workspace,
+      scm,
+      resources: new FakeResourceMaterializer({ mcpServers: [] }),
+      artifacts: new InMemoryArtifactStore(),
+      logger: silentLogger,
+    };
+  };
+  return { db, runId: run.id, userId: user.id, scm, makeDeps };
+}
+
+const FINDING_A = {
+  id: "f1",
+  severity: "major",
+  file: "src/app.ts",
+  line: 10,
+  title: "Unhandled null",
+  detail: "value may be null",
+};
+const FINDING_B = {
+  id: "f2",
+  severity: "minor",
+  title: "Naming nit",
+  detail: "rename for clarity",
+};
+
+const IMPL_SCRIPT: Record<string, FakeStepBehavior> = {
+  "analyze@1": {
+    kind: "succeed",
+    events: [
+      {
+        type: "artifact",
+        key: "questions",
+        kind: "json",
+        inline: {
+          questions: [{ id: "q1", text: "Which theme store?", recommended: "css variables" }],
+        },
+      },
+    ],
+    output: "asked one question",
+  },
+  "analyze@2": {
+    kind: "succeed",
+    events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+    output: "all clear",
+  },
+  "draft-plan": {
+    kind: "succeed",
+    events: [
+      { type: "artifact", key: "implementation-plan", kind: "markdown", inline: "# The plan" },
+    ],
+    output: "planned",
+  },
+  implement: { kind: "succeed", usage: { inputTokens: 100, outputTokens: 50 }, output: "built" },
+  fix: { kind: "succeed", output: "fixed the findings" },
+};
+
+const REV_CLEAN_ON_2: Record<string, FakeStepBehavior> = {
+  "review@1": {
+    kind: "succeed",
+    events: [
+      {
+        type: "artifact",
+        key: "review-report",
+        kind: "json",
+        inline: { summary: "two issues", findings: [FINDING_A, FINDING_B] },
+      },
+    ],
+    output: "found 2 issues",
+  },
+  "review@2": {
+    kind: "succeed",
+    events: [{ type: "artifact", key: "review-report", kind: "json", inline: { findings: [] } }],
+    output: "clean",
+  },
+};
+
+describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loops, scm)", () => {
+  it("runs the full requirement-delivery spine: Q&A loop, plan gate, review-fix loop, platform PR", async () => {
+    const fx = await setupV2Fixture();
+
+    // Leg 1 → pauses at the input checkpoint with the questions snapshot
+    let deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("waiting_approval");
+    let [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("clarify-qa");
+    expect(pending?.kind).toBe("input");
+    expect((pending?.payload as { questions: unknown[] } | undefined)?.questions).toHaveLength(1);
+    // the platform created the work branch before any agent ran
+    expect(fx.scm.branches).toEqual([{ runId: fx.runId, name: "agrippa/run-1" }]);
+
+    // answer → round 2 asks nothing → auto-pass → pauses at the plan approval
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "input", outcome: "answered", answers: { q1: "tailwind tokens" } },
+    });
+    deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("waiting_approval");
+    // the second analyze round saw the first round's answers interpolated
+    const analyze2 = deps.impl.requests.find((r) => r.stepId === "analyze" && r.iteration === 2);
+    expect(analyze2?.instructions).toContain("tailwind tokens");
+    expect(analyze2?.agentSlot).toBe("implementer");
+    [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("confirm-plan");
+
+    // approve the plan → implement runs → pauses at review-gate round 1
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("waiting_approval");
+    [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("review-gate");
+    expect(pending?.kind).toBe("review-gate");
+    expect((pending?.payload as { findings: unknown[] } | undefined)?.findings).toHaveLength(2);
+    // reviewer steps went to the reviewer executor, implementer steps to the other
+    expect(deps.rev.requests.map((r) => r.stepId)).toEqual(["review"]);
+    expect(deps.rev.requests[0]?.agentSlot).toBe("reviewer");
+    expect(deps.impl.requests.every((r) => r.agentSlot === "implementer")).toBe(true);
+
+    // fix one finding, accept the other → fix runs → round 2 reviews clean →
+    // publish gate skipped (outcome is pass) → push + PR → succeeded
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: {
+        kind: "review-gate",
+        outcome: "fix",
+        selectedFindings: [FINDING_A] as never,
+        acceptedFindings: [FINDING_B] as never,
+        acceptedFindingIds: ["f2"],
+      },
+    });
+    deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("succeeded");
+
+    // the fix step saw exactly the selected finding
+    const fixReq = deps.impl.requests.find((r) => r.stepId === "fix");
+    expect(fixReq?.iteration).toBe(1);
+    expect(fixReq?.instructions).toContain("Unhandled null");
+    expect(fixReq?.instructions).not.toContain("Naming nit");
+    // round 2: fix is skipped (auto-pass), loop completed
+    const stepRows = await fx.db.select().from(runSteps).where(eq(runSteps.runId, fx.runId));
+    expect(stepRows.find((s) => s.stepId === "fix" && s.iteration === 2)?.status).toBe("skipped");
+    expect(stepRows.find((s) => s.stepId === "confirm-publish")?.status).toBe("skipped");
+    expect(stepRows.find((s) => s.stepId === "review" && s.iteration === 2)?.status).toBe(
+      "succeeded",
+    );
+
+    // platform-side push + PR with the waiver section in the body
+    expect(fx.scm.pushes).toEqual([{ runId: fx.runId, branch: "agrippa/run-1" }]);
+    expect(fx.scm.pullRequests).toHaveLength(1);
+    const pr = fx.scm.pullRequests[0]?.spec;
+    expect(pr?.head).toBe("agrippa/run-1");
+    expect(pr?.title).toBe("Deliver dark mode");
+    expect(pr?.body).toContain("Delivered: Add dark mode");
+    expect(pr?.body).toContain("## Accepted review findings");
+    expect(pr?.body).toContain("**minor** Naming nit");
+    expect(pr?.body).toContain("accepted by Engine Tester");
+    expect(pr?.body).not.toContain("Unhandled null"); // fixed, not waived
+
+    // artifacts: per-iteration review reports, PR link, iteration-2 auto rows
+    const artifactRows = await fx.db.select().from(artifacts).where(eq(artifacts.runId, fx.runId));
+    const reviewRows = artifactRows.filter((a) => a.artifactKey === "review-report");
+    expect(reviewRows.map((a) => a.iteration).sort()).toEqual([1, 2]);
+    const prLink = artifactRows.find((a) => a.artifactKey === "pull-request");
+    expect(String(prLink?.inline)).toStartWith("https://fake.scm/pr/");
+    // the fix round re-diffed the workspace into a fresh changes patch
+    expect(artifactRows.filter((a) => a.artifactKey === "changes")).toHaveLength(2);
+
+    // auto-passed checkpoints recorded themselves with auto responses
+    const ckptRows = await fx.db.select().from(checkpoints).where(eq(checkpoints.runId, fx.runId));
+    const autoGate = ckptRows.find((c) => c.checkpointId === "review-gate" && c.iteration === 2);
+    expect(autoGate?.status).toBe("approved");
+    expect(autoGate?.response?.kind === "review-gate" && autoGate.response.auto).toBe(true);
+
+    // loop lifecycle events
+    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+    const types = events.map((e) => e.type);
+    expect(types.filter((t) => t === "loop.completed")).toHaveLength(2);
+    expect(types).toContain("branch.created");
+    expect(types).toContain("branch.pushed");
+    expect(types).toContain("pr.opened");
+  });
+
+  it("review-fix exhaustion with onMaxIterations: continue asks before publishing", async () => {
+    const fx = await setupV2Fixture();
+    const alwaysDirty: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "still dirty",
+      },
+    };
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    // clarify-qa round 1 pauses first — answer it, then approve the plan
+    for (const checkpointId of ["clarify-qa", "confirm-plan"]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      expect(pending?.checkpointId).toBe(checkpointId);
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response:
+          checkpointId === "clarify-qa"
+            ? { kind: "input", outcome: "answered", answers: { q1: "x" } }
+            : { kind: "approval", outcome: "approved" },
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    }
+
+    // three review rounds, each decided "fix" — the loop exhausts
+    for (let round = 1; round <= 3; round++) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      expect(pending?.checkpointId).toBe("review-gate");
+      expect(pending?.iteration).toBe(round);
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: {
+          kind: "review-gate",
+          outcome: "fix",
+          selectedFindings: [FINDING_A] as never,
+          acceptedFindings: [],
+          acceptedFindingIds: [],
+        },
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    }
+
+    // exhausted after an un-reviewed fix → the publish gate asks the user
+    expect(outcome).toBe("waiting_approval");
+    const [publishGate] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(publishGate?.checkpointId).toBe("confirm-publish");
+    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+    expect(events.some((e) => e.type === "loop.exhausted")).toBe(true);
+
+    await decideCheckpoint(fx.db, publishGate?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    expect(await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId)).toBe("succeeded");
+    expect(fx.scm.pullRequests).toHaveLength(1);
+  });
+
+  it("review-fix exhaustion with onMaxIterations: fail fails the run", async () => {
+    const failingYaml = V2_FIXTURE_YAML.replace(
+      "maxIterations: 3\n      until: checkpoints.review-gate.outcome == 'pass'\n      onMaxIterations: continue",
+      "maxIterations: 1\n      until: checkpoints.review-gate.outcome == 'pass'\n      onMaxIterations: fail",
+    );
+    expect(failingYaml).toContain("onMaxIterations: fail");
+    const fx = await setupV2Fixture(failingYaml);
+    const alwaysDirty: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "still dirty",
+      },
+    };
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    for (const response of [
+      { kind: "input", outcome: "answered", answers: { q1: "x" } } as const,
+      { kind: "approval", outcome: "approved" } as const,
+      {
+        kind: "review-gate",
+        outcome: "fix",
+        selectedFindings: [FINDING_A] as never,
+        acceptedFindings: [],
+        acceptedFindingIds: [],
+      } as const,
+    ]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    }
+
+    expect(outcome).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("loop_exhausted");
+  });
+
+  it("retries transient scm push failures per the template retry policy", async () => {
+    const fx = await setupV2Fixture();
+    fx.scm.failNext.push = 1;
+    const cleanReview: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          { type: "artifact", key: "review-report", kind: "json", inline: { findings: [] } },
+        ],
+        output: "clean",
+      },
+    };
+    const quickImpl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+
+    // no questions → auto-pass → only the plan approval pauses
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe(
+      "waiting_approval",
+    );
+    const [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("confirm-plan");
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe("succeeded");
+
+    // first push attempt failed, retry succeeded
+    const pushRows = await fx.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "push")))
+      .orderBy(asc(runSteps.attempt));
+    expect(pushRows.map((r) => r.status)).toEqual(["failed", "succeeded"]);
+    expect(fx.scm.pushes).toHaveLength(1);
   });
 });
