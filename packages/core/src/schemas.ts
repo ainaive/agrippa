@@ -166,11 +166,6 @@ export const taskSubmitSchema = z.object({
     .optional(),
 });
 
-export const approvalDecisionSchema = z.object({
-  decision: z.enum(["approved", "rejected"]),
-  comment: z.string().max(2000).optional(),
-});
-
 /**
  * Kind-discriminated payload for POST /runs/:id/checkpoints/:checkpointId/respond.
  * The server validates the payload kind against the pending checkpoint's kind.

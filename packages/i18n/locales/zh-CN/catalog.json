@@ -15,6 +15,9 @@
     "missingRequired": "缺少必填字段",
     "noRepos": "尚未关联代码仓库——请先在项目设置中添加。",
     "selectRepo": "选择代码仓库",
-    "docsUnsupported": "文档引用暂不可用。"
+    "docsUnsupported": "文档引用暂不可用。",
+    "agents": "代理",
+    "agentFaber": "人设",
+    "agentExecutor": "引擎"
   }
 }

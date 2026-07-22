@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { type AgentOverrides, AgentSlotPicker } from "../components/submit/AgentSlotPicker";
 import {
   defaultParams,
   missingRequired,
@@ -36,6 +37,7 @@ export function SubmitTaskPage() {
 
   const [title, setTitle] = useState("");
   const [params, setParams] = useState<ParamsValue | null>(null);
+  const [agentOverrides, setAgentOverrides] = useState<AgentOverrides>({});
   const inputs = taskType.data?.inputs ?? [];
   const value = useMemo(() => params ?? defaultParams(inputs), [params, inputs]);
 
@@ -43,7 +45,12 @@ export function SubmitTaskPage() {
     mutationFn: () =>
       api<{ taskId: string; runId: string }>(`/projects/${projectId}/tasks`, {
         method: "POST",
-        json: { taskTypeId, title, params: value },
+        json: {
+          taskTypeId,
+          title,
+          params: value,
+          agents: Object.keys(agentOverrides).length > 0 ? agentOverrides : undefined,
+        },
       }),
     onSuccess: (result) => {
       void navigate({
@@ -58,6 +65,9 @@ export function SubmitTaskPage() {
   if (!taskType.data) return <p className="text-destructive">{t("notFound")}</p>;
   const detail = taskType.data;
   const missing = missingRequired(inputs, value);
+  // the picker only earns its space when the user can actually change something
+  const showAgents =
+    detail.agents !== null && Object.values(detail.agents).some((slot) => slot.overridable);
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[1fr_300px]">
@@ -84,6 +94,22 @@ export function SubmitTaskPage() {
             />
           </CardContent>
         </Card>
+
+        {showAgents && detail.agents ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>{t("form.agents")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <AgentSlotPicker
+                agents={detail.agents}
+                fabriOptions={detail.fabriOptions}
+                value={agentOverrides}
+                onChange={setAgentOverrides}
+              />
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
 
       <Card className="lg:sticky lg:top-20">

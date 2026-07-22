@@ -1,6 +1,5 @@
 import {
   AppError,
-  approvalDecisionSchema,
   type CheckpointRespondInput,
   type CheckpointStoredResponse,
   checkpointRespondSchema,
@@ -596,8 +595,6 @@ export const executionRoutes = new Hono<AppEnv>()
   // belongs to ("waiting on you"). Read-only; responding goes through
   // POST /runs/:id/checkpoints/:checkpointId/respond.
   .get("/checkpoints/pending", (c) => listPendingCheckpoints(c))
-  // legacy path — the SPA's approvals inbox before the checkpoint rename
-  .get("/approvals/pending", (c) => listPendingCheckpoints(c))
   .get("/runs/:id/checkpoints", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
     const rows = await c.var.db
@@ -608,12 +605,6 @@ export const executionRoutes = new Hono<AppEnv>()
       .orderBy(asc(checkpoints.requestedAt));
     return c.json(rows.map(({ row, deciderName }) => ({ ...row, deciderName })));
   })
-  // legacy path + shape (rows only)
-  .get("/runs/:id/approvals", async (c) => {
-    const run = await loadRunScoped(c, c.req.param("id"), "viewer");
-    const rows = await c.var.db.select().from(checkpoints).where(eq(checkpoints.runId, run.id));
-    return c.json(rows);
-  })
   .post(
     "/runs/:id/checkpoints/:checkpointId/respond",
     validate("json", checkpointRespondSchema),
@@ -622,16 +613,6 @@ export const executionRoutes = new Hono<AppEnv>()
       return await respondToCheckpoint(c, run, c.req.param("checkpointId"), c.req.valid("json"));
     },
   )
-  // legacy decide route: binary approve/reject on approval-kind checkpoints
-  .post("/runs/:id/approvals/:approvalId", validate("json", approvalDecisionSchema), async (c) => {
-    const run = await loadRunScoped(c, c.req.param("id"), "member");
-    const input = c.req.valid("json");
-    return await respondToCheckpoint(c, run, c.req.param("approvalId"), {
-      kind: "approval",
-      decision: input.decision,
-      comment: input.comment,
-    });
-  })
 
   // ── Comments ────────────────────────────────────────────────────────────────
   .get("/runs/:id/comments", async (c) => {

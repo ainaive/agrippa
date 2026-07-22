@@ -1,4 +1,13 @@
-import type { LocalizedText, ProjectRole, RunStatus, StepStatus } from "@agrippa/core";
+import type {
+  CheckpointKind,
+  CheckpointStoredResponse,
+  LocalizedText,
+  ProjectRole,
+  Question,
+  ReviewFinding,
+  RunStatus,
+  StepStatus,
+} from "@agrippa/core";
 
 export type Me = {
   id: string;
@@ -45,6 +54,21 @@ export type TemplateInputSpec = {
   options?: Array<{ value: string; label: LocalizedText }>;
 };
 
+export type AgentSlotMeta = {
+  label: LocalizedText;
+  overridable: boolean;
+  defaultFaberId: string | null;
+  defaultExecutorId: string;
+  executorLabel: string;
+};
+
+export type FaberOption = {
+  id: string;
+  slug: string;
+  nameI18n: LocalizedText;
+  avatar: string | null;
+};
+
 export type TaskTypeDetail = {
   id: string;
   slug: string;
@@ -55,6 +79,10 @@ export type TaskTypeDetail = {
   faber: { id: string; slug: string; nameI18n: LocalizedText; avatar: string | null } | null;
   inputs: TemplateInputSpec[];
   budgets: { maxCostUsd?: number; maxDurationMinutes?: number } | null;
+  /** Agent slots of the pinned template (null before any published version). */
+  agents: Record<string, AgentSlotMeta> | null;
+  /** Active fabri selectable for overridable slots. */
+  fabriOptions: FaberOption[];
 };
 
 export type TaskRow = {
@@ -84,14 +112,31 @@ export type RunBudgets = {
 export type RunTemplate = {
   slug: string;
   version: number;
+  agents: Record<string, { label: LocalizedText; overridable: boolean }>;
   phases: Array<{
     id: string;
     name: LocalizedText;
+    loop: { id: string; name: LocalizedText; maxIterations: number } | null;
     stepIds: string[];
+    checkpoints: Array<{
+      id: string;
+      kind: CheckpointKind;
+      title: LocalizedText;
+      present: string[];
+    }>;
     approval: { checkpoint: string; title: LocalizedText; present: string[] } | null;
   }>;
   budgets: RunBudgets;
   modelRoles: Record<string, { tier: string; fallback: string[] }>;
+};
+
+export type RunAgentBinding = {
+  faberId: string;
+  faberSlug: string | null;
+  faberName: LocalizedText | null;
+  faberAvatar: string | null;
+  executorId: string;
+  executorLabel: string;
 };
 
 export type Run = {
@@ -104,21 +149,26 @@ export type Run = {
   faberId: string;
   executorId: string;
   paramsSnapshot: Record<string, unknown>;
-  modelResolution: Record<string, ModelResolutionEntry>;
+  modelResolution: Record<string, ModelResolutionEntry | Record<string, ModelResolutionEntry>>;
   budget: RunBudgets;
   usageTotals: { costUsd?: number; tokens?: number };
   workspaceRef: string | null;
+  workBranch: string | null;
   error: { code: string; message: string } | null;
   queuedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
   template: RunTemplate | null;
+  /** slot → resolved faber/executor metadata. */
+  agents: Record<string, RunAgentBinding>;
+  checkpoints: Checkpoint[];
 };
 
 export type RunStep = {
   id: string;
   phaseId: string;
   stepId: string;
+  iteration: number;
   attempt: number;
   seq: number;
   status: StepStatus;
@@ -129,13 +179,35 @@ export type RunStep = {
   finishedAt: string | null;
 };
 
-export type Approval = {
+export type CheckpointPayload = {
+  title?: LocalizedText;
+  present?: string[];
+  loopId?: string | null;
+  questions?: Question[];
+  summary?: string;
+  findings?: ReviewFinding[];
+};
+
+export type Checkpoint = {
   id: string;
   checkpointId: string;
+  kind: CheckpointKind;
+  iteration: number;
   status: "pending" | "approved" | "rejected" | "expired";
-  payload: { title?: LocalizedText; present?: string[] };
+  payload: CheckpointPayload;
+  response: CheckpointStoredResponse | null;
   requestedAt: string;
+  decidedAt: string | null;
   comment: string | null;
+  deciderName?: string | null;
+};
+
+export type RunComment = {
+  id: string;
+  body: string;
+  createdAt: string;
+  userId: string;
+  userName: string;
 };
 
 export type Artifact = {

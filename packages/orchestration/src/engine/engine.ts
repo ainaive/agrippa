@@ -1291,7 +1291,13 @@ class RunEngine {
     const { type, ...payload } = event as { type: string } & Record<string, unknown>;
     await this.emit(
       type,
-      { phaseId: phase.id, stepId: step.id, iteration: this.currentIteration, ...payload },
+      {
+        phaseId: phase.id,
+        stepId: step.id,
+        iteration: this.currentIteration,
+        ...(step.kind === "agent" && step.agent ? { agentSlot: step.agent } : {}),
+        ...payload,
+      },
       row.id,
     );
     if (event.type === "step.started" && event.sessionId) {

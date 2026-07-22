@@ -183,13 +183,21 @@ export async function resolveAgentBindings(
   const bindings: AgentBindingResolution["bindings"] = {};
   const modelResolution: AgentBindingResolution["modelResolution"] = {};
 
+  // AGRIPPA_EXECUTOR=fake is the token-free demo switch (AGENTS.md): a demo
+  // deployment must never silently route a slot to a real, key-consuming
+  // executor, so the fake default overrides every template executor.
+  const demoMode = defaults.executorId === "fake";
+
   for (const slotId of slotIds) {
     const slot = slots[slotId] as NonNullable<(typeof slots)[string]>;
     let faberId: string;
     let executorId: string;
-    if (slot.executor === EXECUTOR_DEFAULT_SENTINEL) {
-      // upgraded v1 template: exactly the pre-slot behavior
-      faberId = defaults.faberId;
+    if (slot.executor === EXECUTOR_DEFAULT_SENTINEL || demoMode) {
+      // upgraded v1 template (or demo mode): the deployment default executor
+      faberId =
+        slot.executor === EXECUTOR_DEFAULT_SENTINEL
+          ? defaults.faberId
+          : (bySlug.get(slot.faber)?.id ?? defaults.faberId);
       executorId = defaults.executorId;
     } else {
       const faberRow = bySlug.get(slot.faber);
