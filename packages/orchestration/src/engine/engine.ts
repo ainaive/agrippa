@@ -444,7 +444,9 @@ class RunEngine {
   private async runFlow(): Promise<RunOutcome> {
     for (const node of this.template.spec.phases) {
       await this.checkInterrupts();
-      const outcome = isLoopNode(node) ? await this.runLoop(node) : await this.runPhase(node, 1);
+      const outcome = isLoopNode(node)
+        ? await this.runLoop(node)
+        : await this.runPhase(node, 1, null);
       if (outcome === "waiting") return await this.pauseRun();
     }
 
@@ -496,7 +498,7 @@ class RunEngine {
         });
       }
       for (const phase of node.phases) {
-        const outcome = await this.runPhase(phase, iter);
+        const outcome = await this.runPhase(phase, iter, node);
         if (outcome === "waiting") return "waiting";
       }
       if (evaluateCondition(node.until, this.expressionContext())) {
@@ -522,7 +524,11 @@ class RunEngine {
     return "done";
   }
 
-  private async runPhase(phase: TemplatePhaseV2, iteration: number): Promise<"done" | "waiting"> {
+  private async runPhase(
+    phase: TemplatePhaseV2,
+    iteration: number,
+    loop: LoopNode | null,
+  ): Promise<"done" | "waiting"> {
     this.currentIteration = iteration;
     this.meter.enterPhase(phase.id);
     const pending = phase.steps.filter((s) => {
@@ -545,7 +551,7 @@ class RunEngine {
       this.meter.refreshQuota(quota.costUsd, quota.tokens);
       this.meter.check();
       if (step.kind === "checkpoint") {
-        const outcome = await this.runCheckpointStep(phase, step, iteration);
+        const outcome = await this.runCheckpointStep(phase, step, iteration, loop);
         if (outcome === "waiting") return "waiting";
         continue;
       }
@@ -627,6 +633,7 @@ class RunEngine {
     phase: TemplatePhaseV2,
     step: CheckpointStep,
     iteration: number,
+    loop: LoopNode | null,
   ): Promise<"done" | "waiting"> {
     const spec = step.checkpoint;
     if (step.when && !evaluateCondition(step.when, this.expressionContext())) {
@@ -683,6 +690,7 @@ class RunEngine {
           title: spec.title,
           present: spec.present,
           phaseId: phase.id,
+          loopId: loop?.id ?? null,
           iteration,
           timeoutMinutes: durationToMinutes(spec.timeout),
           onTimeout: spec.onTimeout,

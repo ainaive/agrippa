@@ -1,16 +1,26 @@
 import {
   AppError,
   approvalDecisionSchema,
+  type CheckpointRespondInput,
+  type CheckpointStoredResponse,
+  checkpointRespondSchema,
+  commentCreateSchema,
+  EXECUTOR_CATALOG,
+  isExecutorId,
   isTerminalRunStatus,
+  type Question,
+  type ReviewFinding,
   taskSubmitSchema,
 } from "@agrippa/core";
 import {
   artifacts,
   checkpoints,
+  fabri,
   mcpServers,
   orchestrationTemplates,
   projectMembers,
   projects,
+  runComments,
   runEvents,
   runSteps,
   runs,
@@ -19,6 +29,7 @@ import {
   taskTypes,
   templateVersions,
   tokenUsage,
+  users,
 } from "@agrippa/db";
 import {
   appendRunEvent as allocateRunEvent,
@@ -26,13 +37,13 @@ import {
   buildParamsValidator,
   decideCheckpoint,
   flattenPhases,
-  resolveModelRoles,
+  resolveAgentBindings,
   SubmitError,
   upgradeCompiledTemplate,
   verifyRepoRefs,
 } from "@agrippa/orchestration";
-import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
@@ -51,6 +62,185 @@ async function loadRunScoped(
   if (!run) throw AppError.notFound("Run");
   await assertProjectRole(c.var.db, c.var.user.id, run.projectId, min);
   return run;
+}
+
+async function listPendingCheckpoints(c: Context<AppEnv>) {
+  const rows = await c.var.db
+    .select({
+      id: checkpoints.id,
+      checkpointId: checkpoints.checkpointId,
+      kind: checkpoints.kind,
+      iteration: checkpoints.iteration,
+      payload: checkpoints.payload,
+      requestedAt: checkpoints.requestedAt,
+      runId: runs.id,
+      runNumber: runs.number,
+      taskId: tasks.id,
+      taskTitle: tasks.title,
+      projectId: projects.id,
+      projectName: projects.name,
+      projectRole: projectMembers.role,
+    })
+    .from(checkpoints)
+    .innerJoin(runs, eq(checkpoints.runId, runs.id))
+    .innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .innerJoin(projects, eq(runs.projectId, projects.id))
+    .innerJoin(
+      projectMembers,
+      and(eq(projectMembers.projectId, runs.projectId), eq(projectMembers.userId, c.var.user.id)),
+    )
+    .where(eq(checkpoints.status, "pending"))
+    .orderBy(desc(checkpoints.requestedAt));
+  return c.json(rows);
+}
+
+type RunRowForRespond = typeof runs.$inferSelect;
+
+/**
+ * The one respond path for every checkpoint kind. Validates the payload
+ * against the pending row's kind and snapshot, builds the stored response
+ * (full finding objects, not ids — templates interpolate them directly),
+ * then commits the CAS decision + checkpoint.decided event + audit row in
+ * one transaction before re-enqueueing the run.
+ */
+async function respondToCheckpoint(
+  c: Context<AppEnv>,
+  run: RunRowForRespond,
+  rowId: string,
+  input: CheckpointRespondInput,
+) {
+  const db = c.var.db;
+  const [row] = await db
+    .select()
+    .from(checkpoints)
+    .where(and(eq(checkpoints.id, rowId), eq(checkpoints.runId, run.id)));
+  if (!row) throw AppError.notFound("Checkpoint");
+  if (row.kind !== input.kind) {
+    throw AppError.conflict("checkpoint_kind_mismatch", `Checkpoint is of kind '${row.kind}'`);
+  }
+  const payload = row.payload as {
+    questions?: Question[];
+    findings?: ReviewFinding[];
+    loopId?: string | null;
+  };
+
+  let status: "approved" | "rejected" = "approved";
+  let comment: string | undefined;
+  let response: CheckpointStoredResponse;
+
+  if (input.kind === "approval") {
+    if (input.decision === "request_changes" && !payload.loopId) {
+      // outside a loop there is nothing to send the agent back to — the
+      // outcome would silently read as a pass
+      throw AppError.conflict(
+        "request_changes_unsupported",
+        "This checkpoint cannot request changes",
+      );
+    }
+    status = input.decision === "rejected" ? "rejected" : "approved";
+    response = { kind: "approval", outcome: input.decision, comment: input.comment };
+    comment = input.comment;
+  } else if (input.kind === "input") {
+    const questions = payload.questions ?? [];
+    const known = new Set(questions.map((q) => q.id));
+    const unknown = Object.keys(input.answers).filter((id) => !known.has(id));
+    if (unknown.length > 0) {
+      throw AppError.validation([{ message: `unknown questions: ${unknown.join(", ")}` }]);
+    }
+    const missing = questions
+      .filter((q) => q.required !== false)
+      .filter((q) => input.answers[q.id] === undefined || input.answers[q.id] === "")
+      .map((q) => q.id);
+    if (missing.length > 0) {
+      throw AppError.validation([{ message: `answers required for: ${missing.join(", ")}` }]);
+    }
+    response = { kind: "input", outcome: "answered", answers: input.answers };
+  } else {
+    const findings = payload.findings ?? [];
+    const byId = new Map(findings.map((f) => [f.id, f]));
+    if (input.outcome === "fix") {
+      if (input.selectedFindingIds.length === 0) {
+        throw AppError.validation([{ message: "select at least one finding to fix" }]);
+      }
+      const unknown = input.selectedFindingIds.filter((id) => !byId.has(id));
+      if (unknown.length > 0) {
+        throw AppError.validation([{ message: `unknown findings: ${unknown.join(", ")}` }]);
+      }
+      const selectedIds = new Set(input.selectedFindingIds);
+      const selected = findings.filter((f) => selectedIds.has(f.id));
+      const accepted = findings.filter((f) => !selectedIds.has(f.id));
+      response = {
+        kind: "review-gate",
+        outcome: "fix",
+        selectedFindings: selected,
+        acceptedFindings: accepted,
+        acceptedFindingIds: accepted.map((f) => f.id),
+      };
+    } else {
+      response = {
+        kind: "review-gate",
+        outcome: "pass",
+        selectedFindings: [],
+        acceptedFindings: findings,
+        acceptedFindingIds: findings.map((f) => f.id),
+      };
+    }
+  }
+
+  const eventPayload = {
+    checkpointRowId: row.id,
+    checkpointId: row.checkpointId,
+    kind: row.kind,
+    iteration: row.iteration,
+    outcome: response.outcome,
+    decidedBy: { id: c.var.user.id, name: c.var.user.name },
+  };
+  // decision (CAS on status='pending'), the checkpoint.decided event, and the
+  // audit row commit together — a partial write can't leave the timeline or
+  // audit log missing the decision that a later retry would then skip
+  const result = await db.transaction(async (tx) => {
+    const updated = await decideCheckpoint(tx, row.id, {
+      status,
+      decidedBy: c.var.user.id,
+      comment,
+      response,
+    });
+    if (!updated) return { updated: null as null };
+    const event = await allocateRunEvent(tx, {
+      runId: run.id,
+      type: "checkpoint.decided",
+      payload: eventPayload,
+    });
+    await audit(
+      c,
+      {
+        action: "run.checkpoint.respond",
+        resourceType: "checkpoint",
+        resourceId: row.id,
+        projectId: run.projectId,
+        payload: { kind: row.kind, outcome: response.outcome },
+      },
+      tx,
+    );
+    return { updated, event };
+  });
+  if (!result.updated) {
+    // already decided, OR a prior attempt decided then failed to enqueue: in
+    // both cases the durable state is correct, so re-enqueue to unstick the
+    // run (the sweeper also backstops this) and report the conflict
+    await c.var.queue?.enqueueRun(run.id);
+    throw AppError.conflict("already_decided", "Checkpoint is already decided");
+  }
+  // publish + enqueue only after the decision durably committed
+  await c.var.bus?.publish({
+    runId: run.id,
+    seq: result.event.seq,
+    type: "checkpoint.decided",
+    payload: eventPayload,
+    createdAt: result.event.createdAt.toISOString(),
+  });
+  await c.var.queue?.enqueueRun(run.id); // resume at the gated step
+  return c.json(result.updated);
 }
 
 export const executionRoutes = new Hono<AppEnv>()
@@ -105,7 +295,15 @@ export const executionRoutes = new Hono<AppEnv>()
           skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
           mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
         });
-        const modelResolution = await resolveModelRoles(db, projectId, compiled.spec.models);
+        // every agent slot resolves to a concrete faber + executor here (with
+        // per-slot provider-filtered models) and freezes onto the run
+        const agentResolution = await resolveAgentBindings(
+          db,
+          projectId,
+          compiled,
+          { faberId: taskType.defaultFaberId, executorId: DEFAULT_EXECUTOR },
+          input.agents ?? {},
+        );
 
         const { task, run } = await db.transaction(async (tx) => {
           const [task] = await tx
@@ -127,10 +325,11 @@ export const executionRoutes = new Hono<AppEnv>()
               projectId,
               number: 1,
               templateVersionId: version.id,
-              faberId: taskType.defaultFaberId,
-              executorId: DEFAULT_EXECUTOR,
+              faberId: agentResolution.primary.faberId,
+              executorId: agentResolution.primary.executorId,
+              agentBindings: agentResolution.bindings,
               paramsSnapshot: parsed.data,
-              modelResolution,
+              modelResolution: agentResolution.modelResolution,
               resourceManifest,
               budget: compiled.spec.budgets as unknown as Record<string, unknown>,
               createdBy: user.id,
@@ -227,6 +426,7 @@ export const executionRoutes = new Hono<AppEnv>()
         templateVersionId: latest.templateVersionId, // pinned — retries never re-resolve
         faberId: latest.faberId,
         executorId: latest.executorId,
+        agentBindings: latest.agentBindings,
         paramsSnapshot: latest.paramsSnapshot,
         modelResolution: latest.modelResolution,
         resourceManifest: latest.resourceManifest,
@@ -249,6 +449,37 @@ export const executionRoutes = new Hono<AppEnv>()
   // ── Runs ────────────────────────────────────────────────────────────────────
   .get("/runs/:id", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
+    // every checkpoint with who decided it — the timeline's interaction cards
+    const checkpointRows = await c.var.db
+      .select({ row: checkpoints, deciderName: users.name })
+      .from(checkpoints)
+      .leftJoin(users, eq(checkpoints.decidedBy, users.id))
+      .where(eq(checkpoints.runId, run.id))
+      .orderBy(asc(checkpoints.requestedAt));
+    // slot → faber (name/avatar) + executor label, for the header chips
+    const faberIds = [
+      ...new Set([run.faberId, ...Object.values(run.agentBindings ?? {}).map((b) => b.faberId)]),
+    ];
+    const faberRows = await c.var.db.select().from(fabri).where(inArray(fabri.id, faberIds));
+    const fabersById = new Map(faberRows.map((f) => [f.id, f]));
+    const agents = Object.fromEntries(
+      Object.entries(run.agentBindings ?? {}).map(([slot, binding]) => {
+        const faber = fabersById.get(binding.faberId);
+        return [
+          slot,
+          {
+            faberId: binding.faberId,
+            faberSlug: faber?.slug ?? null,
+            faberName: faber?.nameI18n ?? null,
+            faberAvatar: faber?.avatar ?? null,
+            executorId: binding.executorId,
+            executorLabel: isExecutorId(binding.executorId)
+              ? EXECUTOR_CATALOG[binding.executorId].label
+              : binding.executorId,
+          },
+        ];
+      }),
+    );
     // Embed the pinned template's plan so the UI can group steps by phase.
     // Viewer-scoped projection: structure + i18n names only — never
     // instructions, prompts, or resource references.
@@ -310,7 +541,12 @@ export const executionRoutes = new Hono<AppEnv>()
         };
       }
     }
-    return c.json({ ...run, template });
+    return c.json({
+      ...run,
+      template,
+      agents,
+      checkpoints: checkpointRows.map(({ row, deciderName }) => ({ ...row, deciderName })),
+    });
   })
   .get("/runs/:id/steps", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
@@ -355,100 +591,106 @@ export const executionRoutes = new Hono<AppEnv>()
     return c.json({ cancelRequested: true });
   })
 
-  // ── Approvals ───────────────────────────────────────────────────────────────
-  // ── Approvals inbox ─────────────────────────────────────────────────────────
-  // Cross-project: every pending checkpoint in a project the caller belongs to.
-  // Read-only; deciding goes through POST /runs/:id/approvals/:approvalId.
-  .get("/approvals/pending", async (c) => {
+  // ── Checkpoints ─────────────────────────────────────────────────────────────
+  // Cross-project inbox: every pending checkpoint in a project the caller
+  // belongs to ("waiting on you"). Read-only; responding goes through
+  // POST /runs/:id/checkpoints/:checkpointId/respond.
+  .get("/checkpoints/pending", (c) => listPendingCheckpoints(c))
+  // legacy path — the SPA's approvals inbox before the checkpoint rename
+  .get("/approvals/pending", (c) => listPendingCheckpoints(c))
+  .get("/runs/:id/checkpoints", async (c) => {
+    const run = await loadRunScoped(c, c.req.param("id"), "viewer");
     const rows = await c.var.db
-      .select({
-        id: checkpoints.id,
-        checkpointId: checkpoints.checkpointId,
-        payload: checkpoints.payload,
-        requestedAt: checkpoints.requestedAt,
-        runId: runs.id,
-        runNumber: runs.number,
-        taskId: tasks.id,
-        taskTitle: tasks.title,
-        projectId: projects.id,
-        projectName: projects.name,
-        projectRole: projectMembers.role,
-      })
+      .select({ row: checkpoints, deciderName: users.name })
       .from(checkpoints)
-      .innerJoin(runs, eq(checkpoints.runId, runs.id))
-      .innerJoin(tasks, eq(runs.taskId, tasks.id))
-      .innerJoin(projects, eq(runs.projectId, projects.id))
-      .innerJoin(
-        projectMembers,
-        and(eq(projectMembers.projectId, runs.projectId), eq(projectMembers.userId, c.var.user.id)),
-      )
-      .where(eq(checkpoints.status, "pending"))
-      .orderBy(desc(checkpoints.requestedAt));
-    return c.json(rows);
+      .leftJoin(users, eq(checkpoints.decidedBy, users.id))
+      .where(eq(checkpoints.runId, run.id))
+      .orderBy(asc(checkpoints.requestedAt));
+    return c.json(rows.map(({ row, deciderName }) => ({ ...row, deciderName })));
   })
+  // legacy path + shape (rows only)
   .get("/runs/:id/approvals", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
     const rows = await c.var.db.select().from(checkpoints).where(eq(checkpoints.runId, run.id));
     return c.json(rows);
   })
+  .post(
+    "/runs/:id/checkpoints/:checkpointId/respond",
+    validate("json", checkpointRespondSchema),
+    async (c) => {
+      const run = await loadRunScoped(c, c.req.param("id"), "member");
+      return await respondToCheckpoint(c, run, c.req.param("checkpointId"), c.req.valid("json"));
+    },
+  )
+  // legacy decide route: binary approve/reject on approval-kind checkpoints
   .post("/runs/:id/approvals/:approvalId", validate("json", approvalDecisionSchema), async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "member");
     const input = c.req.valid("json");
-    const [approval] = await c.var.db
-      .select()
-      .from(checkpoints)
-      .where(and(eq(checkpoints.id, c.req.param("approvalId")), eq(checkpoints.runId, run.id)));
-    if (!approval) throw AppError.notFound("Approval");
-    const eventPayload = {
-      approvalId: approval.id,
-      checkpointId: approval.checkpointId,
+    return await respondToCheckpoint(c, run, c.req.param("approvalId"), {
+      kind: "approval",
       decision: input.decision,
-    };
-    // decision (CAS on status='pending'), the approval.decided event, and the
-    // audit row commit together — a partial write can't leave the timeline or
-    // audit log missing the decision that a later retry would then skip
-    const result = await c.var.db.transaction(async (tx) => {
-      const updated = await decideCheckpoint(tx, approval.id, {
-        status: input.decision,
-        decidedBy: c.var.user.id,
-        comment: input.comment,
-      });
-      if (!updated) return { updated: null as null };
+      comment: input.comment,
+    });
+  })
+
+  // ── Comments ────────────────────────────────────────────────────────────────
+  .get("/runs/:id/comments", async (c) => {
+    const run = await loadRunScoped(c, c.req.param("id"), "viewer");
+    const rows = await c.var.db
+      .select({
+        id: runComments.id,
+        body: runComments.body,
+        createdAt: runComments.createdAt,
+        userId: users.id,
+        userName: users.name,
+      })
+      .from(runComments)
+      .innerJoin(users, eq(runComments.userId, users.id))
+      .where(eq(runComments.runId, run.id))
+      .orderBy(asc(runComments.createdAt));
+    return c.json(rows);
+  })
+  .post("/runs/:id/comments", validate("json", commentCreateSchema), async (c) => {
+    const run = await loadRunScoped(c, c.req.param("id"), "member");
+    const input = c.req.valid("json");
+    // the comment row and its timeline event commit together, so the SSE
+    // stream and the thread can never disagree
+    const { comment, event, payload } = await c.var.db.transaction(async (tx) => {
+      const [comment] = await tx
+        .insert(runComments)
+        .values({ runId: run.id, userId: c.var.user.id, body: input.body })
+        .returning();
+      if (!comment) throw new Error("comment insert failed");
+      const payload = {
+        commentId: comment.id,
+        body: comment.body,
+        user: { id: c.var.user.id, name: c.var.user.name },
+      };
       const event = await allocateRunEvent(tx, {
         runId: run.id,
-        type: "approval.decided",
-        payload: eventPayload,
+        type: "comment.added",
+        payload,
       });
       await audit(
         c,
         {
-          action: "run.approval.decide",
-          resourceType: "approval",
-          resourceId: approval.id,
+          action: "run.comment.create",
+          resourceType: "run",
+          resourceId: run.id,
           projectId: run.projectId,
-          payload: { decision: input.decision },
         },
         tx,
       );
-      return { updated, event };
+      return { comment, event, payload };
     });
-    if (!result.updated) {
-      // already decided, OR a prior attempt decided then failed to enqueue: in
-      // both cases the durable state is correct, so re-enqueue to unstick the
-      // run (the sweeper also backstops this) and report the conflict
-      await c.var.queue?.enqueueRun(run.id);
-      throw AppError.conflict("already_decided", "Approval is already decided");
-    }
-    // publish + enqueue only after the decision durably committed
     await c.var.bus?.publish({
       runId: run.id,
-      seq: result.event.seq,
-      type: "approval.decided",
-      payload: eventPayload,
-      createdAt: result.event.createdAt.toISOString(),
+      seq: event.seq,
+      type: "comment.added",
+      payload,
+      createdAt: event.createdAt.toISOString(),
     });
-    await c.var.queue?.enqueueRun(run.id); // resume at the gated phase
-    return c.json(result.updated);
+    return c.json(comment, 201);
   })
 
   // ── Artifacts ───────────────────────────────────────────────────────────────

@@ -1,8 +1,14 @@
-import type { ModelTier } from "@agrippa/core";
-import { type Db, models, projectResourceGrants, repoConnections } from "@agrippa/db";
+import {
+  EXECUTOR_CATALOG,
+  EXECUTOR_DEFAULT_SENTINEL,
+  type ExecutorCatalogEntry,
+  isExecutorId,
+  type ModelTier,
+} from "@agrippa/core";
+import { type Db, fabri, models, projectResourceGrants, repoConnections } from "@agrippa/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
-import type { CompiledTemplate, TemplateInput } from "./template-schema";
+import { type CompiledTemplate, flattenPhases, type TemplateInput } from "./template-schema";
 
 /**
  * Submit-time resolution (docs/design/04): validate params against the
@@ -74,12 +80,15 @@ export type ModelResolution = Record<string, ModelResolutionEntry>;
 
 /**
  * role → tier → cheapest granted active model; falls through the template's
- * fallback tiers; frozen into runs.model_resolution at submit.
+ * fallback tiers; frozen into runs.model_resolution at submit. An executor's
+ * provider constraint (e.g. codex-cli only serves openai models) narrows the
+ * candidate set before tier bucketing.
  */
 export async function resolveModelRoles(
   db: Db,
   projectId: string,
   spec: CompiledTemplate["spec"]["models"],
+  providers: readonly string[] | "*" = "*",
 ): Promise<ModelResolution> {
   const grants = await db
     .select({ resourceId: projectResourceGrants.resourceId })
@@ -94,10 +103,12 @@ export async function resolveModelRoles(
   if (grantedIds.length === 0) {
     throw new SubmitError("no_models_granted", "No models are granted to this project");
   }
-  const granted = await db
+  const grantedAll = await db
     .select()
     .from(models)
     .where(and(inArray(models.id, grantedIds), eq(models.status, "active")));
+  const granted =
+    providers === "*" ? grantedAll : grantedAll.filter((m) => providers.includes(m.provider));
 
   const byTier = new Map<string, typeof granted>();
   for (const model of granted) {
@@ -109,6 +120,7 @@ export async function resolveModelRoles(
     list.sort((a, b) => Number(a.inputCostPerMtok ?? 0) - Number(b.inputCostPerMtok ?? 0));
   }
 
+  const constraint = providers === "*" ? "" : ` from provider ${providers.join("/")}`;
   const resolution: ModelResolution = {};
   for (const [role, policy] of Object.entries(spec.roles)) {
     const tiers: ModelTier[] = [policy.tier, ...policy.fallback];
@@ -116,7 +128,7 @@ export async function resolveModelRoles(
     if (!model) {
       throw new SubmitError(
         "model_unresolvable",
-        `No granted model satisfies role '${role}' (tiers: ${tiers.join(" → ")})`,
+        `No granted model${constraint} satisfies role '${role}' (tiers: ${tiers.join(" → ")})`,
       );
     }
     resolution[role] = {
@@ -130,6 +142,127 @@ export async function resolveModelRoles(
     };
   }
   return resolution;
+}
+
+export type AgentBindingResolution = {
+  /** slot → concrete binding, frozen into runs.agent_bindings. */
+  bindings: Record<string, { faberId: string; executorId: string }>;
+  /** slot → role resolution, frozen into runs.model_resolution. */
+  modelResolution: Record<string, ModelResolution>;
+  /** First slot's binding — the runs.faber_id/executor_id denormalization. */
+  primary: { faberId: string; executorId: string };
+};
+
+/**
+ * Resolve every agent slot to a concrete faber + executor at submit:
+ * template defaults (the v1-upgrade sentinel maps to the deployment default,
+ * preserving pre-slot behavior exactly), then user overrides (overridable
+ * slots only), then per-slot capability and provider-filtered model checks —
+ * all before a run row exists, so failures are fast and actionable.
+ */
+export async function resolveAgentBindings(
+  db: Db,
+  projectId: string,
+  compiled: CompiledTemplate,
+  defaults: { faberId: string; executorId: string },
+  overrides: Record<string, { executorId?: string; faberId?: string }> = {},
+): Promise<AgentBindingResolution> {
+  const slots = compiled.spec.agents;
+  const slotIds = Object.keys(slots);
+  for (const key of Object.keys(overrides)) {
+    if (!slotIds.includes(key)) {
+      throw new SubmitError("slot_unknown", `Template has no agent slot '${key}'`);
+    }
+  }
+
+  const faberRows = await db.select().from(fabri).where(eq(fabri.status, "active"));
+  const bySlug = new Map(faberRows.map((f) => [f.slug, f]));
+  const byId = new Map(faberRows.map((f) => [f.id, f]));
+
+  const allSteps = flattenPhases(compiled.spec.phases).flatMap(({ phase }) => phase.steps);
+  const bindings: AgentBindingResolution["bindings"] = {};
+  const modelResolution: AgentBindingResolution["modelResolution"] = {};
+
+  for (const slotId of slotIds) {
+    const slot = slots[slotId] as NonNullable<(typeof slots)[string]>;
+    let faberId: string;
+    let executorId: string;
+    if (slot.executor === EXECUTOR_DEFAULT_SENTINEL) {
+      // upgraded v1 template: exactly the pre-slot behavior
+      faberId = defaults.faberId;
+      executorId = defaults.executorId;
+    } else {
+      const faberRow = bySlug.get(slot.faber);
+      if (!faberRow) {
+        throw new SubmitError(
+          "faber_unknown",
+          `Faber '${slot.faber}' for slot '${slotId}' is not registered`,
+        );
+      }
+      faberId = faberRow.id;
+      executorId = slot.executor;
+    }
+
+    const override = overrides[slotId];
+    if (override && (override.executorId !== undefined || override.faberId !== undefined)) {
+      if (!slot.overridable) {
+        throw new SubmitError("slot_not_overridable", `Agent slot '${slotId}' is fixed`);
+      }
+      if (override.executorId !== undefined) {
+        if (!isExecutorId(override.executorId)) {
+          throw new SubmitError("executor_unknown", `Unknown executor '${override.executorId}'`);
+        }
+        executorId = override.executorId;
+      }
+      if (override.faberId !== undefined) {
+        if (!byId.has(override.faberId)) {
+          throw new SubmitError("faber_unknown", `Faber '${override.faberId}' is not active`);
+        }
+        faberId = override.faberId;
+      }
+    }
+
+    // an executor outside the catalog (custom AGRIPPA_EXECUTOR) skips the
+    // capability/provider checks — it predates the catalog and stays unfiltered
+    const entry: ExecutorCatalogEntry | null = isExecutorId(executorId)
+      ? EXECUTOR_CATALOG[executorId]
+      : null;
+    if (entry) {
+      for (const step of allSteps) {
+        if (step.kind !== "agent" || (step.agent ?? slotIds[0]) !== slotId) continue;
+        const caps = entry.capabilities;
+        if (!caps.subagents && step.subagents.length > 0) {
+          throw new SubmitError(
+            "executor_capability",
+            `Executor '${executorId}' cannot run step '${step.id}' (no subagent support)`,
+          );
+        }
+        if (!caps.skills && step.skills.length > 0) {
+          throw new SubmitError(
+            "executor_capability",
+            `Executor '${executorId}' cannot run step '${step.id}' (no skill support)`,
+          );
+        }
+        if (!caps.mcp && step.mcpServers.length > 0) {
+          throw new SubmitError(
+            "executor_capability",
+            `Executor '${executorId}' cannot run step '${step.id}' (no MCP support)`,
+          );
+        }
+      }
+    }
+    const providers = entry?.providers ?? "*";
+    modelResolution[slotId] = await resolveModelRoles(
+      db,
+      projectId,
+      compiled.spec.models,
+      providers,
+    );
+    bindings[slotId] = { faberId, executorId };
+  }
+
+  const primary = bindings[slotIds[0] as string] as { faberId: string; executorId: string };
+  return { bindings, modelResolution, primary };
 }
 
 /** The set of resource slugs a run is authorized to use, pinned at submit. */
