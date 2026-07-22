@@ -1,7 +1,7 @@
 import { isTerminalRunStatus, type RunStatus, type StepStatus } from "@agrippa/core";
 import {
-  approvals,
   artifacts,
+  checkpoints,
   fabri,
   projectQuotas,
   projects,
@@ -392,9 +392,9 @@ class RunEngine {
     if (!approval) return "approved";
     const [row] = await this.db
       .select()
-      .from(approvals)
+      .from(checkpoints)
       .where(
-        and(eq(approvals.runId, this.run.id), eq(approvals.checkpointId, approval.checkpoint)),
+        and(eq(checkpoints.runId, this.run.id), eq(checkpoints.checkpointId, approval.checkpoint)),
       );
     if (!row) return "waiting";
     if (row.status === "approved") return "approved";
@@ -412,12 +412,12 @@ class RunEngine {
     if (!approval) throw new Error("pauseForApproval without approval spec");
     const [existing] = await this.db
       .select()
-      .from(approvals)
+      .from(checkpoints)
       .where(
-        and(eq(approvals.runId, this.run.id), eq(approvals.checkpointId, approval.checkpoint)),
+        and(eq(checkpoints.runId, this.run.id), eq(checkpoints.checkpointId, approval.checkpoint)),
       );
     if (!existing) {
-      await this.db.insert(approvals).values({
+      await this.db.insert(checkpoints).values({
         runId: this.run.id,
         checkpointId: approval.checkpoint,
         payload: {

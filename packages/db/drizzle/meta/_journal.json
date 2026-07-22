@@ -36,6 +36,13 @@
       "when": 1784626794784,
       "tag": "0004_invitations",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784757171366,
+      "tag": "0005_requirement-delivery",
+      "breakpoints": true
     }
   ]
 }

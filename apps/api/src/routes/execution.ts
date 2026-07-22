@@ -5,8 +5,8 @@ import {
   taskSubmitSchema,
 } from "@agrippa/core";
 import {
-  approvals,
   artifacts,
+  checkpoints,
   mcpServers,
   orchestrationTemplates,
   projectMembers,
@@ -24,7 +24,7 @@ import {
   appendRunEvent as allocateRunEvent,
   authorizeResources,
   buildParamsValidator,
-  decideApproval,
+  decideCheckpoint,
   resolveModelRoles,
   SubmitError,
   type TemplateDoc,
@@ -339,10 +339,10 @@ export const executionRoutes = new Hono<AppEnv>()
   .get("/approvals/pending", async (c) => {
     const rows = await c.var.db
       .select({
-        id: approvals.id,
-        checkpointId: approvals.checkpointId,
-        payload: approvals.payload,
-        requestedAt: approvals.requestedAt,
+        id: checkpoints.id,
+        checkpointId: checkpoints.checkpointId,
+        payload: checkpoints.payload,
+        requestedAt: checkpoints.requestedAt,
         runId: runs.id,
         runNumber: runs.number,
         taskId: tasks.id,
@@ -351,21 +351,21 @@ export const executionRoutes = new Hono<AppEnv>()
         projectName: projects.name,
         projectRole: projectMembers.role,
       })
-      .from(approvals)
-      .innerJoin(runs, eq(approvals.runId, runs.id))
+      .from(checkpoints)
+      .innerJoin(runs, eq(checkpoints.runId, runs.id))
       .innerJoin(tasks, eq(runs.taskId, tasks.id))
       .innerJoin(projects, eq(runs.projectId, projects.id))
       .innerJoin(
         projectMembers,
         and(eq(projectMembers.projectId, runs.projectId), eq(projectMembers.userId, c.var.user.id)),
       )
-      .where(eq(approvals.status, "pending"))
-      .orderBy(desc(approvals.requestedAt));
+      .where(eq(checkpoints.status, "pending"))
+      .orderBy(desc(checkpoints.requestedAt));
     return c.json(rows);
   })
   .get("/runs/:id/approvals", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
-    const rows = await c.var.db.select().from(approvals).where(eq(approvals.runId, run.id));
+    const rows = await c.var.db.select().from(checkpoints).where(eq(checkpoints.runId, run.id));
     return c.json(rows);
   })
   .post("/runs/:id/approvals/:approvalId", validate("json", approvalDecisionSchema), async (c) => {
@@ -373,8 +373,8 @@ export const executionRoutes = new Hono<AppEnv>()
     const input = c.req.valid("json");
     const [approval] = await c.var.db
       .select()
-      .from(approvals)
-      .where(and(eq(approvals.id, c.req.param("approvalId")), eq(approvals.runId, run.id)));
+      .from(checkpoints)
+      .where(and(eq(checkpoints.id, c.req.param("approvalId")), eq(checkpoints.runId, run.id)));
     if (!approval) throw AppError.notFound("Approval");
     const eventPayload = {
       approvalId: approval.id,
@@ -385,7 +385,7 @@ export const executionRoutes = new Hono<AppEnv>()
     // audit row commit together — a partial write can't leave the timeline or
     // audit log missing the decision that a later retry would then skip
     const result = await c.var.db.transaction(async (tx) => {
-      const updated = await decideApproval(tx, approval.id, {
+      const updated = await decideCheckpoint(tx, approval.id, {
         status: input.decision,
         decidedBy: c.var.user.id,
         comment: input.comment,

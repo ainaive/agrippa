@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import path from "node:path";
 import {
-  approvals,
   artifacts,
+  checkpoints,
   createDb,
   type Db,
   migrateDb,
@@ -37,9 +37,9 @@ import {
 } from "./fakes";
 import {
   appendRunEvent,
-  decideApproval,
+  decideCheckpoint,
   finalizeRun,
-  findStrandedApprovalRuns,
+  findStrandedCheckpointRuns,
   transitionRun,
 } from "./run-lifecycle";
 
@@ -245,9 +245,9 @@ const HAPPY_SCRIPT: Record<string, FakeStepBehavior> = {
 
 async function approve(db: Db, runId: string): Promise<void> {
   await db
-    .update(approvals)
+    .update(checkpoints)
     .set({ status: "approved", decidedAt: new Date() })
-    .where(eq(approvals.runId, runId));
+    .where(eq(checkpoints.runId, runId));
 }
 
 describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", () => {
@@ -259,7 +259,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(await executeRun(deps, runId)).toBe("waiting_approval");
     const [run1] = await db.select().from(runs).where(eq(runs.id, runId));
     expect(run1?.status).toBe("waiting_approval");
-    const [approval] = await db.select().from(approvals).where(eq(approvals.runId, runId));
+    const [approval] = await db.select().from(checkpoints).where(eq(checkpoints.runId, runId));
     expect(approval?.status).toBe("pending");
     expect(approval?.checkpointId).toBe("approve-fix-plan");
 
@@ -318,9 +318,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     const { db, runId, makeDeps } = await setupFixture();
     await executeRun(makeDeps(HAPPY_SCRIPT), runId);
     await db
-      .update(approvals)
+      .update(checkpoints)
       .set({ status: "rejected", decidedAt: new Date() })
-      .where(eq(approvals.runId, runId));
+      .where(eq(checkpoints.runId, runId));
 
     expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
@@ -369,7 +369,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
       .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "reproduce-bug")));
     expect(rows[0]?.status).toBe("failed");
     // run kept going to the localize phase and the approval gate
-    const [approval] = await db.select().from(approvals).where(eq(approvals.runId, runId));
+    const [approval] = await db.select().from(checkpoints).where(eq(checkpoints.runId, runId));
     expect(approval?.status).toBe("pending");
   });
 
@@ -689,28 +689,28 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     expect(e.seq).toBeGreaterThan(d.seq);
   });
 
-  it("findStrandedApprovalRuns selects only runs with no pending approval", async () => {
+  it("findStrandedCheckpointRuns selects only runs with no pending approval", async () => {
     const { db, runId } = await setupFixture();
     await db.update(runs).set({ status: "waiting_approval" }).where(eq(runs.id, runId));
 
     // one pending approval → not stranded
     const [a1] = await db
-      .insert(approvals)
+      .insert(checkpoints)
       .values({ runId, checkpointId: "cp-1", status: "pending" })
       .returning();
-    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+    expect(await findStrandedCheckpointRuns(db)).not.toContain(runId);
 
     // a second, earlier checkpoint gets approved while cp-1 is still pending →
     // still not stranded (the multi-approval trap the old innerJoin fell into)
     await db
-      .insert(approvals)
+      .insert(checkpoints)
       .values({ runId, checkpointId: "cp-0", status: "approved" })
       .returning();
-    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+    expect(await findStrandedCheckpointRuns(db)).not.toContain(runId);
 
     // cp-1 decided too → now every approval is decided → stranded, re-enqueue
-    await decideApproval(db, a1?.id as string, { status: "approved" });
-    expect(await findStrandedApprovalRuns(db)).toContain(runId);
+    await decideCheckpoint(db, a1?.id as string, { status: "approved" });
+    expect(await findStrandedCheckpointRuns(db)).toContain(runId);
   });
 
   it("finalizeRun lets a late cancel win over a success (atomic, no read/CAS gap)", async () => {
@@ -764,22 +764,22 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     expect(events.some((e) => e.type === "run.failed")).toBe(true);
   });
 
-  it("decideApproval is a compare-and-swap on pending", async () => {
+  it("decideCheckpoint is a compare-and-swap on pending", async () => {
     const { db, runId } = await setupFixture();
     const [approval] = await db
-      .insert(approvals)
+      .insert(checkpoints)
       .values({ runId, checkpointId: "cp-1", status: "pending" })
       .returning();
     const id = approval?.id as string;
-    const first = await decideApproval(db, id, { status: "approved" });
+    const first = await decideCheckpoint(db, id, { status: "approved" });
     expect(first?.status).toBe("approved");
     // a racing expiry cannot overwrite the user's decision
-    const second = await decideApproval(db, id, { status: "expired" });
+    const second = await decideCheckpoint(db, id, { status: "expired" });
     expect(second).toBeNull();
     const [row] = await db
-      .select({ status: approvals.status })
-      .from(approvals)
-      .where(eq(approvals.id, id));
+      .select({ status: checkpoints.status })
+      .from(checkpoints)
+      .where(eq(checkpoints.id, id));
     expect(row?.status).toBe("approved");
   });
 });

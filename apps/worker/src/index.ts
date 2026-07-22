@@ -5,16 +5,16 @@ import {
   QUEUE_RUN_EXECUTE,
   type RunExecutePayload,
 } from "@agrippa/core";
-import { approvals, createDb, runs } from "@agrippa/db";
+import { checkpoints, createDb, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import {
   createRunQueue,
-  decideApproval,
+  decideCheckpoint,
   durationToMinutes,
   type EngineDeps,
   executeRun,
   finalizeRun,
-  findStrandedApprovalRuns,
+  findStrandedCheckpointRuns,
   InProcessEventBus,
   RedisEventBus,
 } from "@agrippa/orchestration";
@@ -81,7 +81,7 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
   for (const job of jobs) {
     // CAS pending → expired; null means a user already decided it (or a prior
     // run of this job did) — nothing to do
-    const expired = await decideApproval(db, job.data.approvalId, { status: "expired" });
+    const expired = await decideCheckpoint(db, job.data.approvalId, { status: "expired" });
     if (!expired) continue;
     deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
     await queue.enqueueRun(job.data.runId); // engine applies the template's onTimeout
@@ -91,8 +91,8 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
 async function scheduleApprovalExpiry(runId: string): Promise<void> {
   const rows = await db
     .select()
-    .from(approvals)
-    .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending")));
+    .from(checkpoints)
+    .where(and(eq(checkpoints.runId, runId), eq(checkpoints.status, "pending")));
   for (const approval of rows) {
     const payload = approval.payload as { timeoutMinutes?: number };
     const minutes = payload.timeoutMinutes ?? durationToMinutes("24h");
@@ -136,7 +136,7 @@ setInterval(async () => {
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
-    for (const runId of await findStrandedApprovalRuns(db)) await queue.enqueueRun(runId);
+    for (const runId of await findStrandedCheckpointRuns(db)) await queue.enqueueRun(runId);
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }
