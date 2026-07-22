@@ -53,12 +53,17 @@ function buildTimeline(
   const phaseById = new Map((run.template?.phases ?? []).map((p) => [p.id, p]));
   const items: TimelineItem[] = [];
   const openTurns = new Map<string, TurnItem>();
+  // a resume re-announces the phase it paused in — drop the duplicate header
+  let lastPhaseKey = "";
 
   for (const event of events) {
     const p = event.payload;
     const stepKey = `${String(p.stepId ?? "")}#${Number(p.iteration ?? 1)}`;
     switch (event.type) {
       case "phase.started": {
+        const phaseKey = `${String(p.phaseId ?? "")}#${Number(p.iteration ?? 1)}`;
+        if (phaseKey === lastPhaseKey) break;
+        lastPhaseKey = phaseKey;
         const phase = phaseById.get(String(p.phaseId ?? ""));
         const loop = phase?.loop ?? null;
         items.push({

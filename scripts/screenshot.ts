@@ -107,19 +107,29 @@ async function waitForRunStatus(runId: string, want: string[], timeoutMs = 60_00
 type Fixtures = {
   projectId: string;
   taskTypeId: string;
+  deliveryTaskTypeId: string;
   templateId: string;
   waitingRunId: string;
   doneRunId: string;
+  deliveryRunId: string;
 };
 
-async function seedFixtures(): Promise<Fixtures> {
-  await api("/api/auth/sign-up/email", {
+async function seedFixtures(dbUrl: string): Promise<Fixtures> {
+  // self-registration is closed — bootstrap the first admin, then sign in
+  const bootstrap = Bun.spawnSync(["bun", "apps/api/src/cli/bootstrap-admin.ts"], {
+    env: {
+      ...process.env,
+      DATABASE_URL: dbUrl,
+      AGRIPPA_BOOTSTRAP_EMAIL: "ada@example.com",
+      AGRIPPA_BOOTSTRAP_PASSWORD: "password123",
+    },
+  });
+  if (bootstrap.exitCode !== 0) {
+    throw new Error(`bootstrap-admin failed: ${bootstrap.stderr.toString().slice(0, 500)}`);
+  }
+  await api("/api/auth/sign-in/email", {
     method: "POST",
-    body: JSON.stringify({
-      name: "Ada Lovelace",
-      email: "ada@example.com",
-      password: "password123",
-    }),
+    body: JSON.stringify({ email: "ada@example.com", password: "password123" }),
   });
   const project = await api<{ id: string }>("/api/v1/projects", {
     method: "POST",
@@ -151,20 +161,91 @@ async function seedFixtures(): Promise<Fixtures> {
       body: JSON.stringify({ taskTypeId: planBreakdown.id, title, params: { goal } }),
     });
 
+  // Responding re-enqueues the run, so its status stays waiting_approval until
+  // the worker resumes — poll for the NEXT pending checkpoint, not the status.
+  const pendingCheckpoint = async (runId: string, afterId?: string, timeoutMs = 60_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const rows = await api<Array<{ id: string; status: string; kind: string }>>(
+        `/api/v1/runs/${runId}/checkpoints`,
+      );
+      const pending = rows.find((row) => row.status === "pending" && row.id !== afterId);
+      if (pending) return pending;
+      const run = await api<{ status: string; error: unknown }>(`/api/v1/runs/${runId}`);
+      if (["failed", "cancelled", "timed_out", "succeeded"].includes(run.status)) {
+        throw new Error(
+          `run ${runId} reached ${run.status} while waiting for a checkpoint: ${JSON.stringify(run.error)}`,
+        );
+      }
+      await Bun.sleep(500);
+    }
+    throw new Error(`timed out waiting for a pending checkpoint on run ${runId}`);
+  };
+
   // run 1: drive to success so run detail / usage / audit have real data
   const done = await submit("Quarterly roadmap breakdown", "Break the Q3 roadmap into workstreams");
   await waitForRunStatus(done.runId, ["waiting_approval"]);
-  const [approval] = await api<Array<{ id: string }>>(`/api/v1/runs/${done.runId}/approvals`);
-  if (!approval) throw new Error("expected a pending approval");
-  await api(`/api/v1/runs/${done.runId}/approvals/${approval.id}`, {
+  const approval = await pendingCheckpoint(done.runId);
+  await api(`/api/v1/runs/${done.runId}/checkpoints/${approval.id}/respond`, {
     method: "POST",
-    body: JSON.stringify({ decision: "approved", comment: "Looks solid — proceed." }),
+    body: JSON.stringify({
+      kind: "approval",
+      decision: "approved",
+      comment: "Looks solid — proceed.",
+    }),
   });
   await waitForRunStatus(done.runId, ["succeeded"]);
 
-  // run 2: left paused at the checkpoint so ApprovalPanel + inbox render
+  // run 2: left paused at the checkpoint so CheckpointPanel + inbox render
   const waiting = await submit("Launch-readiness plan", "Plan the beta launch checklist");
   await waitForRunStatus(waiting.runId, ["waiting_approval"]);
+
+  // run 3: the requirement-delivery workflow (agrippa/v2) — a repo connection
+  // pointing at this working tree keeps checkout real while AGRIPPA_SCM=fake
+  // fabricates push/PR; driven through the Q&A and plan gates, then left at
+  // the round-1 review gate so the findings table and timeline cards render
+  const repo = await api<{ id: string }>(`/api/v1/projects/${project.id}/repos`, {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "generic-git",
+      url: `file://${process.cwd()}`,
+      defaultBranch: "main",
+    }),
+  });
+  const swdevTypes = await api<Array<{ id: string; slug: string }>>(
+    "/api/v1/scenarios/software-development/task-types",
+  );
+  const delivery = swdevTypes.find((t) => t.slug === "requirement-delivery");
+  if (!delivery) throw new Error("requirement-delivery task type missing from seed");
+  const deliveryRun = await api<{ runId: string }>(`/api/v1/projects/${project.id}/tasks`, {
+    method: "POST",
+    body: JSON.stringify({
+      taskTypeId: delivery.id,
+      title: "Add dark-mode toggle",
+      params: {
+        requirement: "Add a dark-mode toggle to the settings page",
+        repo: { repoConnectionId: repo.id },
+      },
+    }),
+  });
+  const questions = await pendingCheckpoint(deliveryRun.runId);
+  if (questions.kind !== "input")
+    throw new Error(`expected input checkpoint, got ${questions.kind}`);
+  await api(`/api/v1/runs/${deliveryRun.runId}/checkpoints/${questions.id}/respond`, {
+    method: "POST",
+    body: JSON.stringify({ kind: "input", answers: { q1: "Keep the current API", q2: true } }),
+  });
+  const plan = await pendingCheckpoint(deliveryRun.runId, questions.id);
+  await api(`/api/v1/runs/${deliveryRun.runId}/checkpoints/${plan.id}/respond`, {
+    method: "POST",
+    body: JSON.stringify({ kind: "approval", decision: "approved" }),
+  });
+  const gate = await pendingCheckpoint(deliveryRun.runId, plan.id);
+  if (gate.kind !== "review-gate") throw new Error(`expected review-gate, got ${gate.kind}`);
+  await api(`/api/v1/runs/${deliveryRun.runId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body: "Reviewer flagged two issues — I'd fix the major one." }),
+  });
 
   const templates = await api<Array<{ id: string }>>("/api/v1/templates");
   const templateId = templates[0]?.id;
@@ -173,9 +254,11 @@ async function seedFixtures(): Promise<Fixtures> {
   return {
     projectId: project.id,
     taskTypeId: planBreakdown.id,
+    deliveryTaskTypeId: delivery.id,
     templateId,
     waitingRunId: waiting.runId,
     doneRunId: done.runId,
+    deliveryRunId: deliveryRun.runId,
   };
 }
 
@@ -186,9 +269,11 @@ function pages(f: Fixtures): Array<{ name: string; path: string }> {
     { name: "dashboard", path: `/projects/${f.projectId}` },
     { name: "catalog", path: `/projects/${f.projectId}/catalog` },
     { name: "submit", path: `/projects/${f.projectId}/submit/${f.taskTypeId}` },
+    { name: "submit-delivery", path: `/projects/${f.projectId}/submit/${f.deliveryTaskTypeId}` },
     { name: "tasks", path: `/projects/${f.projectId}/tasks` },
     { name: "run-succeeded", path: `/projects/${f.projectId}/runs/${f.doneRunId}` },
     { name: "run-waiting", path: `/projects/${f.projectId}/runs/${f.waitingRunId}` },
+    { name: "run-delivery", path: `/projects/${f.projectId}/runs/${f.deliveryRunId}` },
     { name: "approvals", path: "/approvals" },
     { name: "usage", path: `/projects/${f.projectId}/usage` },
     { name: "settings", path: `/projects/${f.projectId}/settings` },
@@ -284,6 +369,7 @@ try {
     DATABASE_URL: `${PG}/${DB_NAME}`,
     AGRIPPA_SECRET_KEY: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
     AGRIPPA_EXECUTOR: "fake",
+    AGRIPPA_SCM: "fake",
   };
   spawn(["bun", "apps/api/src/index.ts"], env);
   spawn(["bun", "apps/worker/src/index.ts"], env);
@@ -292,7 +378,7 @@ try {
   await waitFor(WEB);
 
   console.log("→ seeding fixtures");
-  const fixtures = await seedFixtures();
+  const fixtures = await seedFixtures(env.DATABASE_URL);
 
   console.log(`→ capturing to ${outDir}`);
   const browser = await chromium.launch();
