@@ -118,6 +118,14 @@
         "@anthropic-ai/claude-agent-sdk": "^0.3.212",
       },
     },
+    "packages/executor-codex": {
+      "name": "@agrippa/executor-codex",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agrippa/core": "workspace:*",
+        "@agrippa/executor-core": "workspace:*",
+      },
+    },
     "packages/executor-core": {
       "name": "@agrippa/executor-core",
       "version": "0.0.0",
@@ -154,6 +162,8 @@
     "@agrippa/db": ["@agrippa/db@workspace:packages/db"],
 
     "@agrippa/executor-claude": ["@agrippa/executor-claude@workspace:packages/executor-claude"],
+
+    "@agrippa/executor-codex": ["@agrippa/executor-codex@workspace:packages/executor-codex"],
 
     "@agrippa/executor-core": ["@agrippa/executor-core@workspace:packages/executor-core"],
 

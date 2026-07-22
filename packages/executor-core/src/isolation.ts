@@ -160,11 +160,17 @@ export async function realContained(root: string, target: string): Promise<boole
  * Claude namespaces — so an admin/private variable can't ride along.
  */
 const SDK_AUTH_ALLOW = new Set([
+  // Anthropic (Claude Agent SDK)
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_MODEL",
   "CLAUDE_CODE_OAUTH_TOKEN",
+  // OpenAI (Codex CLI)
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "CODEX_API_KEY",
+  "CODEX_HOME",
 ]);
 
 /**
@@ -241,6 +247,8 @@ export function collectEnvSecretValues(
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
   ];
   return keys
     .map((k) => source[k])
