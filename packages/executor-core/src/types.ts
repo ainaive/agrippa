@@ -62,6 +62,10 @@ export type PriorStepSummary = {
 export type StepExecutionRequest = {
   runId: string;
   stepId: string;
+  /** Loop iteration this step belongs to; 1 outside loops. */
+  iteration?: number;
+  /** Agent slot the step is bound to (agrippa/v2 templates). */
+  agentSlot?: string;
   instructions: string;
   systemPrompt: string;
   model: ResolvedModel;
