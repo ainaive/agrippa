@@ -1,0 +1,262 @@
+apiVersion: agrippa/v2
+kind: OrchestrationTemplate
+metadata:
+  slug: swdev.requirement-delivery
+  scenario: software-development
+  name: { en: "Requirement Delivery", zh-CN: "需求交付" }
+  description:
+    en: "Take a requirement all the way to a reviewed pull request: clarify with the user, plan, implement on a branch, cross-agent review-fix loop, then a platform-opened PR."
+    zh-CN: "把需求一路交付到经过评审的 PR：与用户澄清、规划、在分支上实现、双代理评审-修复循环，最终由平台创建 PR。"
+spec:
+  agents:
+    implementer:
+      label: { en: "Implementer", zh-CN: "实现者" }
+      faber: forge
+      executor: claude-agent-sdk
+    reviewer:
+      label: { en: "Reviewer", zh-CN: "评审者" }
+      faber: arbiter
+      executor: codex-cli
+
+  inputs:
+    - key: requirement
+      type: text
+      required: true
+      label: { en: "Requirement", zh-CN: "需求描述" }
+      help:
+        en: "Describe what should be built, in plain language. The implementer will ask about anything ambiguous."
+        zh-CN: "用自然语言描述要实现的内容，实现者会就不明确之处向你提问。"
+      ui: { widget: textarea, rows: 10 }
+    - key: repo
+      type: repoRef
+      required: true
+      label: { en: "Repository", zh-CN: "代码仓库" }
+    - key: branch
+      type: string
+      default: main
+      label: { en: "Base branch", zh-CN: "基准分支" }
+
+  workspace:
+    repo: ${inputs.repo}
+    ref: ${inputs.branch}
+    access: readWrite
+
+  resources:
+    skills:
+      - ref: builtin/git-workflow@^1
+      - ref: builtin/test-runner@^1
+        optional: true
+
+  models:
+    roles:
+      planning: { tier: strong, fallback: [balanced] }
+      coding: { tier: strong, fallback: [balanced] }
+      review: { tier: strong, fallback: [fast] }
+
+  phases:
+    - id: setup
+      name: { en: "Setup", zh-CN: "准备" }
+      steps:
+        - id: checkout
+          kind: system
+          action: workspace.checkout
+        - id: branch
+          kind: system
+          action: git.branch
+          with: { name: "agrippa/run-${run.number}" }
+
+    - kind: loop
+      id: clarify
+      name: { en: "Clarify", zh-CN: "澄清" }
+      maxIterations: 3
+      until: checkpoints.clarify-qa.outcome == 'pass'
+      onMaxIterations: continue
+      phases:
+        - id: clarify-round
+          name: { en: "Q&A round", zh-CN: "问答轮次" }
+          steps:
+            - id: analyze-requirement
+              kind: agent
+              agent: implementer
+              model: { role: planning }
+              instructions: |
+                Analyze the requirement below against this codebase.
+
+                Answers the user already gave (empty on the first round):
+                ${checkpoints.clarify-qa.answers}
+
+                If material ambiguities remain, write the questions artifact as JSON:
+                {"questions": [{"id": "q1", "text": "…", "kind": "text|select|boolean",
+                "options": ["…"], "required": true, "recommended": "your suggested answer"}]}
+                Ask only what genuinely changes the implementation; recommend an answer
+                for every question. If everything is clear, write an EMPTY questions list
+                ({"questions": []}) and write clarification-notes summarizing the agreed
+                scope, the affected areas of the code, and the acceptance criteria.
+
+                --- REQUIREMENT ---
+                ${inputs.requirement}
+              produces: [questions, clarification-notes]
+            - id: clarify-qa
+              kind: checkpoint
+              checkpoint:
+                kind: input
+                source: questions
+                title: { en: "Answer the implementer's questions", zh-CN: "回答实现者的问题" }
+                timeout: 48h
+
+    - kind: loop
+      id: plan
+      name: { en: "Plan", zh-CN: "规划" }
+      maxIterations: 3
+      until: checkpoints.confirm-plan.outcome == 'approved'
+      onMaxIterations: fail
+      phases:
+        - id: plan-round
+          name: { en: "Plan round", zh-CN: "规划轮次" }
+          steps:
+            - id: draft-plan
+              kind: agent
+              agent: implementer
+              model: { role: planning }
+              instructions: |
+                Produce (or revise) the implementation plan for the clarified requirement:
+                ordered steps with file-level detail, test strategy, and verification
+                criteria a reviewer can check.
+
+                Clarified scope: ${artifacts.clarification-notes}
+                Change-request feedback from the user (empty on the first round):
+                ${checkpoints.confirm-plan.comment}
+
+                --- REQUIREMENT ---
+                ${inputs.requirement}
+              produces: [implementation-plan]
+            - id: confirm-plan
+              kind: checkpoint
+              checkpoint:
+                kind: approval
+                present: [implementation-plan]
+                title: { en: "Confirm the implementation plan", zh-CN: "确认实现方案" }
+                timeout: 48h
+                onTimeout: cancel
+
+    - id: implement
+      name: { en: "Implement", zh-CN: "实现" }
+      steps:
+        - id: implement
+          kind: agent
+          agent: implementer
+          model: { role: coding }
+          skills: ["builtin/git-workflow@^1", "builtin/test-runner@^1"]
+          instructions: |
+            Implement the confirmed plan on the CURRENT branch — the platform already
+            created it; do NOT create or switch branches. Commit in reviewable,
+            conventional-message increments and run the repository's test suite
+            before finishing.
+
+            The confirmed plan:
+            ${artifacts.implementation-plan}
+          produces: [changes]
+
+    - kind: loop
+      id: review-fix
+      name: { en: "Review & fix", zh-CN: "评审与修复" }
+      maxIterations: 3
+      until: checkpoints.review-gate.outcome == 'pass'
+      onMaxIterations: continue
+      phases:
+        - id: review-round
+          name: { en: "Review round", zh-CN: "评审轮次" }
+          steps:
+            - id: review
+              kind: agent
+              agent: reviewer
+              model: { role: review }
+              instructions: |
+                Review the committed changes on this branch against the base branch
+                (`git log ${inputs.branch}..HEAD`, `git diff ${inputs.branch}...HEAD`)
+                for correctness, security, and codebase conventions. Do NOT modify any
+                code — you are the reviewer.
+
+                The plan the change claims to implement:
+                ${artifacts.implementation-plan}
+
+                Write the review-report artifact as JSON:
+                {"summary": "…", "findings": [{"id": "f1", "severity":
+                "blocker|major|minor|info", "file": "path", "line": 1, "title": "…",
+                "detail": "…", "suggestion": "…"}]}
+                An empty findings array means the change is approved.
+              produces: [review-report]
+            - id: review-gate
+              kind: checkpoint
+              checkpoint:
+                kind: review-gate
+                source: review-report
+                present: [review-report, changes]
+                title: { en: "Review findings", zh-CN: "评审结果" }
+                timeout: 48h
+            - id: fix
+              kind: agent
+              agent: implementer
+              model: { role: coding }
+              when: checkpoints.review-gate.outcome == 'fix'
+              skills: ["builtin/test-runner@^1"]
+              instructions: |
+                Fix EXACTLY these review findings on the current branch, then commit.
+                Do not expand the scope beyond them; re-run the tests before finishing.
+
+                ${checkpoints.review-gate.selectedFindings}
+              produces: [changes]
+
+    - id: publish
+      name: { en: "Publish", zh-CN: "发布" }
+      steps:
+        - id: confirm-publish
+          kind: checkpoint
+          # only reached when the review loop exhausted right after a fix that was
+          # never re-reviewed — the user explicitly signs off before the PR opens
+          when: checkpoints.review-gate.outcome == 'fix'
+          checkpoint:
+            kind: approval
+            present: [changes]
+            title:
+              en: "The last fix was not re-reviewed — open the pull request anyway?"
+              zh-CN: "最后一轮修复未经复审——仍要创建 PR 吗？"
+            timeout: 48h
+            onTimeout: cancel
+        - id: push
+          kind: system
+          action: git.push
+          retry: { max: 2 }
+        - id: open-pr
+          kind: system
+          action: pr.open
+          retry: { max: 2 }
+          with:
+            title: "${run.taskTitle}"
+            base: "${inputs.branch}"
+            body: |
+              ## Requirement
+
+              ${inputs.requirement}
+
+              ## Implementation plan
+
+              ${artifacts.implementation-plan}
+          produces: [pull-request]
+
+  budgets:
+    maxCostUsd: 15
+    maxDurationMinutes: 120
+    perPhase:
+      implement: { maxCostUsd: 6 }
+      review-round: { maxCostUsd: 5 }
+
+  outputs:
+    artifacts:
+      - { key: questions, kind: json, required: false }
+      - { key: clarification-notes, kind: markdown, required: false }
+      - { key: implementation-plan, kind: markdown, required: true }
+      - { key: changes, kind: patch, required: true }
+      - { key: review-report, kind: json, required: true }
+      - { key: pull-request, kind: link, required: true }
+    summary: { from: implementation-plan }

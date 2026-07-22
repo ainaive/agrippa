@@ -107,6 +107,23 @@ export async function seed(db: Db): Promise<void> {
         "Report failures verbatim and distinguish flaky from deterministic outcomes.",
       avatar: "🛡️",
     },
+    {
+      slug: "arbiter",
+      nameI18n: { en: "Arbiter", "zh-CN": "裁决者" },
+      personaI18n: {
+        en: "An exacting code reviewer who judges changes on evidence, not style points.",
+        "zh-CN": "严苛的代码评审者，凭证据而非风格偏好裁定变更。",
+      },
+      systemPrompt:
+        "You are Arbiter, a code-review agent. Review the change against correctness, " +
+        "security, and the conventions of the codebase — never against personal taste. " +
+        "Report findings as structured data with severities you can defend: blocker for " +
+        "broken behavior or security holes, major for likely bugs, minor for real but " +
+        "small issues, info for observations. Every finding needs a file reference and a " +
+        "concrete reason; do not pad the list, and an empty findings list is a valid, " +
+        "welcome verdict. Never expand the review beyond the change in front of you.",
+      avatar: "⚖️",
+    },
   ];
   for (const row of faberRows) {
     await db.insert(fabri).values(row).onConflictDoNothing();
@@ -134,6 +151,11 @@ export async function seed(db: Db): Promise<void> {
       slug: "swdev.bug-localize-fix",
       scenario: "software-development",
       nameI18n: { en: "Bug Localization & Fix", "zh-CN": "缺陷定位与修复" },
+    },
+    {
+      slug: "swdev.requirement-delivery",
+      scenario: "software-development",
+      nameI18n: { en: "Requirement Delivery", "zh-CN": "需求交付" },
     },
     {
       slug: "test.test-plan",
@@ -207,6 +229,18 @@ export async function seed(db: Db): Promise<void> {
         "zh-CN": "复现缺陷、定位根因、实现修复并验证。",
       },
       sortOrder: 2,
+    },
+    {
+      scenario: "software-development",
+      slug: "requirement-delivery",
+      template: "swdev.requirement-delivery",
+      faber: "forge",
+      nameI18n: { en: "Requirement Delivery", "zh-CN": "需求交付" },
+      descriptionI18n: {
+        en: "Take a requirement all the way to a reviewed pull request: clarify, plan, implement, cross-agent review-fix loop, PR.",
+        "zh-CN": "把需求一路交付到经过评审的 PR：澄清、规划、实现、双代理评审-修复循环、提交 PR。",
+      },
+      sortOrder: 3,
     },
     {
       scenario: "test-verification",
@@ -326,6 +360,27 @@ export async function seed(db: Db): Promise<void> {
       contextWindow: 200_000,
       inputCostPerMtok: "1.00",
       outputCostPerMtok: "5.00",
+    },
+    // OpenAI models for the codex-cli executor (requirement-delivery reviewer
+    // slot). Verify current ids/pricing against the OpenAI price list when
+    // rolling out — admins can adjust rows in the registry.
+    {
+      provider: "openai",
+      providerModelId: "gpt-5.1-codex",
+      displayName: "GPT-5.1 Codex",
+      tier: "strong" as const,
+      contextWindow: 400_000,
+      inputCostPerMtok: "1.25",
+      outputCostPerMtok: "10.00",
+    },
+    {
+      provider: "openai",
+      providerModelId: "gpt-5.1-codex-mini",
+      displayName: "GPT-5.1 Codex Mini",
+      tier: "fast" as const,
+      contextWindow: 400_000,
+      inputCostPerMtok: "0.25",
+      outputCostPerMtok: "2.00",
     },
   ];
   for (const row of modelRows) {

@@ -194,10 +194,15 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
       method: "POST",
       json: { email: "vera@example.com", role: "viewer" },
     });
-    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
+    // anthropic only — the codex-cli override test relies on no granted openai model
+    const models = await jsonOf<Array<{ id: string; provider: string }>>(
+      await admin.request("/api/v1/models"),
+    );
     await admin.request(`/api/v1/projects/${projectId}/grants`, {
       method: "PUT",
-      json: models.map((m) => ({ resourceType: "model", resourceId: m.id })),
+      json: models
+        .filter((m) => m.provider === "anthropic")
+        .map((m) => ({ resourceType: "model", resourceId: m.id })),
     });
     const [conn] = await db
       .insert(repoConnections)
