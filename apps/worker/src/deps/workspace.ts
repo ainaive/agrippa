@@ -24,7 +24,7 @@ async function sanitizeWorkspace(dir: string): Promise<void> {
   }
 }
 
-async function git(args: string[], cwd?: string): Promise<string> {
+export async function git(args: string[], cwd?: string): Promise<string> {
   const proc = Bun.spawn(["git", ...args], {
     cwd,
     stdout: "pipe",
@@ -40,6 +40,53 @@ async function git(args: string[], cwd?: string): Promise<string> {
   return stdout;
 }
 
+/** The run's checkout directory (shared with GitScmService). */
+export function workspaceDirFor(runId: string): string {
+  return path.join(WORKSPACE_ROOT, runId);
+}
+
+/**
+ * Load a repo connection scoped to the run's project (never by raw id — a
+ * foreign repoConnectionId in params must not resolve) plus its decrypted
+ * credential when one is stored.
+ */
+export async function loadRepoConnection(
+  db: Db,
+  projectId: string,
+  repo: unknown,
+): Promise<{ connection: typeof repoConnections.$inferSelect; token: string | null }> {
+  const repoRef = repo as { repoConnectionId?: string } | null;
+  if (!repoRef?.repoConnectionId) throw new Error("repoRef missing");
+  const [connection] = await db
+    .select()
+    .from(repoConnections)
+    .where(
+      and(
+        eq(repoConnections.id, repoRef.repoConnectionId),
+        eq(repoConnections.projectId, projectId),
+      ),
+    );
+  if (!connection) throw new Error("repo connection not found");
+  let token: string | null = null;
+  if (connection.credentialSecretRef) {
+    const [secret] = await db
+      .select()
+      .from(secrets)
+      .where(eq(secrets.id, connection.credentialSecretRef));
+    if (secret) token = decryptSecret(secret.ciphertext, loadSecretKey());
+  }
+  return { connection, token };
+}
+
+/** The connection URL with the credential injected (for one git call, never persisted). */
+export function credentialedUrl(url: string, token: string | null): string {
+  if (!token) return url;
+  const withAuth = new URL(url);
+  withAuth.username = "x-access-token";
+  withAuth.password = token;
+  return withAuth.toString();
+}
+
 /**
  * Per-run throwaway checkouts under WORKSPACE_ROOT. Credentials are injected
  * into the clone URL for the single clone call and scrubbed from the remote
@@ -50,7 +97,7 @@ export class GitWorkspaceManager implements WorkspaceManager {
   constructor(private readonly db: Db) {}
 
   private dirFor(runId: string): string {
-    return path.join(WORKSPACE_ROOT, runId);
+    return workspaceDirFor(runId);
   }
 
   async ensureDir(runId: string): Promise<string> {
@@ -60,36 +107,10 @@ export class GitWorkspaceManager implements WorkspaceManager {
   }
 
   async checkout(runId: string, spec: WorkspaceSpec): Promise<void> {
-    const repoRef = spec.repo as { repoConnectionId?: string } | null;
-    if (!repoRef?.repoConnectionId) throw new Error("workspace.checkout: repoRef missing");
-
-    // scope by project so a run can never clone another project's/tenant's repo
-    // even if its params carry a foreign repoConnectionId
-    const [connection] = await this.db
-      .select()
-      .from(repoConnections)
-      .where(
-        and(
-          eq(repoConnections.id, repoRef.repoConnectionId),
-          eq(repoConnections.projectId, spec.projectId),
-        ),
-      );
-    if (!connection) throw new Error("workspace.checkout: repo connection not found");
-
-    let cloneUrl = connection.url;
-    if (connection.credentialSecretRef) {
-      const [secret] = await this.db
-        .select()
-        .from(secrets)
-        .where(eq(secrets.id, connection.credentialSecretRef));
-      if (secret) {
-        const token = decryptSecret(secret.ciphertext, loadSecretKey());
-        const url = new URL(connection.url);
-        url.username = "x-access-token";
-        url.password = token;
-        cloneUrl = url.toString();
-      }
-    }
+    // scoped by project so a run can never clone another project's/tenant's
+    // repo even if its params carry a foreign repoConnectionId
+    const { connection, token } = await loadRepoConnection(this.db, spec.projectId, spec.repo);
+    const cloneUrl = credentialedUrl(connection.url, token);
 
     const dir = this.dirFor(runId);
     const ref = spec.ref || connection.defaultBranch;

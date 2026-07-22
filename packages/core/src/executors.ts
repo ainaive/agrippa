@@ -36,7 +36,7 @@ export const EXECUTOR_CATALOG = {
   fake: {
     label: "Demo",
     providers: "*",
-    capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
+    capabilities: { subagents: true, mcp: true, skills: true, resume: false, streaming: true },
   },
 } as const satisfies Record<string, ExecutorCatalogEntry>;
 

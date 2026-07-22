@@ -1,5 +1,7 @@
 import {
   type ApprovalExpirePayload,
+  EXECUTOR_CATALOG,
+  isExecutorId,
   isTerminalRunStatus,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_RUN_EXECUTE,
@@ -7,12 +9,15 @@ import {
 } from "@agrippa/core";
 import { checkpoints, createDb, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
+import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
+import type { Executor } from "@agrippa/executor-core";
 import {
   createRunQueue,
   decideCheckpoint,
   durationToMinutes,
   type EngineDeps,
   executeRun,
+  FakeScmService,
   finalizeRun,
   findStrandedCheckpointRuns,
   InProcessEventBus,
@@ -23,6 +28,7 @@ import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
 import { DbResourceMaterializer } from "./deps/resources";
+import { GitScmService } from "./deps/scm";
 import { GitWorkspaceManager } from "./deps/workspace";
 
 const db = createDb();
@@ -31,16 +37,45 @@ const bus = process.env.REDIS_URL
   : new InProcessEventBus();
 const queue = await createRunQueue(process.env.DATABASE_URL as string);
 
+const executors: Record<string, Executor> = {
+  "claude-agent-sdk": createClaudeExecutor(),
+  fake: new DemoExecutor(),
+};
+// codex registers only when the CLI is actually usable on this host
+const codexVersion = probeCodexCli();
+const codexAuth = Boolean(
+  process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || process.env.CODEX_HOME,
+);
+if (codexVersion && codexAuth) {
+  executors["codex-cli"] = createCodexExecutor();
+  console.log(`[worker] codex executor registered (${codexVersion})`);
+} else {
+  console.log(
+    `[worker] codex executor not registered (cli=${codexVersion ?? "missing"} auth=${codexAuth})`,
+  );
+}
+// the static catalog in @agrippa/core is what the API/SPA trust — a drifting
+// capability set here would let templates pass validation and fail at runtime
+for (const [id, executor] of Object.entries(executors)) {
+  if (!isExecutorId(id)) throw new Error(`executor '${id}' is not in EXECUTOR_CATALOG`);
+  const expected = EXECUTOR_CATALOG[id].capabilities;
+  const actual = executor.capabilities as Record<string, boolean>;
+  for (const [flag, value] of Object.entries(expected)) {
+    // the catalog may promise less than the executor delivers, never more
+    if (value && !actual[flag]) {
+      throw new Error(`executor '${id}' lacks catalog capability '${flag}'`);
+    }
+  }
+}
+
 const deps: EngineDeps = {
   db,
-  executors: {
-    "claude-agent-sdk": createClaudeExecutor(),
-    fake: new DemoExecutor(),
-  },
+  executors,
   bus,
   workspace: new GitWorkspaceManager(db),
   resources: new DbResourceMaterializer(db),
   artifacts: new DiskArtifactStore(),
+  scm: process.env.AGRIPPA_SCM === "fake" ? new FakeScmService() : new GitScmService(db),
   logger: {
     info: (msg, extra) => console.log(`[worker] ${msg}`, extra ?? ""),
     warn: (msg, extra) => console.warn(`[worker] ${msg}`, extra ?? ""),

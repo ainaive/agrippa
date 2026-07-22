@@ -11,6 +11,7 @@
     "@agrippa/core": "workspace:*",
     "@agrippa/db": "workspace:*",
     "@agrippa/executor-claude": "workspace:*",
+    "@agrippa/executor-codex": "workspace:*",
     "@agrippa/executor-core": "workspace:*",
     "@agrippa/orchestration": "workspace:*",
     "drizzle-orm": "^0.45.2",

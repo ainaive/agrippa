@@ -8,6 +8,61 @@ import type {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Demo content for a contracted artifact. Interaction artifacts (questions /
+ * review reports, recognized by key) are round-aware so checkpoint loops
+ * demo realistically: round 1 asks questions / reports findings, later
+ * rounds come back clean and auto-pass.
+ */
+function demoArtifact(key: string, kind: string, stepId: string, iteration: number): unknown {
+  if (kind === "link") return "https://example.com/demo";
+  if (kind === "json") {
+    if (key.includes("question")) {
+      if (iteration > 1) return { questions: [] };
+      return {
+        questions: [
+          {
+            id: "q1",
+            text: "Should the change keep backwards compatibility with the current API?",
+            recommended: "Yes — keep the existing endpoints working",
+          },
+          {
+            id: "q2",
+            text: "Is a feature flag required for the rollout?",
+            kind: "boolean",
+            required: false,
+          },
+        ],
+      };
+    }
+    if (key.includes("review")) {
+      if (iteration > 1) return { summary: "All previous findings addressed.", findings: [] };
+      return {
+        summary: "Two issues worth a look before merging.",
+        findings: [
+          {
+            id: "demo-f1",
+            severity: "major",
+            file: "src/service.ts",
+            line: 42,
+            title: "Missing error handling on the new endpoint",
+            detail: "The handler awaits the repository call without catching failures.",
+            suggestion: "Wrap the call and map failures onto the AppError shape.",
+          },
+          {
+            id: "demo-f2",
+            severity: "minor",
+            title: "Demo naming nit",
+            detail: "`tmpVal` could carry a domain name.",
+          },
+        ],
+      };
+    }
+    return { note: `Demo json artifact for step ${stepId}` };
+  }
+  return `# ${key}\n\nDemo content produced by the fake executor for step \`${stepId}\` (round ${iteration}).`;
+}
+
+/**
  * Token-free executor for demos and SPA development (AGRIPPA_EXECUTOR=fake):
  * narrates a little, emits every artifact the step's contract expects, and
  * succeeds — so any template runs end-to-end without a model call.
@@ -49,10 +104,7 @@ export class DemoExecutor implements Executor {
         type: "artifact",
         key: artifact.key,
         kind: artifact.kind,
-        inline:
-          artifact.kind === "link"
-            ? "https://example.com/demo"
-            : `# ${artifact.key}\n\nDemo content produced by the fake executor for step \`${req.stepId}\`.`,
+        inline: demoArtifact(artifact.key, artifact.kind, req.stepId, req.iteration ?? 1),
       };
     }
     yield {

@@ -6,6 +6,7 @@
     { "path": "../../packages/db" },
     { "path": "../../packages/orchestration" },
     { "path": "../../packages/executor-core" },
-    { "path": "../../packages/executor-claude" }
+    { "path": "../../packages/executor-claude" },
+    { "path": "../../packages/executor-codex" }
   ]
 }
