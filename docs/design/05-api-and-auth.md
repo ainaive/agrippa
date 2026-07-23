@@ -22,7 +22,7 @@ Two layers, deliberately simple:
 | Org | `org_admin`, `org_member` | Resource layer writes (registries, template publish), org settings, user management |
 | Project | `admin`, `member`, `viewer` | Everything project-scoped |
 
-Project-role capabilities: **viewer** = read everything in the project (including run comments and the timeline); **member** = viewer + submit tasks (with agent-slot overrides), cancel own runs, respond to checkpoints (approve/request-changes/reject, answer questions, decide review findings), post run comments; **admin** = member + manage members, resource grants, quota, repos, project settings.
+Project-role capabilities: **viewer** = read everything in the project (including run comments and the timeline); **member** = viewer + submit tasks (with agent-slot overrides), cancel own runs, respond to checkpoints (approve/reject, request changes — offered only on loop checkpoints, elsewhere the API answers `request_changes_unsupported` — answer questions, decide review findings), post run comments; **admin** = member + manage members, resource grants, quota, repos, project settings.
 
 Enforcement: a single middleware `requireRole(scope, minRole)` — scope is `org` or a project id resolved from the route; it reads `project_members` (or `users.org_role`) and rejects with `403 {code: "forbidden"}`. Every mutating handler writes an `audit_logs` row (actor, action, resource, payload diff, IP) via a shared audit helper — auditing is not optional per-route.
 

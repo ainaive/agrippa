@@ -40,6 +40,23 @@ export function QuestionsForm({
     (q) => q.required !== false && (answers[q.id] === undefined || answers[q.id] === ""),
   );
   const recommendable = questions.filter((q) => q.recommended !== undefined);
+  const fillWithRecommendations = (): Answers => {
+    const filled: Answers = { ...answers };
+    for (const q of recommendable) {
+      if (filled[q.id] === undefined || filled[q.id] === "") {
+        filled[q.id] = q.recommended as string | boolean;
+      }
+    }
+    return filled;
+  };
+  // a required question without a recommendation can't be auto-filled — the
+  // one-click submit must not send an incomplete answer set the server rejects
+  const missingAfterFill = questions.filter((q) => {
+    if (q.required === false) return false;
+    const answered = answers[q.id] !== undefined && answers[q.id] !== "";
+    const value = answered ? answers[q.id] : q.recommended;
+    return value === undefined || value === "";
+  });
 
   return (
     <div className="space-y-4">
@@ -115,13 +132,8 @@ export function QuestionsForm({
           <Button
             size="sm"
             variant="outline"
-            disabled={disabled}
-            onClick={() => {
-              const filled: Answers = { ...answers };
-              for (const q of recommendable)
-                filled[q.id] = filled[q.id] ?? (q.recommended as string | boolean);
-              onSubmit(filled);
-            }}
+            disabled={disabled || missingAfterFill.length > 0}
+            onClick={() => onSubmit(fillWithRecommendations())}
           >
             <WandSparklesIcon />
             {t("checkpoint.acceptAllRecommendations")}

@@ -54,6 +54,7 @@ function InlineDecision({ item }: { item: PendingCheckpoint }) {
       checkpoint={checkpoint}
       artifacts={artifacts.data ?? []}
       artifactsStatus={artifacts.status}
+      onRetryArtifacts={() => void artifacts.refetch()}
     />
   );
 }

@@ -29,7 +29,7 @@ apps/web/src/
 
 The chrome is a persistent **left sidebar** + slim **top bar** (`SidebarProvider` → `AppSidebar` + `SidebarInset`):
 
-- **Sidebar** (`components/shell/AppSidebar.tsx`, collapsible to an icon rail; renders as a sheet drawer on mobile): brand mark, then the **project context switcher** (command palette popover: search, archived badges, "New project" dialog), then grouped navigation — *Project* (Dashboard / Catalog / Tasks / Settings, role-gated), *Organization* (Approvals, Admin for org admins). While on org-level pages the project group stays visible, bound to the last-visited project (persisted as `agrippa.lastProject`).
+- **Sidebar** (`components/shell/AppSidebar.tsx`, collapsible to an icon rail; renders as a sheet drawer on mobile): brand mark, then the **project context switcher** (command palette popover: search, archived badges, "New project" dialog), then grouped navigation — *Project* (Dashboard / Catalog / Tasks / Settings, role-gated), *Organization* (Approvals — the nav name kept for the generalized "waiting on you" checkpoint inbox — and Admin for org admins). While on org-level pages the project group stays visible, bound to the last-visited project (persisted as `agrippa.lastProject`).
 - **Top bar** (`components/shell/Topbar.tsx`): sidebar trigger, **breadcrumbs** derived from route `staticData.crumb` (i18n keys, with `$project` / `$run` resolving to live names), and the **user menu** — avatar dropdown with language (en / zh-CN, persists to localStorage + `PATCH /me`) and theme (light / dark / system via `features/theme.tsx`) plus sign out.
 - Mutation feedback is toast-based (sonner `Toaster` mounted in the shell); destructive actions confirm via `ConfirmDialog`.
 
@@ -68,7 +68,7 @@ The page (`pages/RunDetailPage.tsx` composing `features/runs/*`):
 
 ## Screens
 
-1. **Project dashboard** — stat tiles (active runs, pending approvals with an inbox link, spend with a quota progress meter, totals), recent-tasks card, spend-by-model panel.
+1. **Project dashboard** — stat tiles (active runs, pending checkpoints with a link to the Approvals inbox, spend with a quota progress meter, totals), recent-tasks card, spend-by-model panel.
 2. **Scenario catalog** — scenario sections × task-type cards (localized names/descriptions, Faber avatar chips), searchable across both locales' text.
 3. **Task submission** — auto-generated form (+ agent-slot pickers for v2 templates) beside a sticky summary card (Faber, pinned template version, budgets) with the submit action; errors toast.
 4. **Run detail** — see "Live Run Detail" above.

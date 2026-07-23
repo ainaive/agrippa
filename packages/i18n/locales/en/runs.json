@@ -51,6 +51,7 @@
     "presented": "Presented artifacts",
     "loadingArtifacts": "Loading presented artifacts…",
     "artifactsUnavailable": "Presented artifacts could not be loaded — review with care; rejecting is still possible.",
+    "retryArtifacts": "Retry",
     "artifactMissing": "not produced"
   },
   "approvalsInbox": {

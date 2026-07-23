@@ -299,6 +299,7 @@ export function RunTimeline({
   events,
   artifacts,
   artifactsStatus,
+  onRetryArtifacts,
   canRespond,
 }: {
   runId: string;
@@ -306,6 +307,7 @@ export function RunTimeline({
   events: RunEvent[];
   artifacts: Artifact[];
   artifactsStatus: "pending" | "error" | "success";
+  onRetryArtifacts?: () => void;
   canRespond: boolean;
 }) {
   const { t } = useTranslation(["runs", "common"]);
@@ -328,9 +330,11 @@ export function RunTimeline({
   });
 
   const itemCount = items.length;
+  // follow the stream: re-scroll whenever a new timeline item lands, not only
+  // on mount ("nearest" keeps it from yanking the page while reading above)
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "nearest" });
-  }, []);
+    if (itemCount > 0) endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [itemCount]);
 
   return (
     <div className="space-y-3">
@@ -362,6 +366,7 @@ export function RunTimeline({
                   checkpoint={checkpoint}
                   artifacts={artifacts}
                   artifactsStatus={artifactsStatus}
+                  onRetryArtifacts={onRetryArtifacts}
                 />
               );
             }

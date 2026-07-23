@@ -398,6 +398,19 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
     );
     expect(wrongKind.status).toBe(409);
 
+    // a change request IS its comment — the schema rejects an absent/blank one
+    // (400, before the kind check's 409: contrast with wrongKind above)
+    const noComment = await member.request(
+      `/api/v1/runs/${runId}/checkpoints/${checkpointId}/respond`,
+      { method: "POST", json: { kind: "approval", decision: "request_changes" } },
+    );
+    expect(noComment.status).toBe(400);
+    const blankComment = await member.request(
+      `/api/v1/runs/${runId}/checkpoints/${checkpointId}/respond`,
+      { method: "POST", json: { kind: "approval", decision: "request_changes", comment: "  " } },
+    );
+    expect(blankComment.status).toBe(400);
+
     // required answers enforced against the snapshot
     const missing = await member.request(
       `/api/v1/runs/${runId}/checkpoints/${checkpointId}/respond`,

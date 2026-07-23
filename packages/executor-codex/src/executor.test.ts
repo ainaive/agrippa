@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
@@ -9,8 +9,10 @@ import { createCodexExecutor } from "./executor";
 const FIXTURE = path.resolve(import.meta.dirname, "../test/fixtures/fake-codex.ts");
 const FAKE_CODEX = [process.execPath, FIXTURE];
 
+const workspaces: string[] = [];
 function makeWorkspace(scenario: string): string {
   const dir = mkdtempSync(path.join(tmpdir(), "codex-exec-test-"));
+  workspaces.push(dir);
   writeFileSync(path.join(dir, ".fake-codex-scenario"), scenario);
   return dir;
 }
@@ -66,6 +68,7 @@ afterEach(() => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+  for (const dir of workspaces.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("codex executor", () => {

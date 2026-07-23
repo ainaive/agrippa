@@ -226,6 +226,7 @@ export function RunDetailPage() {
                   events={events}
                   artifacts={artifacts.data ?? []}
                   artifactsStatus={artifacts.status}
+                  onRetryArtifacts={() => void artifacts.refetch()}
                   canRespond={canRespond}
                 />
               </CardContent>

@@ -56,6 +56,13 @@ export class GitScmService implements ScmService {
       }
       commitSha = existing;
     } else {
+      // dates pinned to the base commit: with identity, tree, parent, and
+      // message all fixed, the snapshot commit SHA is fully deterministic —
+      // any retry or racer reproduces the identical commit, so the
+      // expected-old update-ref below is a true CAS between equals
+      const baseDate = (
+        await platformGit(runId, ["show", "-s", "--format=%cI", snapshot.baseSha])
+      ).trim();
       commitSha = (
         await platformGit(
           runId,
@@ -70,8 +77,10 @@ export class GitScmService implements ScmService {
           {
             GIT_AUTHOR_NAME: "Agrippa",
             GIT_AUTHOR_EMAIL: "agrippa@agrippa.local",
+            GIT_AUTHOR_DATE: baseDate,
             GIT_COMMITTER_NAME: "Agrippa",
             GIT_COMMITTER_EMAIL: "agrippa@agrippa.local",
+            GIT_COMMITTER_DATE: baseDate,
           },
         )
       ).trim();

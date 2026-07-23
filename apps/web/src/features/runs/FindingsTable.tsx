@@ -33,12 +33,18 @@ export function FindingsTable({
   summary,
   findings,
   disabled,
+  acceptDisabled,
   onFix,
   onAccept,
 }: {
   summary?: string;
   findings: ReviewFinding[];
   disabled: boolean;
+  /**
+   * Accepting is a blind waiver when the evidence preview failed to load, so
+   * it gets its own stricter flag; fixing stays safe without the preview.
+   */
+  acceptDisabled?: boolean;
   onFix: (selectedIds: string[]) => void;
   onAccept: () => void;
 }) {
@@ -106,7 +112,13 @@ export function FindingsTable({
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"
-          disabled={disabled || selected.size === 0}
+          // a partial fix implicitly WAIVES the unchecked findings, so it obeys
+          // the stricter accept flag unless every finding is selected
+          disabled={
+            disabled ||
+            selected.size === 0 ||
+            (Boolean(acceptDisabled) && selected.size < findings.length)
+          }
           onClick={() => onFix([...selected])}
         >
           {t("checkpoint.fixSelected", { count: selected.size })}
@@ -121,7 +133,7 @@ export function FindingsTable({
         </Button>
         <ConfirmDialog
           trigger={
-            <Button size="sm" variant="outline" disabled={disabled}>
+            <Button size="sm" variant="outline" disabled={disabled || acceptDisabled}>
               {t("checkpoint.acceptAll")}
             </Button>
           }

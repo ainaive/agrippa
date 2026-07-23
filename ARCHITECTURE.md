@@ -11,7 +11,7 @@ Browser (SPA) ──REST──▶ api ──singleton-keyed send──▶ pg-bos
      ▲                   │                                 │
      │ SSE (replay from  │ tx: task+run rows               ▼
      │ run_events, then  │                              worker ──▶ engine ──▶ executor
-     │ Redis bridge)     ▼                                 │        (steps)   (Claude SDK / demo)
+     │ Redis bridge)     ▼                                 │        (steps)   (Claude SDK / Codex / demo)
      └────────────── Postgres ◀── run_events, run_steps, ──┘
                                   artifacts, token_usage
 ```

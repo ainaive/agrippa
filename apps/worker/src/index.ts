@@ -135,7 +135,9 @@ await queue.boss.work(
         // nothing re-enqueues an unclaimed running run today — the execution
         // lease is ADR-0009 future work.
         if (
-          (err as { code?: string }).code === "executor_unavailable_on_worker" ||
+          (typeof err === "object" &&
+            err !== null &&
+            (err as { code?: string }).code === "executor_unavailable_on_worker") ||
           err instanceof ExecutorUnavailableError
         ) {
           const [run] = await db

@@ -171,11 +171,19 @@ export const taskSubmitSchema = z.object({
  * The server validates the payload kind against the pending checkpoint's kind.
  */
 export const checkpointRespondSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("approval"),
-    decision: z.enum(["approved", "rejected", "request_changes"]),
-    comment: z.string().max(2000).optional(),
-  }),
+  z
+    .object({
+      kind: z.literal("approval"),
+      decision: z.enum(["approved", "rejected", "request_changes"]),
+      comment: z.string().max(2000).optional(),
+    })
+    .superRefine((input, ctx) => {
+      // a change request IS its comment — the revision step interpolates it,
+      // so an empty one would send the agent back with no instructions
+      if (input.decision === "request_changes" && !input.comment?.trim()) {
+        ctx.addIssue({ code: "custom", message: "request_changes requires a comment" });
+      }
+    }),
   z.object({
     kind: z.literal("input"),
     answers: z.record(z.string(), z.union([z.string().max(4000), z.boolean()])),

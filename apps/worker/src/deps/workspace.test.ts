@@ -25,6 +25,7 @@ const {
   git,
   platformBaseSha,
   platformDirFor,
+  platformGit,
   workspaceDirFor,
 } = await import("./workspace");
 const { GitScmService } = await import("./scm");
@@ -192,6 +193,17 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
       expectedPatch: approved,
     });
     expect(first).toEqual(retried);
+    // the snapshot commit is fully deterministic (identity, dates, tree,
+    // parent, message all pinned): even a racer that lost the local ref
+    // recreates the byte-identical commit, not a duplicate
+    await platformGit(runId, ["update-ref", "-d", `refs/heads/${branch}`]);
+    const recreated = await scm.push(runId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+    expect(recreated).toEqual(first);
 
     const show = (spec: string) =>
       Bun.spawnSync(["git", "show", spec], { cwd: sourceDir, stdout: "pipe", stderr: "pipe" });
@@ -222,9 +234,9 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     const branch = "agrippa/run-2-00000000dead";
     await scm.createBranch(emptyRunId, branch);
     await scm.createBranch(emptyRunId, branch);
-    expect(scm.push(emptyRunId, { projectId, repo: { repoConnectionId }, branch })).rejects.toThrow(
-      /nothing to publish/,
-    );
+    await expect(
+      scm.push(emptyRunId, { projectId, repo: { repoConnectionId }, branch }),
+    ).rejects.toThrow(/nothing to publish/);
   });
 
   it("recovers an existing PR when the provider rejects the duplicate", async () => {
@@ -292,7 +304,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
       expect(state.created).toBe(2);
       // a 422 with nothing to recover still surfaces the original error
       state.recoverable = false;
-      expect(scm.openPullRequest(runId, spec)).rejects.toThrow(/422/);
+      await expect(scm.openPullRequest(runId, spec)).rejects.toThrow(/422/);
     } finally {
       server.stop(true);
     }
@@ -504,7 +516,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   it("fails closed when trusted platform metadata is missing", async () => {
     await rm(platformDirFor(runId), { recursive: true, force: true });
     expect(await workspace.isIntact(runId)).toBe(false);
-    expect(workspace.diff(runId)).rejects.toThrow(/trusted platform git base is missing/);
+    await expect(workspace.diff(runId)).rejects.toThrow(/trusted platform git base is missing/);
   });
 });
 

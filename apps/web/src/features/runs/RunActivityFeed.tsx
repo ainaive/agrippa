@@ -102,7 +102,8 @@ function buildFeed(events: RunEvent[], t: (key: string) => string): FeedItem[] {
         items.push({
           seq: event.seq,
           icon: HourglassIcon,
-          label: t("activity.runDeferred"),
+          // the event carries the concrete reason (which executor is missing)
+          label: `${t("activity.runDeferred")}${event.payload.reason ? ` · ${String(event.payload.reason)}` : ""}`,
           tone: "warning",
         });
         break;

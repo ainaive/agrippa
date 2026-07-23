@@ -1,6 +1,12 @@
 import type { CheckpointRespondInput } from "@agrippa/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CirclePauseIcon, Loader2Icon, TriangleAlertIcon, Undo2Icon } from "lucide-react";
+import {
+  CirclePauseIcon,
+  Loader2Icon,
+  RotateCcwIcon,
+  TriangleAlertIcon,
+  Undo2Icon,
+} from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -27,6 +33,7 @@ export function CheckpointPanel({
   checkpoint,
   artifacts,
   artifactsStatus,
+  onRetryArtifacts,
   onResponded,
 }: {
   runId: string;
@@ -34,6 +41,8 @@ export function CheckpointPanel({
   artifacts: Artifact[];
   /** Status of the artifacts query — evidence must load before approving. */
   artifactsStatus: "pending" | "error" | "success";
+  /** Re-fires the artifacts query after a load failure. */
+  onRetryArtifacts?: () => void;
   onResponded?: () => void;
 }) {
   const { t } = useTranslation(["runs", "common"]);
@@ -94,10 +103,16 @@ export function CheckpointPanel({
             {t("runs:approval.loadingArtifacts")}
           </p>
         ) : evidenceFailed ? (
-          <p className="flex items-center gap-2 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-sm">
+          <div className="flex items-center gap-2 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-sm">
             <TriangleAlertIcon className="size-4 shrink-0 text-status-warning" />
-            {t("runs:approval.artifactsUnavailable")}
-          </p>
+            <span className="min-w-0 flex-1">{t("runs:approval.artifactsUnavailable")}</span>
+            {onRetryArtifacts ? (
+              <Button size="sm" variant="outline" onClick={onRetryArtifacts}>
+                <RotateCcwIcon />
+                {t("runs:approval.retryArtifacts")}
+              </Button>
+            ) : null}
+          </div>
         ) : presented.length > 0 ? (
           <div className="space-y-3">
             <p className="text-xs font-medium tracking-wider text-muted-foreground uppercase">
@@ -130,7 +145,11 @@ export function CheckpointPanel({
           <FindingsTable
             summary={checkpoint.payload.summary}
             findings={checkpoint.payload.findings ?? []}
-            disabled={busy || evidenceFailed}
+            // the findings themselves are in the checkpoint snapshot — only the
+            // evidence PREVIEW failed. Sending findings back for fixing is safe
+            // without it; waiving them (accept) blind is not.
+            disabled={busy}
+            acceptDisabled={busy || evidenceFailed}
             onFix={(selectedFindingIds) =>
               respond.mutate({ kind: "review-gate", outcome: "fix", selectedFindingIds })
             }
@@ -161,10 +180,12 @@ export function CheckpointPanel({
                 {t("runs:approval.approve")}
               </Button>
               {checkpoint.payload.loopId ? (
+                // requesting changes without the evidence preview is safe — it
+                // sends the work back; only approving blind is forbidden
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={busy || evidenceFailed || comment.length === 0}
+                  disabled={busy || comment.length === 0}
                   onClick={() =>
                     respond.mutate({ kind: "approval", decision: "request_changes", comment })
                   }
