@@ -12,7 +12,7 @@
 
 **Agent slot & executor** — newer templates declare named *agent slots* (e.g. **Implementer** and **Reviewer**), each pairing a Faber persona with an *executor* — the engine that actually runs the agent (Claude Code or OpenAI Codex). When a slot is overridable you can swap its persona or engine at submission; the roles are interchangeable by design — within what the chosen engine supports: the engine must be available on the deployment and a model from its provider must be granted to the project, so the submit form only offers combinations that will actually run.
 
-**Orchestration template** — the versioned, declarative recipe a run follows: input parameters (which auto-generate the submission form), phases and steps, which skills/MCP servers/sub-agents each step uses, model-selection rules, human-approval checkpoints, budgets, and the artifact contract. Published versions are immutable; editing creates the next version.
+**Orchestration template** — the versioned, declarative recipe a run follows: input parameters (which auto-generate the submission form), phases and steps, which skills/MCP servers/sub-agents each step uses, model-selection rules, human checkpoints (approvals, question forms, review gates), budgets, and the artifact contract. Published versions are immutable; editing creates the next version.
 
 **Model roles & tiers** — templates never name concrete models. They declare roles (e.g. `planning`, `coding`, `fast`) mapped to tiers (**strong / balanced / fast**); at submission the platform resolves each role to the cheapest granted model of that tier. Swapping a project's model lineup requires no template changes.
 
