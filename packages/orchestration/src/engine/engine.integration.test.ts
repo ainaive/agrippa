@@ -29,7 +29,7 @@ import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
 import { InProcessEventBus } from "./bus";
 import type { EngineDeps } from "./deps";
-import { executeRun } from "./engine";
+import { ExecutorUnavailableError, executeRun } from "./engine";
 import {
   FakeResourceMaterializer,
   FakeScmService,
@@ -1582,6 +1582,26 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
     expect(
       events.some((e) => e.type === "artifact" && (e.payload as { refreshed?: boolean }).refreshed),
     ).toBe(true);
+  });
+
+  it("throws the typed unavailable error before any status transition when a slot's executor is missing", async () => {
+    const fx = await setupV2Fixture();
+    // a worker in a heterogeneous fleet that didn't register the implementer's
+    // executor must be able to DECLINE the job — that requires a matchable
+    // error thrown while the run is still queued (no transition to roll back)
+    const deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    delete (deps.executors as Record<string, unknown>)["fake-impl"];
+
+    let thrown: unknown;
+    try {
+      await executeRun(deps, fx.runId);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ExecutorUnavailableError);
+    expect((thrown as ExecutorUnavailableError).code).toBe("executor_unavailable_on_worker");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(run?.status).toBe("queued");
   });
 
   it("retries transient scm push failures per the template retry policy", async () => {

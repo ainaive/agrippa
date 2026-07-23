@@ -12,10 +12,12 @@ import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
 import {
+  appendRunEvent,
   createRunQueue,
   decideCheckpoint,
   durationToMinutes,
   type EngineDeps,
+  ExecutorUnavailableError,
   executeRun,
   FakeScmService,
   finalizeRun,
@@ -122,6 +124,35 @@ await queue.boss.work(
         deps.logger.info(`run ${runId}: ${outcome}`);
         if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);
       } catch (err) {
+        // Heterogeneous fleet: this worker lacks the run's executor. The
+        // throw happens before any status transition, so for pre-claim states
+        // we DECLINE the job (no pg-boss retries burned) and let the sweepers
+        // re-enqueue — `queued` runs re-enqueue after 30s (queuedAt never
+        // refreshes), decided `waiting_approval` runs via the stranded-
+        // checkpoint sweep; a still-pending checkpoint re-enqueues on its
+        // decision. The run bounces ≤60s at a time until a capable worker
+        // takes it. A `running` run (crash-recovery pickup) must rethrow:
+        // nothing re-enqueues an unclaimed running run today — the execution
+        // lease is ADR-0009 future work.
+        if (
+          (err as { code?: string }).code === "executor_unavailable_on_worker" ||
+          err instanceof ExecutorUnavailableError
+        ) {
+          const [run] = await db
+            .select({ status: runs.status })
+            .from(runs)
+            .where(eq(runs.id, runId));
+          if (run && (run.status === "queued" || run.status === "waiting_approval")) {
+            deps.logger.warn(`run ${runId}: declining — ${String((err as Error).message)}`);
+            // one timeline event so the SPA can show WHY the run is waiting
+            await appendRunEvent(db, {
+              runId,
+              type: "run.deferred",
+              payload: { reason: String((err as Error).message) },
+            });
+            continue;
+          }
+        }
         deps.logger.error(`run ${runId} crashed`, { err: String(err) });
         if ((meta.retryCount ?? 0) >= (meta.retryLimit ?? 0)) {
           await markRunFailed(runId, err);

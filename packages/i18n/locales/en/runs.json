@@ -31,7 +31,8 @@
     "stepFailed": "Step failed",
     "stepRetrying": "Retrying step",
     "subagent": "Subagent",
-    "approvalRequired": "Approval required"
+    "approvalRequired": "Approval required",
+    "runDeferred": "Waiting for a worker with the required agent"
   },
   "artifact": {
     "preview": "Preview",

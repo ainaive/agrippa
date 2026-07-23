@@ -31,7 +31,8 @@
     "stepFailed": "步骤失败",
     "stepRetrying": "步骤重试中",
     "subagent": "子智能体",
-    "approvalRequired": "等待审批"
+    "approvalRequired": "等待审批",
+    "runDeferred": "等待具备所需智能体的工作节点"
   },
   "artifact": {
     "preview": "预览",

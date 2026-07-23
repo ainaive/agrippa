@@ -94,6 +94,22 @@ class RunClaimLost extends Error {
   }
 }
 
+/**
+ * Raised when a run's binding names an executor THIS worker didn't register —
+ * possible in heterogeneous fleets (registrations are deployment-wide, jobs
+ * are not routed per executor). Thrown before any status transition, so the
+ * worker can decline the job and let the sweepers hand the run to a capable
+ * worker instead of burning pg-boss retries. Carries a stable `code` so the
+ * worker can match without an instanceof across bundle boundaries.
+ */
+export class ExecutorUnavailableError extends Error {
+  readonly code = "executor_unavailable_on_worker";
+  constructor(readonly executorId: string) {
+    super(`executor '${executorId}' is not registered on this worker`);
+    this.name = "ExecutorUnavailableError";
+  }
+}
+
 /** The credential values a resolved MCP server injects, for secret redaction. */
 function mcpSecretValues(server: ResolvedMcpServer): string[] {
   if (server.transport === "stdio") return Object.values(server.env);
@@ -154,7 +170,7 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
     const faberId = stored[slot]?.faberId ?? run.faberId;
     const executorId = stored[slot]?.executorId ?? run.executorId;
     const executor = deps.executors[executorId];
-    if (!executor) throw new Error(`executor '${executorId}' not registered`);
+    if (!executor) throw new ExecutorUnavailableError(executorId);
     const faber = fabersById.get(faberId);
     if (!faber) throw new Error(`run ${runId}: faber ${faberId} for slot '${slot}' missing`);
     bindings[slot] = { faberId, executorId, systemPrompt: faber.systemPrompt, executor };
