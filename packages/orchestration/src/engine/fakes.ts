@@ -2,7 +2,14 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Logger, ResolvedMcpServer, ResolvedSkill } from "@agrippa/executor-core";
-import type { ArtifactStore, ResourceMaterializer, StoredArtifact, WorkspaceManager } from "./deps";
+import type {
+  ArtifactStore,
+  PullRequestSpec,
+  ResourceMaterializer,
+  ScmService,
+  StoredArtifact,
+  WorkspaceManager,
+} from "./deps";
 
 /** In-memory engine dependencies for the integration suite and local dev. */
 
@@ -11,6 +18,7 @@ export class FakeWorkspaceManager implements WorkspaceManager {
   readonly checkouts: Array<{ runId: string; spec: unknown }> = [];
   readonly cleaned: string[] = [];
   diffOutput = "diff --git a/fake b/fake\n";
+  diffError: Error | null = null;
 
   async ensureDir(runId: string): Promise<string> {
     let dir = this.dirs.get(runId);
@@ -26,7 +34,15 @@ export class FakeWorkspaceManager implements WorkspaceManager {
   }
 
   async diff(_runId: string): Promise<string> {
+    if (this.diffError) throw this.diffError;
     return this.diffOutput;
+  }
+
+  /** Flip to false to simulate a resume on a host that lacks the workspace. */
+  intact = true;
+
+  async isIntact(_runId: string): Promise<boolean> {
+    return this.intact;
   }
 
   async cleanup(runId: string): Promise<void> {
@@ -36,7 +52,13 @@ export class FakeWorkspaceManager implements WorkspaceManager {
 }
 
 export class FakeResourceMaterializer implements ResourceMaterializer {
+  readonly preparedWorkspaces: string[] = [];
+
   constructor(private readonly available: { skills?: string[]; mcpServers?: string[] } = {}) {}
+
+  async prepareWorkspace(workspaceDir: string): Promise<void> {
+    this.preparedWorkspaces.push(workspaceDir);
+  }
 
   async skills(
     refs: string[],
@@ -93,6 +115,53 @@ export class InMemoryArtifactStore implements ArtifactStore {
       return { inline: content, storageRef: null, size: content.length, mime: file.type || null };
     }
     return { inline: null, storageRef: null, size: 0, mime: null };
+  }
+}
+
+export class FakeScmService implements ScmService {
+  readonly branches: Array<{ runId: string; name: string }> = [];
+  readonly pushes: Array<{ runId: string; branch: string }> = [];
+  readonly pullRequests: Array<{ runId: string; spec: PullRequestSpec }> = [];
+  evidenceMismatchNext = false;
+  /** Set to make the next call of that action throw once (retry testing). */
+  failNext: Partial<Record<"branch" | "push" | "pr", number>> = {};
+
+  private consumeFailure(kind: "branch" | "push" | "pr"): void {
+    const left = this.failNext[kind] ?? 0;
+    if (left > 0) {
+      this.failNext[kind] = left - 1;
+      throw new Error(`fake scm ${kind} failure`);
+    }
+  }
+
+  async createBranch(runId: string, name: string): Promise<void> {
+    this.consumeFailure("branch");
+    this.branches.push({ runId, name });
+  }
+
+  async push(
+    runId: string,
+    spec: { branch: string },
+  ): Promise<{ status: "pushed"; commitSha: string } | { status: "evidence_mismatch" }> {
+    this.consumeFailure("push");
+    if (this.evidenceMismatchNext) {
+      this.evidenceMismatchNext = false;
+      return { status: "evidence_mismatch" };
+    }
+    this.pushes.push({ runId, branch: spec.branch });
+    return { status: "pushed", commitSha: `fake-${this.pushes.length}` };
+  }
+
+  async openPullRequest(runId: string, spec: PullRequestSpec): Promise<{ url: string }> {
+    this.consumeFailure("pr");
+    // like the real providers post-dup-recovery: re-opening for the same
+    // head/base returns the existing PR instead of creating a duplicate
+    const existing = this.pullRequests.findIndex(
+      (p) => p.spec.head === spec.head && p.spec.base === spec.base,
+    );
+    if (existing >= 0) return { url: `https://fake.scm/pr/${existing + 1}` };
+    this.pullRequests.push({ runId, spec });
+    return { url: `https://fake.scm/pr/${this.pullRequests.length}` };
   }
 }
 

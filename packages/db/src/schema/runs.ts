@@ -1,4 +1,10 @@
-import { ARTIFACT_KINDS, type RunStatus, type StepStatus } from "@agrippa/core";
+import {
+  ARTIFACT_KINDS,
+  CHECKPOINT_KINDS,
+  type CheckpointStoredResponse,
+  type RunStatus,
+  type StepStatus,
+} from "@agrippa/core";
 import {
   type AnyPgColumn,
   bigserial,
@@ -71,6 +77,13 @@ export const runs = pgTable(
     workspaceRef: text("workspace_ref"),
     error: jsonb("error").$type<Record<string, unknown>>(),
     cancelRequested: boolean("cancel_requested").notNull().default(false),
+    // per-slot agent bindings (agrippa/v2); faber_id/executor_id above stay as
+    // primary-slot denormalization for list/usage queries
+    agentBindings: jsonb("agent_bindings")
+      .$type<Record<string, { faberId: string; executorId: string }>>()
+      .notNull()
+      .default({}),
+    workBranch: text("work_branch"), // created by the git.branch system action
     queuedAt: tstz("queued_at").notNull().defaultNow(),
     startedAt: tstz("started_at"),
     finishedAt: tstz("finished_at"),
@@ -93,6 +106,7 @@ export const runSteps = pgTable(
       .references(() => runs.id, { onDelete: "cascade" }),
     phaseId: text("phase_id").notNull(),
     stepId: text("step_id").notNull(),
+    iteration: integer("iteration").notNull().default(1), // loop round; 1 outside loops
     attempt: integer("attempt").notNull().default(1),
     seq: integer("seq").notNull(),
     status: text("status").$type<StepStatus>().notNull().default("pending"),
@@ -105,7 +119,7 @@ export const runSteps = pgTable(
     startedAt: tstz("started_at"),
     finishedAt: tstz("finished_at"),
   },
-  (t) => [uniqueIndex("run_steps_uq").on(t.runId, t.phaseId, t.stepId, t.attempt)],
+  (t) => [uniqueIndex("run_steps_uq").on(t.runId, t.phaseId, t.stepId, t.iteration, t.attempt)],
 );
 
 /** Append-only; the source of truth for the timeline and SSE replay. */
@@ -125,22 +139,35 @@ export const runEvents = pgTable(
   (t) => [uniqueIndex("run_events_run_seq_uq").on(t.runId, t.seq)],
 );
 
-export const approvals = pgTable("approvals", {
-  id: idCol(),
-  runId: uuid("run_id")
-    .notNull()
-    .references(() => runs.id, { onDelete: "cascade" }),
-  stepId: uuid("step_id").references(() => runSteps.id),
-  checkpointId: text("checkpoint_id").notNull(),
-  status: text("status", { enum: ["pending", "approved", "rejected", "expired"] })
-    .notNull()
-    .default("pending"),
-  payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
-  requestedAt: tstz("requested_at").notNull().defaultNow(),
-  decidedBy: uuid("decided_by").references(() => users.id),
-  decidedAt: tstz("decided_at"),
-  comment: text("comment"),
-});
+/**
+ * Human-in-the-loop pauses (formerly `approvals`). One row per
+ * (run, checkpoint, iteration); the engine inserts it pending, the API
+ * decides it (CAS), and `response` carries the structured decision back
+ * into the run's expression context (`checkpoints.<id>`).
+ */
+export const checkpoints = pgTable(
+  "checkpoints",
+  {
+    id: idCol(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    stepId: uuid("step_id").references(() => runSteps.id),
+    checkpointId: text("checkpoint_id").notNull(),
+    kind: text("kind", { enum: CHECKPOINT_KINDS }).notNull().default("approval"),
+    iteration: integer("iteration").notNull().default(1),
+    status: text("status", { enum: ["pending", "approved", "rejected", "expired"] })
+      .notNull()
+      .default("pending"),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    response: jsonb("response").$type<CheckpointStoredResponse>(),
+    requestedAt: tstz("requested_at").notNull().defaultNow(),
+    decidedBy: uuid("decided_by").references(() => users.id),
+    decidedAt: tstz("decided_at"),
+    comment: text("comment"),
+  },
+  (t) => [uniqueIndex("checkpoints_run_ckpt_iter_uq").on(t.runId, t.checkpointId, t.iteration)],
+);
 
 export const artifacts = pgTable("artifacts", {
   id: idCol(),
@@ -149,6 +176,7 @@ export const artifacts = pgTable("artifacts", {
     .references(() => runs.id, { onDelete: "cascade" }),
   stepId: uuid("step_id").references(() => runSteps.id),
   artifactKey: text("artifact_key").notNull(), // from the template output contract
+  iteration: integer("iteration").notNull().default(1), // loop round that produced it
   kind: text("kind", { enum: ARTIFACT_KINDS }).notNull(),
   name: text("name").notNull(),
   mime: text("mime"),
@@ -157,3 +185,20 @@ export const artifacts = pgTable("artifacts", {
   inline: jsonb("inline"), // small artifacts (≤64 KB) inline
   createdAt: createdAtCol(),
 });
+
+/** Team discussion on a run; each insert also appends a comment.added run event. */
+export const runComments = pgTable(
+  "run_comments",
+  {
+    id: idCol(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    body: text("body").notNull(), // ≤4000, enforced by commentCreateSchema
+    createdAt: createdAtCol(),
+  },
+  (t) => [index("run_comments_run_idx").on(t.runId, t.createdAt)],
+);

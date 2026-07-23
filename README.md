@@ -7,14 +7,14 @@ Agrippa is a team-oriented agent work platform. Teams collaborate in **projects*
 ## Three layers
 
 1. **Scenario layer** — a task catalog organized by work scenario; forms are auto-generated from template parameter schemas.
-2. **Orchestration layer** — Fabri execute runs by following orchestration templates: phases, steps, human-approval checkpoints, model-selection rules, budgets. Engines are pluggable; the first executor is the Claude Agent SDK.
+2. **Orchestration layer** — Fabri execute runs by following orchestration templates: phases, bounded loops, steps, human checkpoints (approvals, question forms, review gates), model-selection rules, budgets. Engines are pluggable **per agent slot** — one run can pair a Claude Code implementer with an OpenAI Codex reviewer, as the flagship *Requirement Delivery* workflow does (clarify → plan → implement → review-fix loop → platform-opened PR).
 3. **Resource layer** — governed registries for models, sub-agents, Skills, MCP servers, and templates, with registration, immutable versioning, and project-level permission grants.
 
 Projects are the resource scope and billing boundary: enabled Skills/MCP/models, token budget & quota, connected repos and docs.
 
 ## Status
 
-M1 implemented — all three layers work end to end. See the [M1 plan](docs/plan/m1-plan.md) for what shipped.
+M1 implemented — all three layers work end to end (see the [M1 plan](docs/plan/m1-plan.md)), plus the agrippa/v2 requirement-delivery workflow: multi-agent implement/review loops with structured human checkpoints, team comments, and platform-side pull requests ([CHANGELOG](CHANGELOG.md)).
 
 ## Getting started
 
@@ -40,7 +40,7 @@ Self-registration is **closed** — create the first admin out-of-band, then sig
 bun apps/api/src/cli/bootstrap-admin.ts   # idempotent; creates the first org_admin
 ```
 
-Sign in at :5173 with that account, create a project, grant models/skills under Settings → Resources, then submit a task from the catalog. To invite teammates (the only other way in), use Admin → Members. For real runs set `AGRIPPA_EXECUTOR=claude-agent-sdk` and `ANTHROPIC_API_KEY` in `.env.local` — and keep the file: `AGRIPPA_SECRET_KEY` encrypts credentials you store, so regenerating it orphans them (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Sign in at :5173 with that account, create a project, grant models/skills under Settings → Resources, then submit a task from the catalog. To invite teammates (the only other way in), use Admin → Members. For real runs set `AGRIPPA_EXECUTOR=claude-agent-sdk` and `ANTHROPIC_API_KEY` in `.env.local` — and for the Codex reviewer slot, install the Codex CLI and set `OPENAI_API_KEY`. `AGRIPPA_SCM=fake` fabricates branch/push/PR for token-free demos of the delivery workflow. Keep the file: `AGRIPPA_SECRET_KEY` encrypts credentials you store, so regenerating it orphans them (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 **Self-hosted** (Docker):
 
@@ -67,7 +67,7 @@ sudo /opt/agrippa/infra/vm/install.sh       # idempotent; updates: infra/vm/depl
 
 ## Tech stack
 
-TypeScript · Bun workspaces monorepo · Hono (REST + SSE) · Vite + React + TailwindCSS + shadcn/ui · Drizzle + Postgres · pg-boss · Redis (pubsub) · better-auth · i18next (en / zh-CN) · Claude Agent SDK (first executor) · Docker Compose or systemd VM (self-hosted)
+TypeScript · Bun workspaces monorepo · Hono (REST + SSE) · Vite + React + TailwindCSS + shadcn/ui · Drizzle + Postgres · pg-boss · Redis (pubsub) · better-auth · i18next (en / zh-CN) · Claude Agent SDK + OpenAI Codex CLI (executors) · Docker Compose or systemd VM (self-hosted)
 
 ---
 
@@ -78,11 +78,11 @@ Agrippa（硅基工坊）是一个面向团队的智能体工作平台。团队�
 ### 三层架构
 
 1. **场景层** —— 按工作场景组织的任务目录；提交表单由模板参数 Schema 自动生成。
-2. **编排层** —— 硅基人依照编排模板执行任务：阶段与步骤、人工审批节点、模型选择规则、预算限制。执行引擎可插拔，首个执行器为 Claude Agent SDK。
+2. **编排层** —— 硅基人依照编排模板执行任务：阶段与有界循环、步骤、人工检查点（审批、问题表单、评审关卡）、模型选择规则、预算限制。执行引擎按**代理位**可插拔——同一次执行可以让 Claude Code 做实现者、OpenAI Codex 做评审者，旗舰工作流「需求交付」正是如此（澄清 → 规划 → 实现 → 评审-修复循环 → 平台创建 PR）。
 3. **资源层** —— 模型、子智能体、技能、MCP 服务与编排模板的受管注册表：注册、不可变版本、项目级授权。
 
 项目是资源与计费边界：项目级启用技能/MCP/模型、Token 预算与配额、关联代码仓库与文档。
 
 ### 当前状态
 
-设计阶段——请阅读上方设计文档；实现按 [M1 计划](docs/plan/m1-plan.md) 推进。
+M1 已实现——三层架构端到端可用（见 [M1 计划](docs/plan/m1-plan.md)），并已支持 agrippa/v2 需求交付工作流：多代理实现/评审循环、结构化人工检查点、团队评论与平台侧 PR（见 [CHANGELOG](CHANGELOG.md)）。

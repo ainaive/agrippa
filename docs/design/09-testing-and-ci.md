@@ -42,7 +42,9 @@ Auth flows, RBAC allow/deny matrix per role × endpoint class, transactional tas
 
 ### Worker adapters
 
-- `DiskArtifactStore` path containment: normal file stored, escaping symlink rejected, missing source is not a zero-byte artifact. (The production workspace/resource adapters remain higher-risk untested surface — follow-up work.)
+- `DiskArtifactStore` path containment: normal file stored, escaping symlink rejected, missing source is not a zero-byte artifact.
+- Real-Git workspace/SCM tests: canonical diffs include committed, staged, and untracked changes; protected paths retain their base state despite agent index/exclude corruption; hostile config, hooks, filters, redirects, and `.git/config` symlinks/FIFOs cannot affect platform Git; stale/empty evidence refuses publication; retry reuses one snapshot commit; platform Git receives no provider credentials.
+- Resource materialization tests replace settings/hooks/MCP state before each invocation and remove a symlinked `.claude` without touching its target.
 
 ### Frontend
 

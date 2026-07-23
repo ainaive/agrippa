@@ -13,6 +13,7 @@ const ALLOWED: Record<string, string[]> = {
   "@agrippa/orchestration": ["@agrippa/core", "@agrippa/db", "@agrippa/executor-core"],
   "@agrippa/executor-core": ["@agrippa/core"],
   "@agrippa/executor-claude": ["@agrippa/core", "@agrippa/executor-core"],
+  "@agrippa/executor-codex": ["@agrippa/core", "@agrippa/executor-core"],
   "@agrippa/api-client": ["@agrippa/core"],
   "@agrippa/api": ["@agrippa/core", "@agrippa/db", "@agrippa/orchestration", "@agrippa/i18n"],
   "@agrippa/worker": [
@@ -21,6 +22,7 @@ const ALLOWED: Record<string, string[]> = {
     "@agrippa/orchestration",
     "@agrippa/executor-core",
     "@agrippa/executor-claude",
+    "@agrippa/executor-codex",
     "@agrippa/i18n",
   ],
   "@agrippa/web": ["@agrippa/core", "@agrippa/api-client", "@agrippa/i18n"],

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import path from "node:path";
 import {
-  approvals,
   artifacts,
+  checkpoints,
   createDb,
   type Db,
   migrateDb,
@@ -23,23 +23,25 @@ import {
 } from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import { and, asc, eq, sql } from "drizzle-orm";
+import { compileTemplate } from "../compile";
 import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
 import { InProcessEventBus } from "./bus";
 import type { EngineDeps } from "./deps";
-import { executeRun } from "./engine";
+import { ExecutorUnavailableError, executeRun } from "./engine";
 import {
   FakeResourceMaterializer,
+  FakeScmService,
   FakeWorkspaceManager,
   InMemoryArtifactStore,
   silentLogger,
 } from "./fakes";
 import {
   appendRunEvent,
-  decideApproval,
+  decideCheckpoint,
   finalizeRun,
-  findStrandedApprovalRuns,
+  findStrandedCheckpointRuns,
   transitionRun,
 } from "./run-lifecycle";
 
@@ -245,9 +247,9 @@ const HAPPY_SCRIPT: Record<string, FakeStepBehavior> = {
 
 async function approve(db: Db, runId: string): Promise<void> {
   await db
-    .update(approvals)
+    .update(checkpoints)
     .set({ status: "approved", decidedAt: new Date() })
-    .where(eq(approvals.runId, runId));
+    .where(eq(checkpoints.runId, runId));
 }
 
 describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", () => {
@@ -259,7 +261,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(await executeRun(deps, runId)).toBe("waiting_approval");
     const [run1] = await db.select().from(runs).where(eq(runs.id, runId));
     expect(run1?.status).toBe("waiting_approval");
-    const [approval] = await db.select().from(approvals).where(eq(approvals.runId, runId));
+    const [approval] = await db.select().from(checkpoints).where(eq(checkpoints.runId, runId));
     expect(approval?.status).toBe("pending");
     expect(approval?.checkpointId).toBe("approve-fix-plan");
 
@@ -272,6 +274,8 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
       ["setup", "succeeded"],
       ["reproduce-bug", "succeeded"],
       ["find-root-cause", "succeeded"],
+      // the approval gate is a checkpoint step now — its pause is a step row
+      ["approve-fix-plan", "waiting_approval"],
     ]);
     // system step performed the checkout with the resolved repoRef object
     expect(workspace.checkouts).toHaveLength(1);
@@ -307,7 +311,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(events[0]?.type).toBe("run.started");
     expect(events.at(-1)?.type).toBe("run.succeeded");
     expect(events.map((e) => e.seq)).toEqual(events.map((_, i) => i + 1));
-    expect(events.some((e) => e.type === "approval.required")).toBe(true);
+    expect(events.some((e) => e.type === "checkpoint.required")).toBe(true);
     expect(events.some((e) => e.type === "run.resumed")).toBe(true);
 
     // workspace cleaned up on terminal state
@@ -318,9 +322,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     const { db, runId, makeDeps } = await setupFixture();
     await executeRun(makeDeps(HAPPY_SCRIPT), runId);
     await db
-      .update(approvals)
+      .update(checkpoints)
       .set({ status: "rejected", decidedAt: new Date() })
-      .where(eq(approvals.runId, runId));
+      .where(eq(checkpoints.runId, runId));
 
     expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
@@ -369,7 +373,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
       .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "reproduce-bug")));
     expect(rows[0]?.status).toBe("failed");
     // run kept going to the localize phase and the approval gate
-    const [approval] = await db.select().from(approvals).where(eq(approvals.runId, runId));
+    const [approval] = await db.select().from(checkpoints).where(eq(checkpoints.runId, runId));
     expect(approval?.status).toBe("pending");
   });
 
@@ -618,7 +622,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(seen[0]).toBe("run.started");
     expect(seen).toContain("step.started");
     expect(seen).toContain("usage");
-    expect(seen).toContain("approval.required");
+    expect(seen).toContain("checkpoint.required");
   });
 
   it("redacts known secret values from persisted events", async () => {
@@ -689,28 +693,28 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     expect(e.seq).toBeGreaterThan(d.seq);
   });
 
-  it("findStrandedApprovalRuns selects only runs with no pending approval", async () => {
+  it("findStrandedCheckpointRuns selects only runs with no pending approval", async () => {
     const { db, runId } = await setupFixture();
     await db.update(runs).set({ status: "waiting_approval" }).where(eq(runs.id, runId));
 
     // one pending approval → not stranded
     const [a1] = await db
-      .insert(approvals)
+      .insert(checkpoints)
       .values({ runId, checkpointId: "cp-1", status: "pending" })
       .returning();
-    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+    expect(await findStrandedCheckpointRuns(db)).not.toContain(runId);
 
     // a second, earlier checkpoint gets approved while cp-1 is still pending →
     // still not stranded (the multi-approval trap the old innerJoin fell into)
     await db
-      .insert(approvals)
+      .insert(checkpoints)
       .values({ runId, checkpointId: "cp-0", status: "approved" })
       .returning();
-    expect(await findStrandedApprovalRuns(db)).not.toContain(runId);
+    expect(await findStrandedCheckpointRuns(db)).not.toContain(runId);
 
     // cp-1 decided too → now every approval is decided → stranded, re-enqueue
-    await decideApproval(db, a1?.id as string, { status: "approved" });
-    expect(await findStrandedApprovalRuns(db)).toContain(runId);
+    await decideCheckpoint(db, a1?.id as string, { status: "approved" });
+    expect(await findStrandedCheckpointRuns(db)).toContain(runId);
   });
 
   it("finalizeRun lets a late cancel win over a success (atomic, no read/CAS gap)", async () => {
@@ -764,22 +768,958 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     expect(events.some((e) => e.type === "run.failed")).toBe(true);
   });
 
-  it("decideApproval is a compare-and-swap on pending", async () => {
+  it("decideCheckpoint is a compare-and-swap on pending", async () => {
     const { db, runId } = await setupFixture();
     const [approval] = await db
-      .insert(approvals)
+      .insert(checkpoints)
       .values({ runId, checkpointId: "cp-1", status: "pending" })
       .returning();
     const id = approval?.id as string;
-    const first = await decideApproval(db, id, { status: "approved" });
+    const first = await decideCheckpoint(db, id, { status: "approved" });
     expect(first?.status).toBe("approved");
     // a racing expiry cannot overwrite the user's decision
-    const second = await decideApproval(db, id, { status: "expired" });
+    const second = await decideCheckpoint(db, id, { status: "expired" });
     expect(second).toBeNull();
     const [row] = await db
-      .select({ status: approvals.status })
-      .from(approvals)
-      .where(eq(approvals.id, id));
+      .select({ status: checkpoints.status })
+      .from(checkpoints)
+      .where(eq(checkpoints.id, id));
     expect(row?.status).toBe("approved");
+  });
+});
+
+// ── agrippa/v2: slots, checkpoints, loops, SCM (requirement-delivery spine) ──
+
+const V2_FIXTURE_YAML = `
+apiVersion: agrippa/v2
+kind: OrchestrationTemplate
+metadata:
+  slug: swdev.v2-loop-fixture
+  scenario: software-development
+  name: { en: "V2 Fixture", zh-CN: "V2 夹具" }
+  description: { en: "engine compliance fixture", zh-CN: "引擎合规夹具" }
+spec:
+  agents:
+    implementer: { label: { en: "Implementer", zh-CN: "实现者" }, faber: forge, executor: fake }
+    reviewer: { label: { en: "Reviewer", zh-CN: "评审者" }, faber: sentinel, executor: fake }
+  inputs:
+    - { key: requirement, type: text, required: true, label: { en: "Requirement", zh-CN: "需求" } }
+    - { key: repo, type: repoRef, required: true, label: { en: "Repo", zh-CN: "仓库" } }
+  workspace: { repo: "\${inputs.repo}", access: readWrite }
+  models:
+    roles:
+      coding: { tier: strong }
+      review: { tier: balanced }
+  phases:
+    - id: setup
+      name: { en: "Setup", zh-CN: "准备" }
+      steps:
+        - { id: checkout, kind: system, action: workspace.checkout }
+        - { id: branch, kind: system, action: git.branch }
+    - kind: loop
+      id: clarify
+      name: { en: "Clarify", zh-CN: "澄清" }
+      maxIterations: 2
+      until: checkpoints.clarify-qa.outcome == 'pass'
+      onMaxIterations: continue
+      phases:
+        - id: clarify-round
+          name: { en: "Round", zh-CN: "轮次" }
+          steps:
+            - id: analyze
+              kind: agent
+              agent: implementer
+              model: { role: coding }
+              instructions: "Analyze. Prior answers: \${checkpoints.clarify-qa.answers}"
+              produces: [questions]
+            - id: clarify-qa
+              kind: checkpoint
+              checkpoint: { kind: input, source: questions, title: { en: "Questions", zh-CN: "问题" } }
+    - id: plan
+      name: { en: "Plan", zh-CN: "规划" }
+      steps:
+        - id: draft-plan
+          kind: agent
+          agent: implementer
+          model: { role: coding }
+          instructions: "Plan it"
+          produces: [implementation-plan]
+        - id: confirm-plan
+          kind: checkpoint
+          checkpoint: { kind: approval, present: [implementation-plan], title: { en: "Confirm", zh-CN: "确认" } }
+    - id: implement
+      name: { en: "Implement", zh-CN: "实现" }
+      steps:
+        - id: implement
+          kind: agent
+          agent: implementer
+          model: { role: coding }
+          instructions: "Implement it"
+          produces: [changes]
+    - kind: loop
+      id: review-fix
+      name: { en: "Review", zh-CN: "评审" }
+      maxIterations: 3
+      until: checkpoints.review-gate.outcome == 'pass'
+      onMaxIterations: continue
+      phases:
+        - id: review-round
+          name: { en: "Round", zh-CN: "轮次" }
+          steps:
+            - id: review
+              kind: agent
+              agent: reviewer
+              access: readOnly
+              model: { role: review }
+              instructions: "Review the diff"
+              produces: [review-report]
+            - id: review-gate
+              kind: checkpoint
+              checkpoint: { kind: review-gate, source: review-report, title: { en: "Findings", zh-CN: "评审结果" } }
+            - id: fix
+              kind: agent
+              agent: implementer
+              model: { role: coding }
+              when: checkpoints.review-gate.outcome == 'fix'
+              instructions: "Fix: \${checkpoints.review-gate.selectedFindings}"
+              produces: [changes]
+    - id: publish
+      name: { en: "Publish", zh-CN: "发布" }
+      steps:
+        - id: confirm-publish
+          kind: checkpoint
+          when: checkpoints.review-gate.outcome == 'fix'
+          checkpoint: { kind: approval, title: { en: "Publish anyway?", zh-CN: "仍要发布？" } }
+        - { id: push, kind: system, action: git.push, retry: { max: 2 } }
+        - id: open-pr
+          kind: system
+          action: pr.open
+          with: { title: "\${run.taskTitle}", body: "Delivered: \${inputs.requirement}" }
+          produces: [pull-request]
+  outputs:
+    artifacts:
+      - { key: questions, kind: json, required: false }
+      - { key: implementation-plan, kind: markdown, required: true }
+      - { key: changes, kind: patch, required: true }
+      - { key: review-report, kind: json, required: true }
+      - { key: pull-request, kind: link, required: true }
+    summary: { from: implementation-plan }
+`;
+
+type V2Fixture = {
+  db: Db;
+  runId: string;
+  userId: string;
+  scm: FakeScmService;
+  workspace: FakeWorkspaceManager;
+  makeDeps: (
+    implScript: Record<string, FakeStepBehavior>,
+    revScript: Record<string, FakeStepBehavior>,
+  ) => EngineDeps & { impl: FakeExecutor; rev: FakeExecutor };
+};
+
+async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> {
+  const db = sharedDb;
+  await db.execute(sql`drop schema public cascade`);
+  await db.execute(sql`create schema public`);
+  await db.execute(sql`drop schema if exists drizzle cascade`);
+  await migrateDb(db);
+  await seed(db);
+
+  const orgRows = (await db.execute(sql`select id from orgs limit 1`)) as Array<{ id: string }>;
+  const orgId = orgRows[0]?.id as string;
+  const [user] = await db
+    .insert(users)
+    .values({
+      id: Bun.randomUUIDv7(),
+      name: "Engine Tester",
+      email: `engine-${Bun.randomUUIDv7()}@example.com`,
+      orgId,
+    })
+    .returning();
+  if (!user) throw new Error("fixture: user insert failed");
+  const [project] = await db
+    .insert(projects)
+    .values({ orgId, slug: "v2-test", name: "V2 Test", createdBy: user.id })
+    .returning();
+  if (!project) throw new Error("fixture: project insert failed");
+  const allModels = await db.select().from(models);
+  await db.insert(projectResourceGrants).values(
+    allModels.map((m) => ({
+      projectId: project.id,
+      resourceType: "model" as const,
+      resourceId: m.id,
+      grantedBy: user.id,
+    })),
+  );
+
+  const { compiled, checksum } = compileTemplate(sourceYaml);
+  const [scenario] = (await db.execute(
+    sql`select id from scenarios where slug = 'software-development'`,
+  )) as Array<{ id: string }>;
+  const [head] = await db
+    .insert(orchestrationTemplates)
+    .values({
+      slug: compiled.metadata.slug,
+      scenarioId: scenario?.id as string,
+      nameI18n: compiled.metadata.name,
+    })
+    .returning();
+  if (!head) throw new Error("fixture: template head insert failed");
+  const [version] = await db
+    .insert(templateVersions)
+    .values({
+      templateId: head.id,
+      version: 1,
+      status: "published",
+      sourceYaml,
+      compiled: compiled as unknown as Record<string, unknown>,
+      checksum,
+      publishedAt: new Date(),
+    })
+    .returning();
+  if (!version) throw new Error("fixture: version insert failed");
+
+  const fabriRows = (await db.execute(sql`select id, slug from fabri`)) as Array<{
+    id: string;
+    slug: string;
+  }>;
+  const forge = fabriRows.find((f) => f.slug === "forge")?.id as string;
+  const sentinel = fabriRows.find((f) => f.slug === "sentinel")?.id as string;
+
+  const [anyTaskType] = await db.select().from(taskTypes).limit(1);
+  if (!anyTaskType) throw new Error("fixture: no task type");
+  const params = {
+    requirement: "Add dark mode",
+    repo: { repoConnectionId: Bun.randomUUIDv7() },
+  };
+  const modelResolution = await resolveModelRoles(db, project.id, compiled.spec.models);
+  const [task] = await db
+    .insert(tasks)
+    .values({
+      orgId,
+      projectId: project.id,
+      taskTypeId: anyTaskType.id,
+      title: "Deliver dark mode",
+      params,
+      createdBy: user.id,
+    })
+    .returning();
+  if (!task) throw new Error("fixture: task insert failed");
+  const [run] = await db
+    .insert(runs)
+    .values({
+      taskId: task.id,
+      projectId: project.id,
+      number: 1,
+      templateVersionId: version.id,
+      faberId: forge,
+      executorId: "fake-impl",
+      agentBindings: {
+        implementer: { faberId: forge, executorId: "fake-impl" },
+        reviewer: { faberId: sentinel, executorId: "fake-rev" },
+      },
+      paramsSnapshot: params,
+      modelResolution: { implementer: modelResolution, reviewer: modelResolution },
+      resourceManifest: { mcpServers: [], skills: [] },
+      budget: {},
+      createdBy: user.id,
+    })
+    .returning();
+  if (!run) throw new Error("fixture: run insert failed");
+
+  const bus = new InProcessEventBus();
+  const workspace = new FakeWorkspaceManager();
+  const scm = new FakeScmService();
+  const makeDeps: V2Fixture["makeDeps"] = (implScript, revScript) => {
+    const impl = new FakeExecutor(implScript);
+    const rev = new FakeExecutor(revScript);
+    return {
+      db,
+      executors: { "fake-impl": impl, "fake-rev": rev },
+      impl,
+      rev,
+      bus,
+      workspace,
+      scm,
+      resources: new FakeResourceMaterializer({ mcpServers: [] }),
+      artifacts: new InMemoryArtifactStore(),
+      logger: silentLogger,
+    };
+  };
+  return { db, runId: run.id, userId: user.id, scm, workspace, makeDeps };
+}
+
+const FINDING_A = {
+  id: "f1",
+  severity: "major",
+  file: "src/app.ts",
+  line: 10,
+  title: "Unhandled null",
+  detail: "value may be null",
+};
+const FINDING_B = {
+  id: "f2",
+  severity: "minor",
+  title: "Naming nit",
+  detail: "rename for clarity",
+};
+
+const IMPL_SCRIPT: Record<string, FakeStepBehavior> = {
+  "analyze@1": {
+    kind: "succeed",
+    events: [
+      {
+        type: "artifact",
+        key: "questions",
+        kind: "json",
+        inline: {
+          questions: [{ id: "q1", text: "Which theme store?", recommended: "css variables" }],
+        },
+      },
+    ],
+    output: "asked one question",
+  },
+  "analyze@2": {
+    kind: "succeed",
+    events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+    output: "all clear",
+  },
+  "draft-plan": {
+    kind: "succeed",
+    events: [
+      { type: "artifact", key: "implementation-plan", kind: "markdown", inline: "# The plan" },
+    ],
+    output: "planned",
+  },
+  implement: { kind: "succeed", usage: { inputTokens: 100, outputTokens: 50 }, output: "built" },
+  fix: { kind: "succeed", output: "fixed the findings" },
+};
+
+const REV_CLEAN_ON_2: Record<string, FakeStepBehavior> = {
+  "review@1": {
+    kind: "succeed",
+    events: [
+      {
+        type: "artifact",
+        key: "review-report",
+        kind: "json",
+        inline: { summary: "two issues", findings: [FINDING_A, FINDING_B] },
+      },
+    ],
+    output: "found 2 issues",
+  },
+  "review@2": {
+    kind: "succeed",
+    events: [{ type: "artifact", key: "review-report", kind: "json", inline: { findings: [] } }],
+    output: "clean",
+  },
+};
+
+describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loops, scm)", () => {
+  it("runs the full requirement-delivery spine: Q&A loop, plan gate, review-fix loop, platform PR", async () => {
+    const fx = await setupV2Fixture();
+
+    // Leg 1 → pauses at the input checkpoint with the questions snapshot
+    let deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("waiting_approval");
+    let [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("clarify-qa");
+    expect(pending?.kind).toBe("input");
+    expect((pending?.payload as { questions: unknown[] } | undefined)?.questions).toHaveLength(1);
+    // the platform created the work branch before any agent ran
+    // the DEFAULT branch name: run number + the run id's random tail (task-
+    // scoped run numbers would otherwise collide across tasks)
+    expect(fx.scm.branches).toHaveLength(1);
+    expect(fx.scm.branches[0]?.runId).toBe(fx.runId);
+    expect(fx.scm.branches[0]?.name).toMatch(/^agrippa\/run-1-[0-9a-f]{12}$/);
+    expect(fx.scm.branches[0]?.name.endsWith(fx.runId.replaceAll("-", "").slice(-12))).toBe(true);
+
+    // answer → round 2 asks nothing → auto-pass → pauses at the plan approval
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "input", outcome: "answered", answers: { q1: "tailwind tokens" } },
+    });
+    deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("waiting_approval");
+    // the second analyze round saw the first round's answers interpolated
+    const analyze2 = deps.impl.requests.find((r) => r.stepId === "analyze" && r.iteration === 2);
+    expect(analyze2?.instructions).toContain("tailwind tokens");
+    expect(analyze2?.agentSlot).toBe("implementer");
+    [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("confirm-plan");
+
+    // approve the plan → implement runs → pauses at review-gate round 1
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("waiting_approval");
+    [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("review-gate");
+    expect(pending?.kind).toBe("review-gate");
+    expect((pending?.payload as { findings: unknown[] } | undefined)?.findings).toHaveLength(2);
+    // reviewer steps went to the reviewer executor, implementer steps to the other
+    expect(deps.rev.requests.map((r) => r.stepId)).toEqual(["review"]);
+    expect(deps.rev.requests[0]?.agentSlot).toBe("reviewer");
+    expect(deps.impl.requests.every((r) => r.agentSlot === "implementer")).toBe(true);
+
+    // fix one finding, accept the other → fix runs → round 2 reviews clean →
+    // publish gate skipped (outcome is pass) → push + PR → succeeded
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: {
+        kind: "review-gate",
+        outcome: "fix",
+        selectedFindings: [FINDING_A] as never,
+        acceptedFindings: [FINDING_B] as never,
+        acceptedFindingIds: ["f2"],
+      },
+    });
+    deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    expect(await executeRun(deps, fx.runId)).toBe("succeeded");
+
+    // the fix step saw exactly the selected finding
+    const fixReq = deps.impl.requests.find((r) => r.stepId === "fix");
+    expect(fixReq?.iteration).toBe(1);
+    expect(fixReq?.instructions).toContain("Unhandled null");
+    expect(fixReq?.instructions).not.toContain("Naming nit");
+    // round 2: fix is skipped (auto-pass), loop completed
+    const stepRows = await fx.db.select().from(runSteps).where(eq(runSteps.runId, fx.runId));
+    expect(stepRows.find((s) => s.stepId === "fix" && s.iteration === 2)?.status).toBe("skipped");
+    expect(stepRows.find((s) => s.stepId === "confirm-publish")?.status).toBe("skipped");
+    expect(stepRows.find((s) => s.stepId === "review" && s.iteration === 2)?.status).toBe(
+      "succeeded",
+    );
+
+    // platform-side push + PR with the waiver section in the body
+    expect(fx.scm.pushes).toHaveLength(1);
+    expect(fx.scm.pushes[0]?.branch).toMatch(/^agrippa\/run-1-[0-9a-f]{12}$/);
+    expect(fx.scm.pullRequests).toHaveLength(1);
+    const pr = fx.scm.pullRequests[0]?.spec;
+    expect(pr?.head).toMatch(/^agrippa\/run-1-[0-9a-f]{12}$/);
+    expect(pr?.title).toBe("Deliver dark mode");
+    expect(pr?.body).toContain("Delivered: Add dark mode");
+    expect(pr?.body).toContain("## Accepted review findings");
+    expect(pr?.body).toContain("**minor** Naming nit");
+    expect(pr?.body).toContain("accepted by Engine Tester");
+    expect(pr?.body).not.toContain("Unhandled null"); // fixed, not waived
+
+    // artifacts: per-iteration review reports, PR link, iteration-2 auto rows
+    const artifactRows = await fx.db.select().from(artifacts).where(eq(artifacts.runId, fx.runId));
+    const reviewRows = artifactRows.filter((a) => a.artifactKey === "review-report");
+    expect(reviewRows.map((a) => a.iteration).sort()).toEqual([1, 2]);
+    const prLink = artifactRows.find((a) => a.artifactKey === "pull-request");
+    expect(String(prLink?.inline)).toStartWith("https://fake.scm/pr/");
+    // the fix round re-diffed the workspace into a fresh changes patch
+    expect(artifactRows.filter((a) => a.artifactKey === "changes")).toHaveLength(2);
+
+    // auto-passed checkpoints recorded themselves with auto responses
+    const ckptRows = await fx.db.select().from(checkpoints).where(eq(checkpoints.runId, fx.runId));
+    const autoGate = ckptRows.find((c) => c.checkpointId === "review-gate" && c.iteration === 2);
+    expect(autoGate?.status).toBe("approved");
+    expect(autoGate?.response?.kind === "review-gate" && autoGate.response.auto).toBe(true);
+
+    // loop lifecycle events
+    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+    const types = events.map((e) => e.type);
+    expect(types.filter((t) => t === "loop.completed")).toHaveLength(2);
+    expect(types).toContain("branch.created");
+    expect(types).toContain("branch.pushed");
+    expect(types).toContain("pr.opened");
+  });
+
+  it("review-fix exhaustion with onMaxIterations: continue asks before publishing", async () => {
+    const fx = await setupV2Fixture();
+    const alwaysDirty: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "still dirty",
+      },
+    };
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    // clarify-qa round 1 pauses first — answer it, then approve the plan
+    for (const checkpointId of ["clarify-qa", "confirm-plan"]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      expect(pending?.checkpointId).toBe(checkpointId);
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response:
+          checkpointId === "clarify-qa"
+            ? { kind: "input", outcome: "answered", answers: { q1: "x" } }
+            : { kind: "approval", outcome: "approved" },
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    }
+
+    // three review rounds, each decided "fix" — the loop exhausts
+    for (let round = 1; round <= 3; round++) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      expect(pending?.checkpointId).toBe("review-gate");
+      expect(pending?.iteration).toBe(round);
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: {
+          kind: "review-gate",
+          outcome: "fix",
+          selectedFindings: [FINDING_A] as never,
+          acceptedFindings: [],
+          acceptedFindingIds: [],
+        },
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    }
+
+    // exhausted after an un-reviewed fix → the publish gate asks the user
+    expect(outcome).toBe("waiting_approval");
+    const [publishGate] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(publishGate?.checkpointId).toBe("confirm-publish");
+    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+    expect(events.some((e) => e.type === "loop.exhausted")).toBe(true);
+
+    await decideCheckpoint(fx.db, publishGate?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    expect(await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId)).toBe("succeeded");
+    expect(fx.scm.pullRequests).toHaveLength(1);
+  });
+
+  it("review-fix exhaustion with onMaxIterations: fail fails the run", async () => {
+    const failingYaml = V2_FIXTURE_YAML.replace(
+      "maxIterations: 3\n      until: checkpoints.review-gate.outcome == 'pass'\n      onMaxIterations: continue",
+      "maxIterations: 1\n      until: checkpoints.review-gate.outcome == 'pass'\n      onMaxIterations: fail",
+    );
+    expect(failingYaml).toContain("onMaxIterations: fail");
+    const fx = await setupV2Fixture(failingYaml);
+    const alwaysDirty: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "still dirty",
+      },
+    };
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    for (const response of [
+      { kind: "input", outcome: "answered", answers: { q1: "x" } } as const,
+      { kind: "approval", outcome: "approved" } as const,
+      {
+        kind: "review-gate",
+        outcome: "fix",
+        selectedFindings: [FINDING_A] as never,
+        acceptedFindings: [],
+        acceptedFindingIds: [],
+      } as const,
+    ]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, alwaysDirty), fx.runId);
+    }
+
+    expect(outcome).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("loop_exhausted");
+  });
+
+  it("fails the producing step (with retries) when an interaction artifact is malformed", async () => {
+    // review emits a report that violates the schema on every attempt — the
+    // store-time validation must fail the STEP (template retry applies), and
+    // the gate must never see the malformed report as "no findings"
+    const retryYaml = V2_FIXTURE_YAML.replace(
+      '              instructions: "Review the diff"',
+      '              retry: { max: 1 }\n              instructions: "Review the diff"',
+    );
+    expect(retryYaml).toContain("retry: { max: 1 }");
+    const fx = await setupV2Fixture(retryYaml);
+    const badReview: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            // missing severity/detail — fails reviewReportSchema
+            inline: { findings: [{ id: "f1", title: "half a finding" }] },
+          },
+        ],
+        output: "reviewed",
+      },
+    };
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, badReview), fx.runId);
+    for (const response of [
+      { kind: "input", outcome: "answered", answers: { q1: "x" } } as const,
+      { kind: "approval", outcome: "approved" } as const,
+    ]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, badReview), fx.runId);
+    }
+
+    expect(outcome).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    // both attempts ran and failed — store-time validation is retryable
+    const reviewRows = await fx.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "review")));
+    expect(reviewRows.map((r) => r.status).sort()).toEqual(["failed", "failed"]);
+    // the malformed artifact never became a row, and the gate never opened
+    const reportRows = await fx.db
+      .select()
+      .from(artifacts)
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "review-report")));
+    expect(reportRows).toHaveLength(0);
+    const gateRows = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.checkpointId, "review-gate")));
+    expect(gateRows).toHaveLength(0);
+  });
+
+  it("fails the run when a review gate has no report at all", async () => {
+    const fx = await setupV2Fixture();
+    const silentReview: Record<string, FakeStepBehavior> = {
+      // succeeds without emitting the review-report artifact
+      review: { kind: "succeed", output: "looks fine to me" },
+    };
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, silentReview), fx.runId);
+    for (const response of [
+      { kind: "input", outcome: "answered", answers: { q1: "x" } } as const,
+      { kind: "approval", outcome: "approved" } as const,
+    ]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, silentReview), fx.runId);
+    }
+
+    // a gate without evidence must never auto-pass into a published PR
+    expect(outcome).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    expect(fx.scm.pullRequests).toHaveLength(0);
+  });
+
+  it("rejects a questions artifact whose select question has no options", async () => {
+    const fx = await setupV2Fixture();
+    const badQuestions: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "questions",
+            kind: "json",
+            inline: {
+              questions: [{ id: "q1", text: "Pick one", kind: "select", required: true }],
+            },
+          },
+        ],
+        output: "asked an unanswerable question",
+      },
+    };
+
+    // an unanswerable required select would deadlock the checkpoint — the
+    // producing step must fail instead
+    expect(await executeRun(fx.makeDeps(badQuestions, REV_CLEAN_ON_2), fx.runId)).toBe("failed");
+    const analyzeRows = await fx.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "analyze")));
+    expect(analyzeRows.at(-1)?.status).toBe("failed");
+    expect((analyzeRows.at(-1)?.error as { code: string } | null)?.code).toBe("contract_violation");
+  });
+
+  it("fails instead of publishing drifted, empty, or atomically changed evidence", async () => {
+    for (const scenario of [
+      { diff: "diff --git a/drifted b/drifted\n+somebody touched this\n", atomic: false },
+      { diff: "", atomic: false },
+      { diff: null, atomic: true },
+    ]) {
+      const fx = await setupV2Fixture();
+      const quickImpl: Record<string, FakeStepBehavior> = {
+        ...IMPL_SCRIPT,
+        "analyze@1": {
+          kind: "succeed",
+          events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+          output: "no questions",
+        },
+      };
+      const dirtyReview: Record<string, FakeStepBehavior> = {
+        review: {
+          kind: "succeed",
+          events: [
+            {
+              type: "artifact",
+              key: "review-report",
+              kind: "json",
+              inline: { findings: [FINDING_A] },
+            },
+          ],
+          output: "one issue",
+        },
+      };
+
+      // plan approval first
+      expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe(
+        "waiting_approval",
+      );
+      const [plan] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, plan?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: { kind: "approval", outcome: "approved" },
+      });
+      // implement runs and stores its patch; review reports findings → gate pause.
+      // The reviewer must run read-only: its writes could never be re-reviewed.
+      const pauseDeps = fx.makeDeps(quickImpl, dirtyReview);
+      expect(await executeRun(pauseDeps, fx.runId)).toBe("waiting_approval");
+      expect(pauseDeps.rev.requests[0]?.toolPolicy.access).toBe("readOnly");
+      expect(pauseDeps.impl.requests[0]?.toolPolicy.access).toBe("readWrite");
+      const [gate] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, gate?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: {
+          kind: "review-gate",
+          outcome: "pass",
+          selectedFindings: [],
+          acceptedFindings: [FINDING_A] as never,
+          acceptedFindingIds: ["f1"],
+        },
+      });
+      // the workspace moved AFTER the gate approved the stored patch — the run
+      // must refuse to publish what nobody reviewed, not silently refresh it
+      if (scenario.diff !== null) fx.workspace.diffOutput = scenario.diff;
+      if (scenario.atomic) fx.scm.evidenceMismatchNext = true;
+      expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe("failed");
+
+      const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+      expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+      expect((run?.error as { message: string } | null)?.message).toContain("changed");
+      expect(fx.scm.pushes).toHaveLength(0);
+    }
+  });
+
+  it("reports a workspace diff failure as a step tool error", async () => {
+    const fx = await setupV2Fixture();
+    const quickImpl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+
+    expect(await executeRun(fx.makeDeps(quickImpl, REV_CLEAN_ON_2), fx.runId)).toBe(
+      "waiting_approval",
+    );
+    const [plan] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    await decideCheckpoint(fx.db, plan?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    fx.workspace.diffError = new Error("trusted sidecar index is unreadable");
+
+    expect(await executeRun(fx.makeDeps(quickImpl, REV_CLEAN_ON_2), fx.runId)).toBe("failed");
+    const implementRows = await fx.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "implement")));
+    expect((implementRows.at(-1)?.error as { code: string } | null)?.code).toBe("tool_error");
+    expect((implementRows.at(-1)?.error as { message: string } | null)?.message).toContain(
+      "sidecar index",
+    );
+  });
+
+  it("fails a resumed run whose workspace is gone (host changed)", async () => {
+    const fx = await setupV2Fixture();
+    const cleanReview: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          { type: "artifact", key: "review-report", kind: "json", inline: { findings: [] } },
+        ],
+        output: "clean",
+      },
+    };
+    const quickImpl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+
+    // checkout succeeds, then the run pauses at the plan approval
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe(
+      "waiting_approval",
+    );
+    const [plan] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    await decideCheckpoint(fx.db, plan?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    // the resume lands on a worker host that never had the checkout — the run
+    // must fail with the real reason, not proceed against an empty directory
+    fx.workspace.intact = false;
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("workspace_lost");
+  });
+
+  it("throws the typed unavailable error before any status transition when a slot's executor is missing", async () => {
+    const fx = await setupV2Fixture();
+    // a worker in a heterogeneous fleet that didn't register the implementer's
+    // executor must be able to DECLINE the job — that requires a matchable
+    // error thrown while the run is still queued (no transition to roll back)
+    const deps = fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2);
+    delete (deps.executors as Record<string, unknown>)["fake-impl"];
+
+    let thrown: unknown;
+    try {
+      await executeRun(deps, fx.runId);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ExecutorUnavailableError);
+    expect((thrown as ExecutorUnavailableError).code).toBe("executor_unavailable_on_worker");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(run?.status).toBe("queued");
+  });
+
+  it("retries transient scm push failures per the template retry policy", async () => {
+    const fx = await setupV2Fixture();
+    fx.scm.failNext.push = 1;
+    const cleanReview: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          { type: "artifact", key: "review-report", kind: "json", inline: { findings: [] } },
+        ],
+        output: "clean",
+      },
+    };
+    const quickImpl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+
+    // no questions → auto-pass → only the plan approval pauses
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe(
+      "waiting_approval",
+    );
+    const [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("confirm-plan");
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe("succeeded");
+
+    // first push attempt failed, retry succeeded
+    const pushRows = await fx.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "push")))
+      .orderBy(asc(runSteps.attempt));
+    expect(pushRows.map((r) => r.status)).toEqual(["failed", "succeeded"]);
+    expect(fx.scm.pushes).toHaveLength(1);
   });
 });

@@ -15,6 +15,10 @@
     "missingRequired": "Missing required fields",
     "noRepos": "No repositories connected — add one under project settings first.",
     "selectRepo": "Select repository",
-    "docsUnsupported": "Document references are not available yet."
+    "docsUnsupported": "Document references are not available yet.",
+    "agents": "Agents",
+    "agentFaber": "Persona",
+    "agentExecutor": "Engine",
+    "agentUnavailable": "not available in this deployment"
   }
 }

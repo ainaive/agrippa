@@ -20,7 +20,8 @@
     "output": "输出",
     "activity": "活动",
     "artifacts": "产出物",
-    "params": "参数"
+    "params": "参数",
+    "timeline": "时间线"
   },
   "activity": {
     "empty": "暂无活动。",
@@ -30,7 +31,8 @@
     "stepFailed": "步骤失败",
     "stepRetrying": "步骤重试中",
     "subagent": "子智能体",
-    "approvalRequired": "等待审批"
+    "approvalRequired": "等待审批",
+    "runDeferred": "等待具备所需智能体的工作节点"
   },
   "artifact": {
     "preview": "预览",
@@ -49,13 +51,15 @@
     "presented": "呈现的产出物",
     "loadingArtifacts": "正在加载呈现的产出物…",
     "artifactsUnavailable": "呈现的产出物加载失败——请谨慎审阅；仍可驳回。",
+    "retryArtifacts": "重试",
     "artifactMissing": "未产出"
   },
   "approvalsInbox": {
     "title": "待办审批",
     "empty": "当前没有等待你审批的事项。",
     "openRun": "打开执行",
-    "review": "审阅"
+    "review": "审阅",
+    "description": "所有项目中等待人工处理的检查点。"
   },
   "phases": {
     "checkpoint": "审批检查点",
@@ -96,5 +100,73 @@
     "run": "执行",
     "allStatuses": "全部状态",
     "noMatches": "没有符合筛选条件的任务。"
+  },
+  "rounds": {
+    "label": "第 {{round}} 轮",
+    "ofMax": "第 {{round}}/{{max}} 轮"
+  },
+  "severity": {
+    "blocker": "阻断",
+    "major": "严重",
+    "minor": "轻微",
+    "info": "提示"
+  },
+  "checkpoint": {
+    "hint": {
+      "approval": "运行已暂停，等待你的决定。请查看材料后选择通过、要求修改或拒绝。",
+      "input": "代理需要你的回答才能继续。",
+      "review-gate": "评审者报告了问题。选择需要修复的项，或全部接受并继续。"
+    },
+    "useRecommendation": "采纳建议：{{value}}",
+    "submitAnswers": "提交回答",
+    "acceptAllRecommendations": "全部采纳建议",
+    "answersMissing": "还有 {{count}} 个必答问题未回答",
+    "requestChanges": "要求修改",
+    "requestChangesHint": "“要求修改”会让代理根据你的意见重新修订，请先填写意见。",
+    "selectFinding": "选择问题 {{title}}",
+    "fixSelected": "修复所选（{{count}}）",
+    "fixAll": "全部修复",
+    "acceptAll": "全部接受并继续",
+    "acceptAllTitle": "接受全部评审问题？",
+    "acceptAllWarning": "将不再进行修复轮次。这些问题会被记录为已接受，并列入 PR 描述：",
+    "acceptConfirm": "接受并继续",
+    "uncheckedWaived": "修复所选后，未勾选的 {{count}} 个问题将被接受。",
+    "outcome": {
+      "approved": "已通过",
+      "rejected": "已拒绝",
+      "request_changes": "已要求修改",
+      "answered": "已回答",
+      "pass": "已通过",
+      "fix": "已要求修复",
+      "expired": "已超时",
+      "pending": "待处理"
+    },
+    "yes": "是",
+    "no": "否"
+  },
+  "comments": {
+    "placeholder": "给团队写一条评论…（⌘↵ 发送）",
+    "send": "发送"
+  },
+  "pr": {
+    "opened": "已创建 Pull Request",
+    "open": "打开 Pull Request"
+  },
+  "timelineFeed": {
+    "stepSkipped": "已跳过 {{stepId}}",
+    "reviewClean": "评审通过——没有发现问题",
+    "noQuestions": "没有待澄清的问题——继续执行",
+    "branchCreated": "已创建分支 {{branch}}",
+    "branchPushed": "已推送 {{branch}}",
+    "loopExhausted": "已达到循环上限",
+    "expand": "展开完整输出",
+    "collapse": "收起"
+  },
+  "inbox": {
+    "kind": {
+      "approval": "确认",
+      "input": "回答问题",
+      "review-gate": "评审结果"
+    }
   }
 }

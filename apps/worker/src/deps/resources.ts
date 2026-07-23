@@ -1,4 +1,4 @@
-import { cp, mkdir } from "node:fs/promises";
+import { cp, lstat, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import {
   type Db,
@@ -9,7 +9,7 @@ import {
   skills,
   skillVersions,
 } from "@agrippa/db";
-import type { ResolvedMcpServer, ResolvedSkill } from "@agrippa/executor-core";
+import { type ResolvedMcpServer, type ResolvedSkill, realContained } from "@agrippa/executor-core";
 import type { ResourceMaterializer } from "@agrippa/orchestration";
 import { skillSlugOfRef } from "@agrippa/orchestration";
 import { eq } from "drizzle-orm";
@@ -17,9 +17,30 @@ import { eq } from "drizzle-orm";
 const TEMPLATES_DIR =
   process.env.AGRIPPA_TEMPLATES_DIR ?? path.resolve(import.meta.dirname, "../../../../templates");
 
+/**
+ * Remove project configuration created by a prior agent invocation. `rm` on a
+ * symlink removes the link itself; it never traverses into the target.
+ */
+export async function resetAgentProjectConfig(workspaceDir: string): Promise<void> {
+  for (const relative of [".claude", ".mcp.json"]) {
+    const target = path.join(workspaceDir, relative);
+    try {
+      await lstat(target);
+    } catch {
+      continue;
+    }
+    await rm(target, { recursive: true, force: true });
+  }
+  await mkdir(path.join(workspaceDir, ".claude", "skills"), { recursive: true });
+}
+
 /** Registry-backed resolution: skills materialize onto disk, MCP configs decrypt secrets. */
 export class DbResourceMaterializer implements ResourceMaterializer {
   constructor(private readonly db: Db) {}
+
+  async prepareWorkspace(workspaceDir: string): Promise<void> {
+    await resetAgentProjectConfig(workspaceDir);
+  }
 
   async skills(
     refs: string[],
@@ -52,6 +73,9 @@ export class DbResourceMaterializer implements ResourceMaterializer {
       const skillName = slug.split("/").pop() as string;
       const target = path.join(workspaceDir, ".claude", "skills", skillName);
       await mkdir(path.dirname(target), { recursive: true });
+      if (!(await realContained(workspaceDir, target))) {
+        throw new Error(`skill target escapes the run workspace: ${target}`);
+      }
       if (version.contentRef.startsWith("builtin://")) {
         const source = path.join(
           TEMPLATES_DIR,

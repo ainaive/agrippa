@@ -1,7 +1,15 @@
-import { projectRoleAtLeast } from "@agrippa/core";
+import { type CheckpointKind, projectRoleAtLeast } from "@agrippa/core";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ChevronDownIcon, CircleCheckBigIcon, ExternalLinkIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CircleCheckBigIcon,
+  ExternalLinkIcon,
+  ListChecksIcon,
+  type LucideIcon,
+  MessageCircleQuestionIcon,
+  StampIcon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
 import { TableSkeleton } from "@/components/LoadingSkeletons";
@@ -10,42 +18,55 @@ import { QueryErrorState } from "@/components/QueryErrorState";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { ApprovalPanel } from "@/features/runs/ApprovalPanel";
-import { type PendingApproval, usePendingApprovals } from "@/features/usePendingApprovals";
+import { CheckpointPanel } from "@/features/runs/CheckpointPanel";
+import { type PendingCheckpoint, usePendingCheckpoints } from "@/features/usePendingCheckpoints";
 import { api } from "../lib/api";
 import { formatTime, lt } from "../lib/format";
-import type { Approval, Artifact } from "../lib/types";
+import type { Artifact, Checkpoint } from "../lib/types";
+
+const KIND_ICON: Record<CheckpointKind, LucideIcon> = {
+  approval: StampIcon,
+  input: MessageCircleQuestionIcon,
+  "review-gate": ListChecksIcon,
+};
 
 /** Expanded row: loads the run's artifacts so the panel can preview present[]. */
-function InlineDecision({ item }: { item: PendingApproval }) {
+function InlineDecision({ item }: { item: PendingCheckpoint }) {
   const artifacts = useQuery({
     queryKey: ["run", item.runId, "artifacts"],
     queryFn: () => api<Artifact[]>(`/runs/${item.runId}/artifacts`),
   });
-  const approval: Approval = {
+  const checkpoint: Checkpoint = {
     id: item.id,
     checkpointId: item.checkpointId,
+    kind: item.kind,
+    iteration: item.iteration,
     status: "pending",
     payload: item.payload,
+    response: null,
     requestedAt: item.requestedAt,
+    decidedAt: null,
     comment: null,
   };
   return (
-    <ApprovalPanel
+    <CheckpointPanel
       runId={item.runId}
-      approval={approval}
+      checkpoint={checkpoint}
       artifacts={artifacts.data ?? []}
       artifactsStatus={artifacts.status}
+      onRetryArtifacts={() => void artifacts.refetch()}
     />
   );
 }
 
-function InboxRow({ item }: { item: PendingApproval }) {
+function InboxRow({ item }: { item: PendingCheckpoint }) {
   const { t } = useTranslation("runs");
   const canDecide = projectRoleAtLeast(item.projectRole, "member");
+  const KindIcon = KIND_ICON[item.kind] ?? StampIcon;
   return (
     <Collapsible>
       <div className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/50">
+        <KindIcon className="size-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <p className="truncate font-medium">
             {item.taskTitle}
@@ -54,7 +75,9 @@ function InboxRow({ item }: { item: PendingApproval }) {
             </span>
           </p>
           <p className="truncate text-xs text-muted-foreground">
-            {item.payload.title ? lt(item.payload.title) : item.checkpointId} ·{" "}
+            {t(`inbox.kind.${item.kind}`)} ·{" "}
+            {item.payload.title ? lt(item.payload.title) : item.checkpointId}
+            {item.iteration > 1 ? ` · ${t("rounds.label", { round: item.iteration })}` : ""} ·{" "}
             {formatTime(item.requestedAt)}
           </p>
         </div>
@@ -86,9 +109,9 @@ function InboxRow({ item }: { item: PendingApproval }) {
 
 export function ApprovalsPage() {
   const { t } = useTranslation("runs");
-  const pending = usePendingApprovals();
+  const pending = usePendingCheckpoints();
 
-  const byProject = new Map<string, { projectName: string; items: PendingApproval[] }>();
+  const byProject = new Map<string, { projectName: string; items: PendingCheckpoint[] }>();
   for (const item of pending.data ?? []) {
     const group = byProject.get(item.projectId) ?? { projectName: item.projectName, items: [] };
     group.items.push(item);
@@ -97,7 +120,7 @@ export function ApprovalsPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title={t("approvalsInbox.title")} />
+      <PageHeader title={t("approvalsInbox.title")} description={t("approvalsInbox.description")} />
       {pending.isLoading ? (
         <TableSkeleton rows={3} />
       ) : pending.isError ? (

@@ -154,12 +154,53 @@ export const taskSubmitSchema = z.object({
   taskTypeId: z.uuid(),
   title: z.string().min(1).max(200),
   params: z.record(z.string(), z.unknown()).default({}),
+  /** Per-slot overrides of the template's agent bindings (overridable slots only). */
+  agents: z
+    .record(
+      z.string(),
+      z.object({
+        executorId: z.string().min(1).optional(),
+        faberId: z.uuid().optional(),
+      }),
+    )
+    .optional(),
 });
 
-export const approvalDecisionSchema = z.object({
-  decision: z.enum(["approved", "rejected"]),
-  comment: z.string().max(2000).optional(),
+/**
+ * Kind-discriminated payload for POST /runs/:id/checkpoints/:checkpointId/respond.
+ * The server validates the payload kind against the pending checkpoint's kind.
+ */
+export const checkpointRespondSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("approval"),
+      decision: z.enum(["approved", "rejected", "request_changes"]),
+      comment: z.string().max(2000).optional(),
+    })
+    .superRefine((input, ctx) => {
+      // a change request IS its comment — the revision step interpolates it,
+      // so an empty one would send the agent back with no instructions
+      if (input.decision === "request_changes" && !input.comment?.trim()) {
+        ctx.addIssue({ code: "custom", message: "request_changes requires a comment" });
+      }
+    }),
+  z.object({
+    kind: z.literal("input"),
+    answers: z.record(z.string(), z.union([z.string().max(4000), z.boolean()])),
+  }),
+  z.object({
+    kind: z.literal("review-gate"),
+    outcome: z.enum(["fix", "accept"]),
+    /** Required non-empty when outcome is "fix"; ignored for "accept". */
+    selectedFindingIds: z.array(z.string().min(1)).max(100).default([]),
+  }),
+]);
+export type CheckpointRespondInput = z.infer<typeof checkpointRespondSchema>;
+
+export const commentCreateSchema = z.object({
+  body: z.string().min(1).max(4000),
 });
+export type CommentCreateInput = z.infer<typeof commentCreateSchema>;
 
 export const grantsPutSchema = z.array(
   z.object({

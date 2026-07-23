@@ -29,13 +29,13 @@ import {
 } from "@/components/ui/sidebar";
 import { getLastProjectId } from "@/features/lastProject";
 import { useMe } from "@/features/me";
-import { usePendingApprovals } from "@/features/usePendingApprovals";
+import { usePendingCheckpoints } from "@/features/usePendingCheckpoints";
 
 export function AppSidebar({ currentProjectId }: { currentProjectId: string | null }) {
   const { t } = useTranslation("common");
   const me = useMe();
   const matchRoute = useMatchRoute();
-  const pendingApprovals = usePendingApprovals().data?.length ?? 0;
+  const pendingApprovals = usePendingCheckpoints().data?.length ?? 0;
   const { isMobile, setOpenMobile } = useSidebar();
   const closeMobile = () => {
     if (isMobile) setOpenMobile(false);

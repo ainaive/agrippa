@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import type { Run } from "@/lib/types";
+import type { ModelResolutionEntry, Run } from "@/lib/types";
 
 function MetaRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -10,9 +10,23 @@ function MetaRow({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+/** Flat (role → entry) for pre-slot runs, slot-keyed (slot → role → entry) after. */
+function resolutionRows(run: Run): Array<[string, ModelResolutionEntry]> {
+  const raw = run.modelResolution ?? {};
+  const flat = Object.values(raw).every(
+    (v) => v !== null && typeof v === "object" && "providerModelId" in v,
+  );
+  if (flat) return Object.entries(raw) as Array<[string, ModelResolutionEntry]>;
+  return Object.entries(raw).flatMap(([slot, entries]) =>
+    Object.entries(entries as Record<string, ModelResolutionEntry>).map(
+      ([role, entry]): [string, ModelResolutionEntry] => [`${slot} · ${role}`, entry],
+    ),
+  );
+}
+
 export function RunMetaCard({ run }: { run: Run }) {
   const { t } = useTranslation("runs");
-  const roles = Object.entries(run.modelResolution ?? {});
+  const roles = resolutionRows(run);
 
   return (
     <div className="space-y-2">

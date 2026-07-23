@@ -79,6 +79,8 @@ Documented in `infra/env/.env.example`; the full set:
 
 Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and cost is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 
+When upgrading to the release that introduced platform-owned Git snapshots (ADR-0012), first drain active **repository-backed** runs. Older checkouts do not contain the trusted platform gitdir and deliberately fail closed as `workspace_lost` on a new worker; non-repository runs are unaffected. Later upgrades retain normal step-granular resume behavior.
+
 Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (SSE) — e.g. `proxy_buffering off;` in nginx — or live progress will arrive in bursts.
 
 ## Troubleshooting

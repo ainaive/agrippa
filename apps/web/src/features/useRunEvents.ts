@@ -45,7 +45,10 @@ export function useRunEvents(runId: string, status: RunStatus | undefined) {
           parsed.type.startsWith("run.") ||
           parsed.type.startsWith("step.") ||
           parsed.type.startsWith("phase.") ||
-          parsed.type.startsWith("approval.") ||
+          parsed.type.startsWith("checkpoint.") ||
+          parsed.type.startsWith("loop.") ||
+          parsed.type === "comment.added" ||
+          parsed.type === "pr.opened" ||
           parsed.type === "artifact"
         ) {
           refresh();
@@ -75,8 +78,15 @@ export function useRunEvents(runId: string, status: RunStatus | undefined) {
       "step.skipped",
       "step.retrying",
       "step.continued",
-      "approval.required",
-      "approval.decided",
+      "checkpoint.required",
+      "checkpoint.decided",
+      "loop.iteration.started",
+      "loop.completed",
+      "loop.exhausted",
+      "branch.created",
+      "branch.pushed",
+      "pr.opened",
+      "comment.added",
       "workspace.ready",
       "message.delta",
       "message.completed",

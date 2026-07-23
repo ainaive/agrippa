@@ -1,10 +1,10 @@
-import { isTerminalRunStatus } from "@agrippa/core";
+import { isTerminalRunStatus, projectRoleAtLeast } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChevronDownIcon, RotateCcwIcon, XIcon } from "lucide-react";
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { ArtifactPreview, isPreviewable } from "@/components/artifacts/ArtifactPreview";
+import { FaberAvatar } from "@/components/FaberAvatar";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
 import { QueryErrorState } from "@/components/QueryErrorState";
@@ -13,15 +13,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ApprovalPanel } from "@/features/runs/ApprovalPanel";
 import { BudgetMeter } from "@/features/runs/BudgetMeter";
 import { PhaseTimeline } from "@/features/runs/PhaseTimeline";
 import { RunActivityFeed } from "@/features/runs/RunActivityFeed";
 import { RunMetaCard } from "@/features/runs/RunMetaCard";
+import { RunTimeline } from "@/features/runs/RunTimeline";
+import { useMe } from "../features/me";
 import { useRunEvents } from "../features/useRunEvents";
 import { api } from "../lib/api";
-import { formatCost, formatDuration, formatTime } from "../lib/format";
-import type { Approval, Artifact, Run, RunStep } from "../lib/types";
+import { formatCost, formatDuration, formatTime, lt } from "../lib/format";
+import type { Artifact, Run, RunStep } from "../lib/types";
 
 function ArtifactRow({ artifact }: { artifact: Artifact }) {
   const { t } = useTranslation("runs");
@@ -60,6 +61,7 @@ function ArtifactRow({ artifact }: { artifact: Artifact }) {
 export function RunDetailPage() {
   const { t } = useTranslation("runs");
   const navigate = useNavigate();
+  const me = useMe();
   const { projectId, runId } = useParams({ strict: false }) as {
     projectId: string;
     runId: string;
@@ -76,11 +78,6 @@ export function RunDetailPage() {
     queryFn: () => api<RunStep[]>(`/runs/${runId}/steps`),
     refetchInterval: live ? 3000 : false,
   });
-  const approvals = useQuery({
-    queryKey: ["run", runId, "approvals"],
-    queryFn: () => api<Approval[]>(`/runs/${runId}/approvals`),
-    refetchInterval: live ? 3000 : false,
-  });
   const artifacts = useQuery({
     queryKey: ["run", runId, "artifacts"],
     queryFn: () => api<Artifact[]>(`/runs/${runId}/artifacts`),
@@ -88,14 +85,6 @@ export function RunDetailPage() {
   });
 
   const events = useRunEvents(runId, run.data?.status);
-  const streamText = useMemo(
-    () =>
-      events
-        .filter((e) => e.type === "message.delta" || e.type === "message.completed")
-        .map((e) => (e.type === "message.delta" ? e.payload.text : `\n`))
-        .join(""),
-    [events],
-  );
 
   const cancel = useMutation({
     mutationFn: () => api(`/runs/${runId}/cancel`, { method: "POST" }),
@@ -116,15 +105,8 @@ export function RunDetailPage() {
   if (run.isError) return <QueryErrorState onRetry={() => void run.refetch()} />;
   if (!run.data) return <DetailSkeleton />;
   const current = run.data;
-  const pendingApproval = (approvals.data ?? []).find((a) => a.status === "pending");
-
-  // latest attempt per step, in seq order — for the output fallback
-  const latestSteps = [
-    ...[...(steps.data ?? [])]
-      .sort((a, b) => a.seq - b.seq || a.attempt - b.attempt)
-      .reduce((acc, row) => acc.set(row.stepId, row), new Map<string, RunStep>())
-      .values(),
-  ];
+  const role = me.projects.find((p) => p.projectId === current.projectId)?.role;
+  const canRespond = role !== undefined && projectRoleAtLeast(role, "member");
 
   return (
     <div className="space-y-6">
@@ -143,6 +125,24 @@ export function RunDetailPage() {
                 : ""}
               {formatDuration(current.startedAt, current.finishedAt)}
             </span>
+            {Object.entries(current.agents ?? {}).map(([slot, binding]) => (
+              <span
+                key={slot}
+                className="flex items-center gap-1.5 rounded-md border bg-muted/50 px-1.5 py-0.5 text-xs"
+                title={
+                  current.template?.agents?.[slot] ? lt(current.template.agents[slot]?.label) : slot
+                }
+              >
+                <FaberAvatar avatar={binding.faberAvatar} size="sm" className="size-4 text-xs" />
+                <span className="max-w-28 truncate">{lt(binding.faberName ?? undefined)}</span>
+                <span className="text-muted-foreground">{binding.executorLabel}</span>
+              </span>
+            ))}
+            {current.workBranch ? (
+              <span className="rounded-md border bg-muted/50 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                {current.workBranch}
+              </span>
+            ) : null}
           </>
         }
         actions={
@@ -176,15 +176,6 @@ export function RunDetailPage() {
         </p>
       )}
 
-      {pendingApproval && (
-        <ApprovalPanel
-          runId={runId}
-          approval={pendingApproval}
-          artifacts={artifacts.data ?? []}
-          artifactsStatus={artifacts.status}
-        />
-      )}
-
       <div className="grid items-start gap-4 lg:grid-cols-[340px_1fr]">
         <div className="space-y-4">
           <Card>
@@ -195,7 +186,7 @@ export function RunDetailPage() {
               <PhaseTimeline
                 template={current.template}
                 steps={steps.data ?? []}
-                approvals={approvals.data ?? []}
+                checkpoints={current.checkpoints ?? []}
               />
             </CardContent>
           </Card>
@@ -217,33 +208,34 @@ export function RunDetailPage() {
           </Card>
         </div>
 
-        <Tabs defaultValue="output">
+        <Tabs defaultValue="timeline">
           <TabsList>
-            <TabsTrigger value="output">{t("tabs.output")}</TabsTrigger>
+            <TabsTrigger value="timeline">{t("tabs.timeline")}</TabsTrigger>
             <TabsTrigger value="activity">{t("tabs.activity")}</TabsTrigger>
             <TabsTrigger value="artifacts">
               {t("tabs.artifacts")} ({artifacts.data?.length ?? 0})
             </TabsTrigger>
             <TabsTrigger value="params">{t("tabs.params")}</TabsTrigger>
           </TabsList>
+          <TabsContent value="timeline">
+            <Card>
+              <CardContent>
+                <RunTimeline
+                  runId={runId}
+                  run={current}
+                  events={events}
+                  artifacts={artifacts.data ?? []}
+                  artifactsStatus={artifacts.status}
+                  onRetryArtifacts={() => void artifacts.refetch()}
+                  canRespond={canRespond}
+                />
+              </CardContent>
+            </Card>
+          </TabsContent>
           <TabsContent value="activity">
             <Card>
               <CardContent>
                 <RunActivityFeed events={events} />
-              </CardContent>
-            </Card>
-          </TabsContent>
-          <TabsContent value="output">
-            <Card>
-              <CardContent>
-                <pre className="max-h-96 min-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs">
-                  {streamText ||
-                    latestSteps
-                      .filter((s) => s.output)
-                      .map((s) => `── ${s.stepId} ──\n${s.output}`)
-                      .join("\n\n") ||
-                    t("noOutput")}
-                </pre>
               </CardContent>
             </Card>
           </TabsContent>

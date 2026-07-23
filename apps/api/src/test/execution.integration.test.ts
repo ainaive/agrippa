@@ -209,7 +209,14 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(run.template.version).toBeGreaterThanOrEqual(1);
     expect(run.template.phases.length).toBeGreaterThan(0);
     for (const phase of run.template.phases) {
-      expect(Object.keys(phase).sort()).toEqual(["approval", "id", "name", "stepIds"]);
+      expect(Object.keys(phase).sort()).toEqual([
+        "approval",
+        "checkpoints",
+        "id",
+        "loop",
+        "name",
+        "stepIds",
+      ]);
       expect(Array.isArray(phase.stepIds)).toBe(true);
     }
     const withApproval = run.template.phases.find((p) => p.approval !== null);
@@ -224,34 +231,35 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   it("worker leg 1 pauses at the approval; the API decides; leg 2 succeeds", async () => {
     expect(await executeRun(engineDeps(), runId)).toBe("waiting_approval");
 
-    const approvalsRes = await jsonOf<Array<{ id: string; status: string }>>(
-      await viewer.request(`/api/v1/runs/${runId}/approvals`),
+    const approvalsRes = await jsonOf<Array<{ id: string; status: string; kind: string }>>(
+      await viewer.request(`/api/v1/runs/${runId}/checkpoints`),
     );
     expect(approvalsRes[0]?.status).toBe("pending");
+    expect(approvalsRes[0]?.kind).toBe("approval");
     const approvalId = approvalsRes[0]?.id as string;
 
-    // the pending-approvals inbox is membership-scoped
+    // the pending-checkpoints inbox is membership-scoped
     const inbox = await jsonOf<
       Array<{ id: string; runId: string; taskTitle: string; projectRole: string }>
-    >(await viewer.request("/api/v1/approvals/pending"));
+    >(await viewer.request("/api/v1/checkpoints/pending"));
     expect(inbox.map((i) => i.id)).toContain(approvalId);
     expect(inbox[0]?.taskTitle).toBe("Fix the widget");
     expect(inbox[0]?.projectRole).toBe("viewer");
     const outsiderInbox = await jsonOf<Array<{ id: string }>>(
-      await outsider.request("/api/v1/approvals/pending"),
+      await outsider.request("/api/v1/checkpoints/pending"),
     );
     expect(outsiderInbox).toEqual([]);
 
     // viewers cannot decide
-    const denied = await viewer.request(`/api/v1/runs/${runId}/approvals/${approvalId}`, {
+    const denied = await viewer.request(`/api/v1/runs/${runId}/checkpoints/${approvalId}/respond`, {
       method: "POST",
-      json: { decision: "approved" },
+      json: { kind: "approval", decision: "approved" },
     });
     expect(denied.status).toBe(403);
 
-    const decided = await admin.request(`/api/v1/runs/${runId}/approvals/${approvalId}`, {
+    const decided = await admin.request(`/api/v1/runs/${runId}/checkpoints/${approvalId}/respond`, {
       method: "POST",
-      json: { decision: "approved", comment: "plan looks good" },
+      json: { kind: "approval", decision: "approved", comment: "plan looks good" },
     });
     expect(decided.status).toBe(200);
     expect(enqueued.filter((id) => id === runId).length).toBeGreaterThanOrEqual(2);
@@ -260,9 +268,9 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     const run = await jsonOf<{ status: string }>(await admin.request(`/api/v1/runs/${runId}`));
     expect(run.status).toBe("succeeded");
 
-    // decided approvals leave the inbox
+    // decided checkpoints leave the inbox
     const drained = await jsonOf<Array<{ id: string }>>(
-      await viewer.request("/api/v1/approvals/pending"),
+      await viewer.request("/api/v1/checkpoints/pending"),
     );
     expect(drained.map((i) => i.id)).not.toContain(approvalId);
   });
@@ -316,7 +324,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(full.status).toBe(200);
     const text = await full.text();
     expect(text).toContain("event: run.started");
-    expect(text).toContain("event: approval.required");
+    expect(text).toContain("event: checkpoint.required");
     expect(text).toContain("event: run.succeeded");
 
     // resume from the middle: only later events are replayed

@@ -25,7 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { usePendingApprovals } from "@/features/usePendingApprovals";
+import { usePendingCheckpoints } from "@/features/usePendingCheckpoints";
 import { RunStatusBadge } from "../components/RunStatusBadge";
 import { api } from "../lib/api";
 import { formatCost, formatTime } from "../lib/format";
@@ -57,7 +57,7 @@ export function DashboardPage() {
 
   const all = tasks.data ?? [];
   const active = all.filter((r) => r.runStatus && !TERMINAL.includes(r.runStatus));
-  const waiting = (usePendingApprovals().data ?? []).filter((a) => a.projectId === projectId);
+  const waiting = (usePendingCheckpoints().data ?? []).filter((a) => a.projectId === projectId);
   const recent = all.slice(0, 8);
 
   const costLimit = quota.data?.costLimitUsd ? Number(quota.data.costLimitUsd) : null;

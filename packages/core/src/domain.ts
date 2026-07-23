@@ -18,3 +18,14 @@ export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export const ARTIFACT_KINDS = ["file", "patch", "markdown", "json", "link"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
+
+/**
+ * Human-in-the-loop checkpoint kinds (agrippa/v2 templates, ADR-0010).
+ * `approval` gates on a decision, `input` collects answers to agent-authored
+ * questions, `review-gate` decides what happens to review findings.
+ */
+export const CHECKPOINT_KINDS = ["approval", "input", "review-gate"] as const;
+export type CheckpointKind = (typeof CHECKPOINT_KINDS)[number];
+
+export const REVIEW_SEVERITIES = ["blocker", "major", "minor", "info"] as const;
+export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];

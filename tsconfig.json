@@ -7,6 +7,7 @@
     { "path": "packages/orchestration" },
     { "path": "packages/executor-core" },
     { "path": "packages/executor-claude" },
+    { "path": "packages/executor-codex" },
     { "path": "packages/api-client" },
     { "path": "apps/api" },
     { "path": "apps/worker" },

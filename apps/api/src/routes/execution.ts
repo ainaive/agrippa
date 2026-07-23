@@ -1,16 +1,25 @@
 import {
   AppError,
-  approvalDecisionSchema,
+  type CheckpointRespondInput,
+  type CheckpointStoredResponse,
+  checkpointRespondSchema,
+  commentCreateSchema,
+  EXECUTOR_CATALOG,
+  isExecutorId,
   isTerminalRunStatus,
+  type Question,
+  type ReviewFinding,
   taskSubmitSchema,
 } from "@agrippa/core";
 import {
-  approvals,
   artifacts,
+  checkpoints,
+  fabri,
   mcpServers,
   orchestrationTemplates,
   projectMembers,
   projects,
+  runComments,
   runEvents,
   runSteps,
   runs,
@@ -19,22 +28,25 @@ import {
   taskTypes,
   templateVersions,
   tokenUsage,
+  users,
 } from "@agrippa/db";
 import {
   appendRunEvent as allocateRunEvent,
   authorizeResources,
   buildParamsValidator,
-  decideApproval,
-  resolveModelRoles,
+  decideCheckpoint,
+  flattenPhases,
+  resolveAgentBindings,
   SubmitError,
-  type TemplateDoc,
+  upgradeCompiledTemplate,
   verifyRepoRefs,
 } from "@agrippa/orchestration";
-import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
+import { liveExecutorIds } from "../lib/executors";
 import { assertQuotaHeadroom } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
@@ -50,6 +62,206 @@ async function loadRunScoped(
   if (!run) throw AppError.notFound("Run");
   await assertProjectRole(c.var.db, c.var.user.id, run.projectId, min);
   return run;
+}
+
+async function listPendingCheckpoints(c: Context<AppEnv>) {
+  const rows = await c.var.db
+    .select({
+      id: checkpoints.id,
+      checkpointId: checkpoints.checkpointId,
+      kind: checkpoints.kind,
+      iteration: checkpoints.iteration,
+      payload: checkpoints.payload,
+      requestedAt: checkpoints.requestedAt,
+      runId: runs.id,
+      runNumber: runs.number,
+      taskId: tasks.id,
+      taskTitle: tasks.title,
+      projectId: projects.id,
+      projectName: projects.name,
+      projectRole: projectMembers.role,
+    })
+    .from(checkpoints)
+    .innerJoin(runs, eq(checkpoints.runId, runs.id))
+    .innerJoin(tasks, eq(runs.taskId, tasks.id))
+    .innerJoin(projects, eq(runs.projectId, projects.id))
+    .innerJoin(
+      projectMembers,
+      and(eq(projectMembers.projectId, runs.projectId), eq(projectMembers.userId, c.var.user.id)),
+    )
+    .where(eq(checkpoints.status, "pending"))
+    .orderBy(desc(checkpoints.requestedAt));
+  return c.json(rows);
+}
+
+type RunRowForRespond = typeof runs.$inferSelect;
+
+/**
+ * The one respond path for every checkpoint kind. Validates the payload
+ * against the pending row's kind and snapshot, builds the stored response
+ * (full finding objects, not ids — templates interpolate them directly),
+ * then commits the CAS decision + checkpoint.decided event + audit row in
+ * one transaction before re-enqueueing the run.
+ */
+async function respondToCheckpoint(
+  c: Context<AppEnv>,
+  run: RunRowForRespond,
+  rowId: string,
+  input: CheckpointRespondInput,
+) {
+  const db = c.var.db;
+  const [row] = await db
+    .select()
+    .from(checkpoints)
+    .where(and(eq(checkpoints.id, rowId), eq(checkpoints.runId, run.id)));
+  if (!row) throw AppError.notFound("Checkpoint");
+  if (row.kind !== input.kind) {
+    throw AppError.conflict("checkpoint_kind_mismatch", `Checkpoint is of kind '${row.kind}'`);
+  }
+  const payload = row.payload as {
+    questions?: Question[];
+    findings?: ReviewFinding[];
+    loopId?: string | null;
+  };
+
+  let status: "approved" | "rejected" = "approved";
+  let comment: string | undefined;
+  let response: CheckpointStoredResponse;
+
+  if (input.kind === "approval") {
+    if (input.decision === "request_changes" && !payload.loopId) {
+      // outside a loop there is nothing to send the agent back to — the
+      // outcome would silently read as a pass
+      throw AppError.conflict(
+        "request_changes_unsupported",
+        "This checkpoint cannot request changes",
+      );
+    }
+    status = input.decision === "rejected" ? "rejected" : "approved";
+    response = { kind: "approval", outcome: input.decision, comment: input.comment };
+    comment = input.comment;
+  } else if (input.kind === "input") {
+    const questions = payload.questions ?? [];
+    const known = new Set(questions.map((q) => q.id));
+    const unknown = Object.keys(input.answers).filter((id) => !known.has(id));
+    if (unknown.length > 0) {
+      throw AppError.validation([{ message: `unknown questions: ${unknown.join(", ")}` }]);
+    }
+    const missing = questions
+      .filter((q) => q.required !== false)
+      .filter((q) => input.answers[q.id] === undefined || input.answers[q.id] === "")
+      .map((q) => q.id);
+    if (missing.length > 0) {
+      throw AppError.validation([{ message: `answers required for: ${missing.join(", ")}` }]);
+    }
+    // each answer must match its snapshotted question's kind — the answer re-
+    // enters agent prompts, so a select value outside the options (or a string
+    // where a boolean was asked) must be rejected here, not interpolated later
+    for (const question of questions) {
+      const answer = input.answers[question.id];
+      if (answer === undefined) continue;
+      const kind = question.kind ?? "text"; // pre-fix snapshots may lack kind
+      if (kind === "boolean" && typeof answer !== "boolean") {
+        throw AppError.validation([
+          { message: `question '${question.id}' expects a boolean answer` },
+        ]);
+      }
+      if (kind !== "boolean" && typeof answer !== "string") {
+        throw AppError.validation([{ message: `question '${question.id}' expects a text answer` }]);
+      }
+      if (kind === "select" && !(question.options ?? []).includes(answer as string)) {
+        throw AppError.validation([
+          { message: `question '${question.id}' answer must be one of its options` },
+        ]);
+      }
+    }
+    response = { kind: "input", outcome: "answered", answers: input.answers };
+  } else {
+    const findings = payload.findings ?? [];
+    const byId = new Map(findings.map((f) => [f.id, f]));
+    if (input.outcome === "fix") {
+      if (input.selectedFindingIds.length === 0) {
+        throw AppError.validation([{ message: "select at least one finding to fix" }]);
+      }
+      const unknown = input.selectedFindingIds.filter((id) => !byId.has(id));
+      if (unknown.length > 0) {
+        throw AppError.validation([{ message: `unknown findings: ${unknown.join(", ")}` }]);
+      }
+      const selectedIds = new Set(input.selectedFindingIds);
+      const selected = findings.filter((f) => selectedIds.has(f.id));
+      const accepted = findings.filter((f) => !selectedIds.has(f.id));
+      response = {
+        kind: "review-gate",
+        outcome: "fix",
+        selectedFindings: selected,
+        acceptedFindings: accepted,
+        acceptedFindingIds: accepted.map((f) => f.id),
+      };
+    } else {
+      response = {
+        kind: "review-gate",
+        outcome: "pass",
+        selectedFindings: [],
+        acceptedFindings: findings,
+        acceptedFindingIds: findings.map((f) => f.id),
+      };
+    }
+  }
+
+  const eventPayload = {
+    checkpointRowId: row.id,
+    checkpointId: row.checkpointId,
+    kind: row.kind,
+    iteration: row.iteration,
+    outcome: response.outcome,
+    decidedBy: { id: c.var.user.id, name: c.var.user.name },
+  };
+  // decision (CAS on status='pending'), the checkpoint.decided event, and the
+  // audit row commit together — a partial write can't leave the timeline or
+  // audit log missing the decision that a later retry would then skip
+  const result = await db.transaction(async (tx) => {
+    const updated = await decideCheckpoint(tx, row.id, {
+      status,
+      decidedBy: c.var.user.id,
+      comment,
+      response,
+    });
+    if (!updated) return { updated: null as null };
+    const event = await allocateRunEvent(tx, {
+      runId: run.id,
+      type: "checkpoint.decided",
+      payload: eventPayload,
+    });
+    await audit(
+      c,
+      {
+        action: "run.checkpoint.respond",
+        resourceType: "checkpoint",
+        resourceId: row.id,
+        projectId: run.projectId,
+        payload: { kind: row.kind, outcome: response.outcome },
+      },
+      tx,
+    );
+    return { updated, event };
+  });
+  if (!result.updated) {
+    // already decided, OR a prior attempt decided then failed to enqueue: in
+    // both cases the durable state is correct, so re-enqueue to unstick the
+    // run (the sweeper also backstops this) and report the conflict
+    await c.var.queue?.enqueueRun(run.id);
+    throw AppError.conflict("already_decided", "Checkpoint is already decided");
+  }
+  // publish + enqueue only after the decision durably committed
+  await c.var.bus?.publish({
+    runId: run.id,
+    seq: result.event.seq,
+    type: "checkpoint.decided",
+    payload: eventPayload,
+    createdAt: result.event.createdAt.toISOString(),
+  });
+  await c.var.queue?.enqueueRun(run.id); // resume at the gated step
+  return c.json(result.updated);
 }
 
 export const executionRoutes = new Hono<AppEnv>()
@@ -82,7 +294,7 @@ export const executionRoutes = new Hono<AppEnv>()
         .from(templateVersions)
         .where(eq(templateVersions.id, template.latestPublishedVersionId));
       if (!version) throw AppError.notFound("Template version");
-      const compiled = version.compiled as unknown as TemplateDoc;
+      const compiled = upgradeCompiledTemplate(version.compiled);
 
       // params validated against the same compiled schema the SPA renders from
       const parsed = buildParamsValidator(compiled.spec.inputs).safeParse(input.params);
@@ -104,7 +316,17 @@ export const executionRoutes = new Hono<AppEnv>()
           skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
           mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
         });
-        const modelResolution = await resolveModelRoles(db, projectId, compiled.spec.models);
+        // every agent slot resolves to a concrete faber + executor here (with
+        // per-slot provider-filtered models and a check against the executors
+        // the deployment's workers actually registered) and freezes onto the run
+        const agentResolution = await resolveAgentBindings(
+          db,
+          projectId,
+          compiled,
+          { faberId: taskType.defaultFaberId, executorId: DEFAULT_EXECUTOR },
+          input.agents ?? {},
+          { registeredExecutors: await liveExecutorIds(db) },
+        );
 
         const { task, run } = await db.transaction(async (tx) => {
           const [task] = await tx
@@ -126,10 +348,11 @@ export const executionRoutes = new Hono<AppEnv>()
               projectId,
               number: 1,
               templateVersionId: version.id,
-              faberId: taskType.defaultFaberId,
-              executorId: DEFAULT_EXECUTOR,
+              faberId: agentResolution.primary.faberId,
+              executorId: agentResolution.primary.executorId,
+              agentBindings: agentResolution.bindings,
               paramsSnapshot: parsed.data,
-              modelResolution,
+              modelResolution: agentResolution.modelResolution,
               resourceManifest,
               budget: compiled.spec.budgets as unknown as Record<string, unknown>,
               createdBy: user.id,
@@ -226,6 +449,7 @@ export const executionRoutes = new Hono<AppEnv>()
         templateVersionId: latest.templateVersionId, // pinned — retries never re-resolve
         faberId: latest.faberId,
         executorId: latest.executorId,
+        agentBindings: latest.agentBindings,
         paramsSnapshot: latest.paramsSnapshot,
         modelResolution: latest.modelResolution,
         resourceManifest: latest.resourceManifest,
@@ -248,6 +472,37 @@ export const executionRoutes = new Hono<AppEnv>()
   // ── Runs ────────────────────────────────────────────────────────────────────
   .get("/runs/:id", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
+    // every checkpoint with who decided it — the timeline's interaction cards
+    const checkpointRows = await c.var.db
+      .select({ row: checkpoints, deciderName: users.name })
+      .from(checkpoints)
+      .leftJoin(users, eq(checkpoints.decidedBy, users.id))
+      .where(eq(checkpoints.runId, run.id))
+      .orderBy(asc(checkpoints.requestedAt));
+    // slot → faber (name/avatar) + executor label, for the header chips
+    const faberIds = [
+      ...new Set([run.faberId, ...Object.values(run.agentBindings ?? {}).map((b) => b.faberId)]),
+    ];
+    const faberRows = await c.var.db.select().from(fabri).where(inArray(fabri.id, faberIds));
+    const fabersById = new Map(faberRows.map((f) => [f.id, f]));
+    const agents = Object.fromEntries(
+      Object.entries(run.agentBindings ?? {}).map(([slot, binding]) => {
+        const faber = fabersById.get(binding.faberId);
+        return [
+          slot,
+          {
+            faberId: binding.faberId,
+            faberSlug: faber?.slug ?? null,
+            faberName: faber?.nameI18n ?? null,
+            faberAvatar: faber?.avatar ?? null,
+            executorId: binding.executorId,
+            executorLabel: isExecutorId(binding.executorId)
+              ? EXECUTOR_CATALOG[binding.executorId].label
+              : binding.executorId,
+          },
+        ];
+      }),
+    );
     // Embed the pinned template's plan so the UI can group steps by phase.
     // Viewer-scoped projection: structure + i18n names only — never
     // instructions, prompts, or resource references.
@@ -265,29 +520,56 @@ export const executionRoutes = new Hono<AppEnv>()
           eq(orchestrationTemplates.id, templateVersions.templateId),
         )
         .where(eq(templateVersions.id, run.templateVersionId));
-      const spec = (row?.compiled as TemplateDoc | undefined)?.spec;
+      const spec = row ? upgradeCompiledTemplate(row.compiled).spec : null;
       if (row && spec) {
         template = {
           slug: row.slug,
           version: row.version,
-          phases: spec.phases.map((phase) => ({
-            id: phase.id,
-            name: phase.name,
-            stepIds: phase.steps.map((step) => step.id),
-            approval: phase.approval
-              ? {
-                  checkpoint: phase.approval.checkpoint,
-                  title: phase.approval.title,
-                  present: phase.approval.present,
-                }
-              : null,
-          })),
+          agents: Object.fromEntries(
+            Object.entries(spec.agents).map(([slot, agent]) => [
+              slot,
+              { label: agent.label, overridable: agent.overridable },
+            ]),
+          ),
+          phases: flattenPhases(spec.phases).map(({ phase, loop }) => {
+            const checkpointSteps = phase.steps.filter((step) => step.kind === "checkpoint");
+            const firstApproval = checkpointSteps.find(
+              (step) => step.checkpoint.kind === "approval",
+            );
+            return {
+              id: phase.id,
+              name: phase.name,
+              loop: loop
+                ? { id: loop.id, name: loop.name, maxIterations: loop.maxIterations }
+                : null,
+              stepIds: phase.steps.map((step) => step.id),
+              checkpoints: checkpointSteps.map((step) => ({
+                id: step.id,
+                kind: step.checkpoint.kind,
+                title: step.checkpoint.title,
+                present: step.checkpoint.present,
+              })),
+              // legacy projection retained for the current phase-timeline UI
+              approval: firstApproval
+                ? {
+                    checkpoint: firstApproval.id,
+                    title: firstApproval.checkpoint.title,
+                    present: firstApproval.checkpoint.present,
+                  }
+                : null,
+            };
+          }),
           budgets: spec.budgets,
           modelRoles: spec.models.roles,
         };
       }
     }
-    return c.json({ ...run, template });
+    return c.json({
+      ...run,
+      template,
+      agents,
+      checkpoints: checkpointRows.map(({ row, deciderName }) => ({ ...row, deciderName })),
+    });
   })
   .get("/runs/:id/steps", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
@@ -332,109 +614,100 @@ export const executionRoutes = new Hono<AppEnv>()
     return c.json({ cancelRequested: true });
   })
 
-  // ── Approvals ───────────────────────────────────────────────────────────────
-  // ── Approvals inbox ─────────────────────────────────────────────────────────
-  // Cross-project: every pending checkpoint in a project the caller belongs to.
-  // Read-only; deciding goes through POST /runs/:id/approvals/:approvalId.
-  .get("/approvals/pending", async (c) => {
+  // ── Checkpoints ─────────────────────────────────────────────────────────────
+  // Cross-project inbox: every pending checkpoint in a project the caller
+  // belongs to ("waiting on you"). Read-only; responding goes through
+  // POST /runs/:id/checkpoints/:checkpointId/respond.
+  .get("/checkpoints/pending", (c) => listPendingCheckpoints(c))
+  .get("/runs/:id/checkpoints", async (c) => {
+    const run = await loadRunScoped(c, c.req.param("id"), "viewer");
+    const rows = await c.var.db
+      .select({ row: checkpoints, deciderName: users.name })
+      .from(checkpoints)
+      .leftJoin(users, eq(checkpoints.decidedBy, users.id))
+      .where(eq(checkpoints.runId, run.id))
+      .orderBy(asc(checkpoints.requestedAt));
+    return c.json(rows.map(({ row, deciderName }) => ({ ...row, deciderName })));
+  })
+  .post(
+    "/runs/:id/checkpoints/:checkpointId/respond",
+    validate("json", checkpointRespondSchema),
+    async (c) => {
+      const run = await loadRunScoped(c, c.req.param("id"), "member");
+      return await respondToCheckpoint(c, run, c.req.param("checkpointId"), c.req.valid("json"));
+    },
+  )
+
+  // ── Comments ────────────────────────────────────────────────────────────────
+  .get("/runs/:id/comments", async (c) => {
+    const run = await loadRunScoped(c, c.req.param("id"), "viewer");
     const rows = await c.var.db
       .select({
-        id: approvals.id,
-        checkpointId: approvals.checkpointId,
-        payload: approvals.payload,
-        requestedAt: approvals.requestedAt,
-        runId: runs.id,
-        runNumber: runs.number,
-        taskId: tasks.id,
-        taskTitle: tasks.title,
-        projectId: projects.id,
-        projectName: projects.name,
-        projectRole: projectMembers.role,
+        id: runComments.id,
+        body: runComments.body,
+        createdAt: runComments.createdAt,
+        userId: users.id,
+        userName: users.name,
       })
-      .from(approvals)
-      .innerJoin(runs, eq(approvals.runId, runs.id))
-      .innerJoin(tasks, eq(runs.taskId, tasks.id))
-      .innerJoin(projects, eq(runs.projectId, projects.id))
-      .innerJoin(
-        projectMembers,
-        and(eq(projectMembers.projectId, runs.projectId), eq(projectMembers.userId, c.var.user.id)),
-      )
-      .where(eq(approvals.status, "pending"))
-      .orderBy(desc(approvals.requestedAt));
+      .from(runComments)
+      .innerJoin(users, eq(runComments.userId, users.id))
+      .where(eq(runComments.runId, run.id))
+      .orderBy(asc(runComments.createdAt));
     return c.json(rows);
   })
-  .get("/runs/:id/approvals", async (c) => {
-    const run = await loadRunScoped(c, c.req.param("id"), "viewer");
-    const rows = await c.var.db.select().from(approvals).where(eq(approvals.runId, run.id));
-    return c.json(rows);
-  })
-  .post("/runs/:id/approvals/:approvalId", validate("json", approvalDecisionSchema), async (c) => {
+  .post("/runs/:id/comments", validate("json", commentCreateSchema), async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "member");
     const input = c.req.valid("json");
-    const [approval] = await c.var.db
-      .select()
-      .from(approvals)
-      .where(and(eq(approvals.id, c.req.param("approvalId")), eq(approvals.runId, run.id)));
-    if (!approval) throw AppError.notFound("Approval");
-    const eventPayload = {
-      approvalId: approval.id,
-      checkpointId: approval.checkpointId,
-      decision: input.decision,
-    };
-    // decision (CAS on status='pending'), the approval.decided event, and the
-    // audit row commit together — a partial write can't leave the timeline or
-    // audit log missing the decision that a later retry would then skip
-    const result = await c.var.db.transaction(async (tx) => {
-      const updated = await decideApproval(tx, approval.id, {
-        status: input.decision,
-        decidedBy: c.var.user.id,
-        comment: input.comment,
-      });
-      if (!updated) return { updated: null as null };
+    // the comment row and its timeline event commit together, so the SSE
+    // stream and the thread can never disagree
+    const { comment, event, payload } = await c.var.db.transaction(async (tx) => {
+      const [comment] = await tx
+        .insert(runComments)
+        .values({ runId: run.id, userId: c.var.user.id, body: input.body })
+        .returning();
+      if (!comment) throw new Error("comment insert failed");
+      const payload = {
+        commentId: comment.id,
+        body: comment.body,
+        user: { id: c.var.user.id, name: c.var.user.name },
+      };
       const event = await allocateRunEvent(tx, {
         runId: run.id,
-        type: "approval.decided",
-        payload: eventPayload,
+        type: "comment.added",
+        payload,
       });
       await audit(
         c,
         {
-          action: "run.approval.decide",
-          resourceType: "approval",
-          resourceId: approval.id,
+          action: "run.comment.create",
+          resourceType: "run",
+          resourceId: run.id,
           projectId: run.projectId,
-          payload: { decision: input.decision },
         },
         tx,
       );
-      return { updated, event };
+      return { comment, event, payload };
     });
-    if (!result.updated) {
-      // already decided, OR a prior attempt decided then failed to enqueue: in
-      // both cases the durable state is correct, so re-enqueue to unstick the
-      // run (the sweeper also backstops this) and report the conflict
-      await c.var.queue?.enqueueRun(run.id);
-      throw AppError.conflict("already_decided", "Approval is already decided");
-    }
-    // publish + enqueue only after the decision durably committed
     await c.var.bus?.publish({
       runId: run.id,
-      seq: result.event.seq,
-      type: "approval.decided",
-      payload: eventPayload,
-      createdAt: result.event.createdAt.toISOString(),
+      seq: event.seq,
+      type: "comment.added",
+      payload,
+      createdAt: event.createdAt.toISOString(),
     });
-    await c.var.queue?.enqueueRun(run.id); // resume at the gated phase
-    return c.json(result.updated);
+    return c.json(comment, 201);
   })
 
   // ── Artifacts ───────────────────────────────────────────────────────────────
   .get("/runs/:id/artifacts", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
+    // creation order matters: loop rounds re-produce the same key, and the
+    // checkpoint panels must present the LATEST row per key, not the first
     const rows = await c.var.db
       .select({
         id: artifacts.id,
         artifactKey: artifacts.artifactKey,
+        iteration: artifacts.iteration,
         kind: artifacts.kind,
         name: artifacts.name,
         mime: artifacts.mime,
@@ -442,7 +715,8 @@ export const executionRoutes = new Hono<AppEnv>()
         createdAt: artifacts.createdAt,
       })
       .from(artifacts)
-      .where(eq(artifacts.runId, run.id));
+      .where(eq(artifacts.runId, run.id))
+      .orderBy(asc(artifacts.createdAt), asc(artifacts.id));
     return c.json(rows);
   })
   .get("/artifacts/:id/download", async (c) => {

@@ -1,5 +1,5 @@
-import { canTransitionRun, type RunStatus } from "@agrippa/core";
-import { approvals, type Db, type DbOrTx, runEvents, runs } from "@agrippa/db";
+import { type CheckpointStoredResponse, canTransitionRun, type RunStatus } from "@agrippa/core";
+import { checkpoints, type Db, type DbOrTx, runEvents, runs } from "@agrippa/db";
 import { and, eq, sql } from "drizzle-orm";
 
 /**
@@ -79,20 +79,20 @@ export async function appendRunEvent(db: DbOrTx, event: RunEventInput): Promise<
 }
 
 /**
- * Runs paused in `waiting_approval` whose approvals are **all** decided — i.e. a
+ * Runs paused in `waiting_approval` whose checkpoints are **all** decided — i.e. a
  * decision landed but its resume enqueue was lost. The sweeper re-enqueues these.
  * The `not exists (… pending)` guard is essential: a multi-checkpoint run with an
- * earlier decided approval and a current pending one must NOT be selected, or the
+ * earlier decided checkpoint and a current pending one must NOT be selected, or the
  * sweeper would re-enqueue it every tick while it legitimately waits.
  */
-export async function findStrandedApprovalRuns(db: DbOrTx): Promise<string[]> {
+export async function findStrandedCheckpointRuns(db: DbOrTx): Promise<string[]> {
   const rows = await db
     .select({ id: runs.id })
     .from(runs)
     .where(
       and(
         eq(runs.status, "waiting_approval"),
-        sql`not exists (select 1 from ${approvals} where ${approvals.runId} = ${runs.id} and ${approvals.status} = 'pending')`,
+        sql`not exists (select 1 from ${checkpoints} where ${checkpoints.runId} = ${runs.id} and ${checkpoints.status} = 'pending')`,
       ),
     );
   return rows.map((r) => r.id);
@@ -150,19 +150,24 @@ export async function finalizeRun(db: Db, input: FinalizeRunInput): Promise<Fina
 }
 
 /**
- * Decide a pending approval atomically. The `status = 'pending'` predicate makes
+ * Decide a pending checkpoint atomically. The `status = 'pending'` predicate makes
  * this a compare-and-swap: a user decision and the expiry worker can't overwrite
  * each other. Returns the updated row, or null if it was no longer pending.
  */
-export async function decideApproval(
+export async function decideCheckpoint(
   db: DbOrTx,
-  approvalId: string,
-  patch: { status: "approved" | "rejected" | "expired"; decidedBy?: string; comment?: string },
-): Promise<typeof approvals.$inferSelect | null> {
+  checkpointRowId: string,
+  patch: {
+    status: "approved" | "rejected" | "expired";
+    decidedBy?: string;
+    comment?: string;
+    response?: CheckpointStoredResponse;
+  },
+): Promise<typeof checkpoints.$inferSelect | null> {
   const [updated] = await db
-    .update(approvals)
+    .update(checkpoints)
     .set({ ...patch, decidedAt: new Date() })
-    .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+    .where(and(eq(checkpoints.id, checkpointRowId), eq(checkpoints.status, "pending")))
     .returning();
   return updated ?? null;
 }

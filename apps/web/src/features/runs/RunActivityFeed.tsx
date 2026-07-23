@@ -4,6 +4,7 @@ import {
   CirclePauseIcon,
   CircleXIcon,
   FolderGitIcon,
+  HourglassIcon,
   type LucideIcon,
   PlayIcon,
   RotateCcwIcon,
@@ -94,6 +95,15 @@ function buildFeed(events: RunEvent[], t: (key: string) => string): FeedItem[] {
           icon: CirclePauseIcon,
           label: t("activity.approvalRequired"),
           stepId,
+          tone: "warning",
+        });
+        break;
+      case "run.deferred":
+        items.push({
+          seq: event.seq,
+          icon: HourglassIcon,
+          // the event carries the concrete reason (which executor is missing)
+          label: `${t("activity.runDeferred")}${event.payload.reason ? ` · ${String(event.payload.reason)}` : ""}`,
           tone: "warning",
         });
         break;

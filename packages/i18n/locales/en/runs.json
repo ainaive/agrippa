@@ -20,7 +20,8 @@
     "output": "Output",
     "activity": "Activity",
     "artifacts": "Artifacts",
-    "params": "Parameters"
+    "params": "Parameters",
+    "timeline": "Timeline"
   },
   "activity": {
     "empty": "No activity yet.",
@@ -30,7 +31,8 @@
     "stepFailed": "Step failed",
     "stepRetrying": "Retrying step",
     "subagent": "Subagent",
-    "approvalRequired": "Approval required"
+    "approvalRequired": "Approval required",
+    "runDeferred": "Waiting for a worker with the required agent"
   },
   "artifact": {
     "preview": "Preview",
@@ -49,13 +51,15 @@
     "presented": "Presented artifacts",
     "loadingArtifacts": "Loading presented artifacts…",
     "artifactsUnavailable": "Presented artifacts could not be loaded — review with care; rejecting is still possible.",
+    "retryArtifacts": "Retry",
     "artifactMissing": "not produced"
   },
   "approvalsInbox": {
     "title": "Pending approvals",
     "empty": "Nothing is waiting for your approval.",
     "openRun": "Open run",
-    "review": "Review"
+    "review": "Review",
+    "description": "Checkpoints across your projects that are waiting on a human."
   },
   "phases": {
     "checkpoint": "Approval checkpoint",
@@ -96,5 +100,73 @@
     "run": "Run",
     "allStatuses": "All statuses",
     "noMatches": "No tasks match the current filters."
+  },
+  "rounds": {
+    "label": "Round {{round}}",
+    "ofMax": "Round {{round}}/{{max}}"
+  },
+  "severity": {
+    "blocker": "Blocker",
+    "major": "Major",
+    "minor": "Minor",
+    "info": "Info"
+  },
+  "checkpoint": {
+    "hint": {
+      "approval": "This run is paused for your decision. Review the material, then approve, request changes, or reject.",
+      "input": "The agent needs your answers before it can continue.",
+      "review-gate": "The reviewer reported findings. Pick the ones to fix, or accept them all and continue."
+    },
+    "useRecommendation": "Use recommendation: {{value}}",
+    "submitAnswers": "Send answers",
+    "acceptAllRecommendations": "Accept all recommendations",
+    "answersMissing": "{{count}} required answer(s) missing",
+    "requestChanges": "Request changes",
+    "requestChangesHint": "Request changes sends the agent back to revise with your comment; write the comment first.",
+    "selectFinding": "Select finding {{title}}",
+    "fixSelected": "Fix selected ({{count}})",
+    "fixAll": "Fix all",
+    "acceptAll": "Accept all & continue",
+    "acceptAllTitle": "Accept all findings?",
+    "acceptAllWarning": "No fix round will run. These findings are recorded as accepted and listed in the pull request:",
+    "acceptConfirm": "Accept & continue",
+    "uncheckedWaived": "{{count}} unchecked finding(s) will be accepted when you fix the selected ones.",
+    "outcome": {
+      "approved": "Approved",
+      "rejected": "Rejected",
+      "request_changes": "Changes requested",
+      "answered": "Answered",
+      "pass": "Passed",
+      "fix": "Fix requested",
+      "expired": "Expired",
+      "pending": "Pending"
+    },
+    "yes": "Yes",
+    "no": "No"
+  },
+  "comments": {
+    "placeholder": "Write a comment for your team… (⌘↵ to send)",
+    "send": "Send"
+  },
+  "pr": {
+    "opened": "Pull request opened",
+    "open": "Open pull request"
+  },
+  "timelineFeed": {
+    "stepSkipped": "Skipped {{stepId}}",
+    "reviewClean": "Review passed — no findings",
+    "noQuestions": "No open questions — continuing",
+    "branchCreated": "Created branch {{branch}}",
+    "branchPushed": "Pushed {{branch}}",
+    "loopExhausted": "Loop limit reached",
+    "expand": "Show full output",
+    "collapse": "Collapse"
+  },
+  "inbox": {
+    "kind": {
+      "approval": "Confirm",
+      "input": "Answer questions",
+      "review-gate": "Review findings"
+    }
   }
 }

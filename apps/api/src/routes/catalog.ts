@@ -1,9 +1,12 @@
-import { AppError } from "@agrippa/core";
+import { AppError, EXECUTOR_CATALOG, EXECUTOR_DEFAULT_SENTINEL, isExecutorId } from "@agrippa/core";
 import { fabri, orchestrationTemplates, scenarios, taskTypes, templateVersions } from "@agrippa/db";
-import type { TemplateDoc } from "@agrippa/orchestration";
+import { upgradeCompiledTemplate } from "@agrippa/orchestration";
 import { asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
+import { liveExecutorIds } from "../lib/executors";
+
+const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
 
 export const catalogRoutes = new Hono<AppEnv>()
   .get("/scenarios", async (c) => {
@@ -57,18 +60,51 @@ export const catalogRoutes = new Hono<AppEnv>()
     let version: { id: string; version: number; compiled: unknown } | null = null;
     let inputs: unknown[] = [];
     let budgets: unknown = null;
+    let agents: Record<string, unknown> | null = null;
+    const live = await liveExecutorIds(db);
     if (template?.latestPublishedVersionId) {
       const [row] = await db
         .select()
         .from(templateVersions)
         .where(eq(templateVersions.id, template.latestPublishedVersionId));
       if (row) {
-        const compiled = row.compiled as unknown as TemplateDoc;
+        const compiled = upgradeCompiledTemplate(row.compiled);
         version = { id: row.id, version: row.version, compiled: row.compiled };
         inputs = compiled.spec.inputs;
         budgets = compiled.spec.budgets;
+        // slot metadata for the submit page's agent pickers; the sentinel
+        // (upgraded v1) resolves to the task type's default faber + the
+        // deployment default executor, exactly as submit will
+        const activeFabri = await db.select().from(fabri).where(eq(fabri.status, "active"));
+        const bySlug = new Map(activeFabri.map((f) => [f.slug, f]));
+        agents = Object.fromEntries(
+          Object.entries(compiled.spec.agents).map(([slot, spec]) => {
+            const isSentinel = spec.executor === EXECUTOR_DEFAULT_SENTINEL;
+            const defaultFaber = isSentinel ? faber : (bySlug.get(spec.faber) ?? faber);
+            const executorId = isSentinel ? DEFAULT_EXECUTOR : spec.executor;
+            return [
+              slot,
+              {
+                label: spec.label,
+                overridable: spec.overridable,
+                defaultFaberId: defaultFaber?.id ?? null,
+                defaultExecutorId: executorId,
+                executorLabel: isExecutorId(executorId)
+                  ? EXECUTOR_CATALOG[executorId].label
+                  : executorId,
+                // no live rows = no worker has advertised yet → assume available
+                available: live.size === 0 || live.has(executorId),
+              },
+            ];
+          }),
+        );
       }
     }
+    // selectable fabri for overridable slots (members submit; registry CRUD is admin-only)
+    const fabriOptions = await db
+      .select({ id: fabri.id, slug: fabri.slug, nameI18n: fabri.nameI18n, avatar: fabri.avatar })
+      .from(fabri)
+      .where(eq(fabri.status, "active"));
 
     return c.json({
       id: taskType.id,
@@ -82,5 +118,9 @@ export const catalogRoutes = new Hono<AppEnv>()
         : null,
       inputs,
       budgets,
+      agents,
+      // null = no worker heartbeat yet (fresh deployment) — treat all as available
+      availableExecutorIds: live.size === 0 ? null : [...live],
+      fabriOptions,
     });
   });

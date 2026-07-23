@@ -160,11 +160,17 @@ export async function realContained(root: string, target: string): Promise<boole
  * Claude namespaces — so an admin/private variable can't ride along.
  */
 const SDK_AUTH_ALLOW = new Set([
+  // Anthropic (Claude Agent SDK)
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_MODEL",
   "CLAUDE_CODE_OAUTH_TOKEN",
+  // OpenAI (Codex CLI)
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "CODEX_API_KEY",
+  "CODEX_HOME",
 ]);
 
 /**
@@ -195,6 +201,17 @@ const SYSTEM_ENV_ALLOW = new Set([
   "CURL_CA_BUNDLE",
 ]);
 
+/** Build the non-secret system environment shared by executors and platform tools. */
+export function buildSystemEnv(
+  source: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && SYSTEM_ENV_ALLOW.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 /**
  * Platform secrets whose VALUES are redacted from event payloads (below). The
  * env allow-list already keeps these out of the subprocess; this set feeds the
@@ -219,10 +236,10 @@ const SECRET_ENV_KEYS = new Set([
 export function buildScrubbedEnv(
   source: Record<string, string | undefined> = process.env,
 ): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out = buildSystemEnv(source);
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
-    if (SDK_AUTH_ALLOW.has(key) || SYSTEM_ENV_ALLOW.has(key)) out[key] = value;
+    if (SDK_AUTH_ALLOW.has(key)) out[key] = value;
   }
   return out;
 }
@@ -241,6 +258,8 @@ export function collectEnvSecretValues(
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
   ];
   return keys
     .map((k) => source[k])

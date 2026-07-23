@@ -1,20 +1,27 @@
 import {
   type ApprovalExpirePayload,
+  EXECUTOR_CATALOG,
+  isExecutorId,
   isTerminalRunStatus,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_RUN_EXECUTE,
   type RunExecutePayload,
 } from "@agrippa/core";
-import { approvals, createDb, runs } from "@agrippa/db";
+import { checkpoints, createDb, executorRegistrations, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
+import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
+import type { Executor } from "@agrippa/executor-core";
 import {
+  appendRunEvent,
   createRunQueue,
-  decideApproval,
+  decideCheckpoint,
   durationToMinutes,
   type EngineDeps,
+  ExecutorUnavailableError,
   executeRun,
+  FakeScmService,
   finalizeRun,
-  findStrandedApprovalRuns,
+  findStrandedCheckpointRuns,
   InProcessEventBus,
   RedisEventBus,
 } from "@agrippa/orchestration";
@@ -23,6 +30,7 @@ import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
 import { DbResourceMaterializer } from "./deps/resources";
+import { GitScmService } from "./deps/scm";
 import { GitWorkspaceManager } from "./deps/workspace";
 
 const db = createDb();
@@ -31,16 +39,65 @@ const bus = process.env.REDIS_URL
   : new InProcessEventBus();
 const queue = await createRunQueue(process.env.DATABASE_URL as string);
 
+const executors: Record<string, Executor> = {
+  "claude-agent-sdk": createClaudeExecutor(),
+  fake: new DemoExecutor(),
+};
+// codex registers only when the CLI is actually usable on this host — which
+// includes supporting the config-isolation flags every step passes
+const codexProbe = probeCodexCli();
+const codexAuth = Boolean(
+  process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || process.env.CODEX_HOME,
+);
+if (codexProbe.ok && codexAuth) {
+  executors["codex-cli"] = createCodexExecutor();
+  console.log(`[worker] codex executor registered (${codexProbe.version})`);
+} else {
+  const reason = codexProbe.ok ? "no auth configured" : codexProbe.reason;
+  console.log(`[worker] codex executor not registered (${reason})`);
+}
+// the static catalog in @agrippa/core is what the API/SPA trust — a drifting
+// capability set here would let templates pass validation and fail at runtime
+for (const [id, executor] of Object.entries(executors)) {
+  if (!isExecutorId(id)) throw new Error(`executor '${id}' is not in EXECUTOR_CATALOG`);
+  const expected = EXECUTOR_CATALOG[id].capabilities;
+  const actual = executor.capabilities as Record<string, boolean>;
+  for (const [flag, value] of Object.entries(expected)) {
+    // the catalog may promise less than the executor delivers, never more
+    if (value && !actual[flag]) {
+      throw new Error(`executor '${id}' lacks catalog capability '${flag}'`);
+    }
+  }
+}
+
+/**
+ * Advertise what this worker actually registered: the API rejects submissions
+ * that bind an executor with no recent registration, so a codex-less
+ * deployment fails at submit with an actionable error instead of exhausting
+ * queue retries later. Heartbeated below so a reconfigured deployment ages
+ * out of the live set.
+ */
+async function registerExecutors(): Promise<void> {
+  for (const executorId of Object.keys(executors)) {
+    await db
+      .insert(executorRegistrations)
+      .values({ executorId, registeredAt: new Date() })
+      .onConflictDoUpdate({
+        target: executorRegistrations.executorId,
+        set: { registeredAt: new Date() },
+      });
+  }
+}
+await registerExecutors();
+
 const deps: EngineDeps = {
   db,
-  executors: {
-    "claude-agent-sdk": createClaudeExecutor(),
-    fake: new DemoExecutor(),
-  },
+  executors,
   bus,
   workspace: new GitWorkspaceManager(db),
   resources: new DbResourceMaterializer(db),
   artifacts: new DiskArtifactStore(),
+  scm: process.env.AGRIPPA_SCM === "fake" ? new FakeScmService() : new GitScmService(db),
   logger: {
     info: (msg, extra) => console.log(`[worker] ${msg}`, extra ?? ""),
     warn: (msg, extra) => console.warn(`[worker] ${msg}`, extra ?? ""),
@@ -67,6 +124,37 @@ await queue.boss.work(
         deps.logger.info(`run ${runId}: ${outcome}`);
         if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);
       } catch (err) {
+        // Heterogeneous fleet: this worker lacks the run's executor. The
+        // throw happens before any status transition, so for pre-claim states
+        // we DECLINE the job (no pg-boss retries burned) and let the sweepers
+        // re-enqueue — `queued` runs re-enqueue after 30s (queuedAt never
+        // refreshes), decided `waiting_approval` runs via the stranded-
+        // checkpoint sweep; a still-pending checkpoint re-enqueues on its
+        // decision. The run bounces ≤60s at a time until a capable worker
+        // takes it. A `running` run (crash-recovery pickup) must rethrow:
+        // nothing re-enqueues an unclaimed running run today — the execution
+        // lease is ADR-0009 future work.
+        if (
+          (typeof err === "object" &&
+            err !== null &&
+            (err as { code?: string }).code === "executor_unavailable_on_worker") ||
+          err instanceof ExecutorUnavailableError
+        ) {
+          const [run] = await db
+            .select({ status: runs.status })
+            .from(runs)
+            .where(eq(runs.id, runId));
+          if (run && (run.status === "queued" || run.status === "waiting_approval")) {
+            deps.logger.warn(`run ${runId}: declining — ${String((err as Error).message)}`);
+            // one timeline event so the SPA can show WHY the run is waiting
+            await appendRunEvent(db, {
+              runId,
+              type: "run.deferred",
+              payload: { reason: String((err as Error).message) },
+            });
+            continue;
+          }
+        }
         deps.logger.error(`run ${runId} crashed`, { err: String(err) });
         if ((meta.retryCount ?? 0) >= (meta.retryLimit ?? 0)) {
           await markRunFailed(runId, err);
@@ -81,7 +169,7 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
   for (const job of jobs) {
     // CAS pending → expired; null means a user already decided it (or a prior
     // run of this job did) — nothing to do
-    const expired = await decideApproval(db, job.data.approvalId, { status: "expired" });
+    const expired = await decideCheckpoint(db, job.data.approvalId, { status: "expired" });
     if (!expired) continue;
     deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
     await queue.enqueueRun(job.data.runId); // engine applies the template's onTimeout
@@ -91,8 +179,8 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
 async function scheduleApprovalExpiry(runId: string): Promise<void> {
   const rows = await db
     .select()
-    .from(approvals)
-    .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending")));
+    .from(checkpoints)
+    .where(and(eq(checkpoints.runId, runId), eq(checkpoints.status, "pending")));
   for (const approval of rows) {
     const payload = approval.payload as { timeoutMinutes?: number };
     const minutes = payload.timeoutMinutes ?? durationToMinutes("24h");
@@ -136,7 +224,10 @@ setInterval(async () => {
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
-    for (const runId of await findStrandedApprovalRuns(db)) await queue.enqueueRun(runId);
+    for (const runId of await findStrandedCheckpointRuns(db)) await queue.enqueueRun(runId);
+
+    // executor-availability heartbeat (the API's live window is minutes-wide)
+    await registerExecutors();
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }

@@ -175,3 +175,17 @@ export const models = pgTable("models", {
     .default("active"),
   createdAt: createdAtCol(),
 });
+
+// ── Executor registrations ────────────────────────────────────────────────────
+
+/**
+ * Which executors this deployment's workers actually registered (codex, for
+ * example, registers only when its CLI and auth are present). Workers upsert
+ * at boot and heartbeat on the sweeper interval; the API treats recent rows
+ * as the live set and rejects submissions that bind an unavailable executor —
+ * the static core catalog says what CAN exist, this table says what DOES.
+ */
+export const executorRegistrations = pgTable("executor_registrations", {
+  executorId: text("executor_id").primaryKey(),
+  registeredAt: tstz("registered_at").notNull().defaultNow(),
+});
