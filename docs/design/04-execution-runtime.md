@@ -82,6 +82,7 @@ Steps are the idempotency unit. On retry/resume, the engine loads `run_steps`, *
 
 - A step left `running` by a dead worker is marked `crashed`. A crash is an *interrupted* attempt, not a consumed retry: it adds one extra attempt (so even a no-retry step re-executes rather than being silently skipped), and the crashed attempt's `executor_session_id` is carried onto the recovery attempt so a resume-capable executor resumes that session.
 - Otherwise → restart the step as `attempt + 1` (templates must keep steps restart-safe; the workspace checkout is deterministic and `system` actions are idempotent).
+- Workspaces are **host-local**: when a succeeded checkout has no repository behind it on this host (the resume landed elsewhere, or the files were removed), the engine's `isIntact()` probe fails the run with `workspace_lost` up front instead of letting every subsequent step run against an empty directory — see [03-executor-abstraction](03-executor-abstraction.md) on the host-affinity boundary.
 
 Budget correctness on resume: the `BudgetMeter` initializes from **persisted** `token_usage` totals, and usage rows are keyed by `(run_id, step_id, attempt)` — a partially-executed attempt's cost is counted, never double-counted.
 
