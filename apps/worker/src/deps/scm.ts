@@ -21,9 +21,51 @@ export class GitScmService implements ScmService {
     runId: string,
     spec: { projectId: string; repo: unknown; branch: string },
   ): Promise<void> {
+    const dir = workspaceDirFor(runId);
+    // Finalizing commit: the patch evidence covers committed + staged +
+    // worktree changes, but a push ships only commits — anything the agent
+    // left uncommitted would be approved yet never published. Committing it
+    // platform-side makes evidence == PR by construction. add -A is safe:
+    // the sanitized paths are invisible to git (skip-worktree + info/exclude)
+    // and .gitignore is honored.
+    await git(["add", "-A"], dir);
+    const staged = await git(["status", "--porcelain"], dir);
+    if (staged.trim().length > 0) {
+      await git(
+        [
+          "-c",
+          "user.name=Agrippa",
+          "-c",
+          "user.email=agrippa@agrippa.local",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "-m",
+          "chore: commit remaining workspace changes",
+        ],
+        dir,
+        // host-level gitconfig (signing keys, hooksPath) must not affect the
+        // platform's commit
+        { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+      );
+    }
+    // publishing an empty branch would only fail later at pr.open with an
+    // opaque provider error — fail here with the real reason
+    try {
+      const head = (await git(["rev-parse", "HEAD"], dir)).trim();
+      const base = (
+        await git(["rev-parse", "--verify", "--quiet", "refs/agrippa/base"], dir)
+      ).trim();
+      if (head === base) {
+        throw new Error("nothing to publish — the run produced no commits and no changes");
+      }
+    } catch (err) {
+      if (String(err).includes("nothing to publish")) throw err;
+      // base ref missing (pre-fix workspace) — skip the emptiness check
+    }
     const { connection, token } = await loadRepoConnection(this.db, spec.projectId, spec.repo);
     const pushUrl = credentialedUrl(connection.url, token);
-    await git(["push", pushUrl, `${spec.branch}:${spec.branch}`], workspaceDirFor(runId));
+    await git(["push", pushUrl, `${spec.branch}:${spec.branch}`], dir);
   }
 
   async openPullRequest(_runId: string, spec: PullRequestSpec): Promise<{ url: string }> {

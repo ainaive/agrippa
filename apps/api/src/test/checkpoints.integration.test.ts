@@ -369,7 +369,7 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
       workBranch: string | null;
     }>(await member.request(`/api/v1/runs/${runId}`));
     // default branch name carries the run id's random tail for uniqueness
-    expect(detail.workBranch).toMatch(/^agrippa\/run-1-[0-9a-f]{8}$/);
+    expect(detail.workBranch).toMatch(/^agrippa\/run-1-[0-9a-f]{12}$/);
     expect(detail.agents.reviewer?.faberSlug).toBe("navigator");
     const pending = detail.checkpoints.find((ckpt) => ckpt.status === "pending");
     expect(pending?.kind).toBe("input");

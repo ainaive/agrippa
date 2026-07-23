@@ -141,21 +141,66 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(diff).toContain("new-file.ts");
   });
 
-  it("creates the work branch and pushes it back to the origin", async () => {
+  it("keeps sanitized paths out of diffs and agent commits", async () => {
+    const dir = workspaceDirFor(runId);
+    // platform-materialized + agent-created files under the sanitized paths —
+    // none of this may appear in evidence or ship in a commit
+    await Bun.write(path.join(dir, ".claude", "skills", "demo", "SKILL.md"), "# skill\n");
+    await Bun.write(path.join(dir, ".agrippa", "artifacts", "questions.json"), "{}\n");
+    await Bun.write(path.join(dir, ".claude", "agent-note.md"), "agent wrote this\n");
+
+    const diff = await workspace.diff(runId);
+    expect(diff).not.toContain("SKILL.md");
+    expect(diff).not.toContain("questions.json");
+    expect(diff).not.toContain("agent-note.md");
+    expect(diff).not.toContain(".claude/settings.json"); // no deletion hunk either
+
+    // an agent-style commit-everything must include neither the sanitized
+    // deletion nor the platform/agent files under those paths
+    await gitIn(dir, ["add", "-A"]);
+    await gitIn(dir, ["commit", "-m", "chore: agent commits everything"]);
+    const committed = await git(["show", "--stat", "--name-only", "HEAD"], dir);
+    expect(committed).not.toContain(".claude");
+    expect(committed).not.toContain(".agrippa");
+    expect(committed).toContain("new-file.ts"); // the legitimate change went in
+  });
+
+  it("creates the work branch, finalize-commits leftovers, and pushes", async () => {
     const branch = "agrippa/run-1-abcd1234";
+    const dir = workspaceDirFor(runId);
+    await Bun.write(path.join(dir, "left-uncommitted.txt"), "the agent forgot me\n");
     await scm.createBranch(runId, branch);
     // -B is idempotent for retries
     await scm.createBranch(runId, branch);
     await scm.push(runId, { projectId, repo: { repoConnectionId }, branch });
 
-    const res = Bun.spawnSync(["git", "rev-parse", "--verify", branch], {
-      cwd: sourceDir,
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    expect(res.exitCode).toBe(0);
+    const show = (spec: string) =>
+      Bun.spawnSync(["git", "show", spec], { cwd: sourceDir, stdout: "pipe", stderr: "pipe" });
+    // branch exists at the origin
+    expect(show(branch).exitCode).toBe(0);
+    // evidence == PR: the uncommitted file was finalize-committed and shipped
+    expect(show(`${branch}:left-uncommitted.txt`).exitCode).toBe(0);
+    expect(show(`${branch}:new-file.ts`).exitCode).toBe(0);
+    // the PR does NOT delete the sanitized-but-tracked repo files
+    expect(show(`${branch}:.claude/settings.json`).exitCode).toBe(0);
+    // nothing under the sanitized paths shipped either
+    expect(show(`${branch}:.claude/agent-note.md`).exitCode).not.toBe(0);
     // the diff still reports against the clone base after branching
     expect(await workspace.diff(runId)).toContain("committed line");
+  });
+
+  it("refuses to publish a run with no commits and no changes", async () => {
+    const emptyRunId = crypto.randomUUID();
+    await workspace.checkout(emptyRunId, {
+      repo: { repoConnectionId },
+      access: "readWrite",
+      projectId,
+    });
+    const branch = "agrippa/run-2-00000000dead";
+    await scm.createBranch(emptyRunId, branch);
+    expect(scm.push(emptyRunId, { projectId, repo: { repoConnectionId }, branch })).rejects.toThrow(
+      /nothing to publish/,
+    );
   });
 
   it("recovers an existing PR when the provider rejects the duplicate", async () => {

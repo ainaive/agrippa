@@ -980,6 +980,34 @@ class RunEngine {
     }
 
     if (step.action === "git.push") {
+      // Reviewer-drift guard: steps can touch the worktree AFTER the last
+      // patch artifact was stored (the reviewer runs between fix and publish,
+      // with the workspace's access mode), and the SCM finalizing commit will
+      // ship that state. Refresh stale patch evidence first, so what the
+      // timeline shows equals what the PR contains.
+      const patchContracts = this.template.spec.outputs.artifacts.filter(
+        (a) => a.kind === "patch" && this.producedArtifacts.has(a.key),
+      );
+      if (patchContracts.length > 0) {
+        const current = await this.deps.workspace.diff(this.run.id);
+        for (const contract of patchContracts) {
+          if (current && this.artifactValues[contract.key] !== current) {
+            await this.emit(
+              "artifact",
+              {
+                phaseId: phase.id,
+                stepId: step.id,
+                iteration: this.currentIteration,
+                key: contract.key,
+                kind: "patch",
+                refreshed: true,
+              },
+              row.id,
+            );
+            await this.storeArtifact(row, { key: contract.key, kind: "patch", inline: current });
+          }
+        }
+      }
       await this.wrapScm(step, () =>
         scm.push(this.run.id, {
           projectId: this.run.projectId,
@@ -1303,9 +1331,13 @@ class RunEngine {
       run: {
         id: this.run.id,
         number: this.run.number,
-        // UUIDv7: the LAST hex chars are random; the first are timestamp bits
-        // shared by every run created in the same ~minute — never use those
-        shortId: this.run.id.replaceAll("-", "").slice(-8),
+        // UUIDv7: the LAST 12 hex chars are 48 bits fully inside rand_b (the
+        // leading chars are timestamp bits shared by every run created in the
+        // same ~minute — never use those). 48 bits keeps birthday-collision
+        // odds negligible at fleet scale, which pr.open's duplicate-recovery
+        // by branch name depends on. (Bun's monotonic v7 counter, if any,
+        // lives in rand_a — the tail stays i.i.d. random.)
+        shortId: this.run.id.replaceAll("-", "").slice(-12),
         workBranch: this.run.workBranch,
         taskTitle: this.refs.taskTitle,
       },

@@ -6,7 +6,10 @@ import { REVIEW_SEVERITIES } from "./domain";
  * the API (checkpoint respond handlers), and the SPA (form rendering).
  *
  * A `questions` artifact drives an `input` checkpoint; a `review-report`
- * artifact drives a `review-gate` checkpoint. Both auto-pass when empty.
+ * artifact drives a `review-gate` checkpoint. A present, valid artifact with
+ * an empty list auto-passes; an absent questions artifact also auto-passes
+ * (nothing to ask), while an absent review report FAILS the gate — and a
+ * malformed artifact of either kind fails the producing step.
  */
 
 export const questionSchema = z
@@ -50,8 +53,10 @@ export const questionSchema = z
   });
 export type Question = z.infer<typeof questionSchema>;
 
-export const questionsArtifactSchema = z.object({
-  questions: z.array(questionSchema).max(20).default([]),
+// strict + required: `{}`, a typo'd key ({"questionz": …}), or stray
+// top-level fields must FAIL parsing, not silently read as "no questions"
+export const questionsArtifactSchema = z.strictObject({
+  questions: z.array(questionSchema).max(20),
 });
 export type QuestionsArtifact = z.infer<typeof questionsArtifactSchema>;
 
@@ -70,9 +75,12 @@ export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
 // interaction artifact that only exists on disk cannot drive its checkpoint);
 // a pathological maximal report can still exceed it, which the engine reports
 // as a distinct too-large contract violation rather than "no findings"
-export const reviewReportSchema = z.object({
+// strict + required findings: a malformed report must never read as a clean
+// one — `{}` or {"findingz": …} auto-passing the review gate is exactly the
+// failure this guards against. Nested objects stay tolerant of extra keys.
+export const reviewReportSchema = z.strictObject({
   summary: z.string().max(5000).default(""),
-  findings: z.array(reviewFindingSchema).max(50).default([]),
+  findings: z.array(reviewFindingSchema).max(50),
 });
 export type ReviewReport = z.infer<typeof reviewReportSchema>;
 

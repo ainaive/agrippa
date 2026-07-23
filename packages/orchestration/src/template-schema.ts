@@ -215,8 +215,11 @@ const checkpointCommon = {
 /**
  * `approval` gates on a human decision; `input` collects answers to the
  * questions artifact named by `source`; `review-gate` decides what happens to
- * the findings of the review-report artifact named by `source`. input and
- * review-gate auto-pass when their source artifact is absent or empty.
+ * the findings of the review-report artifact named by `source`. An input
+ * checkpoint auto-passes on an absent or valid-empty questions list; a
+ * review-gate auto-passes ONLY on a present, valid report with zero findings
+ * (an absent report fails the run — a gate never passes without evidence),
+ * and malformed sources fail the producing step at store time.
  */
 export const checkpointSpecSchema = z.discriminatedUnion("kind", [
   z.object({

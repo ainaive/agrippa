@@ -910,6 +910,7 @@ type V2Fixture = {
   runId: string;
   userId: string;
   scm: FakeScmService;
+  workspace: FakeWorkspaceManager;
   makeDeps: (
     implScript: Record<string, FakeStepBehavior>,
     revScript: Record<string, FakeStepBehavior>,
@@ -1045,7 +1046,7 @@ async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> 
       logger: silentLogger,
     };
   };
-  return { db, runId: run.id, userId: user.id, scm, makeDeps };
+  return { db, runId: run.id, userId: user.id, scm, workspace, makeDeps };
 }
 
 const FINDING_A = {
@@ -1133,8 +1134,8 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
     // scoped run numbers would otherwise collide across tasks)
     expect(fx.scm.branches).toHaveLength(1);
     expect(fx.scm.branches[0]?.runId).toBe(fx.runId);
-    expect(fx.scm.branches[0]?.name).toMatch(/^agrippa\/run-1-[0-9a-f]{8}$/);
-    expect(fx.scm.branches[0]?.name.endsWith(fx.runId.replaceAll("-", "").slice(-8))).toBe(true);
+    expect(fx.scm.branches[0]?.name).toMatch(/^agrippa\/run-1-[0-9a-f]{12}$/);
+    expect(fx.scm.branches[0]?.name.endsWith(fx.runId.replaceAll("-", "").slice(-12))).toBe(true);
 
     // answer → round 2 asks nothing → auto-pass → pauses at the plan approval
     await decideCheckpoint(fx.db, pending?.id as string, {
@@ -1205,10 +1206,10 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
 
     // platform-side push + PR with the waiver section in the body
     expect(fx.scm.pushes).toHaveLength(1);
-    expect(fx.scm.pushes[0]?.branch).toMatch(/^agrippa\/run-1-[0-9a-f]{8}$/);
+    expect(fx.scm.pushes[0]?.branch).toMatch(/^agrippa\/run-1-[0-9a-f]{12}$/);
     expect(fx.scm.pullRequests).toHaveLength(1);
     const pr = fx.scm.pullRequests[0]?.spec;
-    expect(pr?.head).toMatch(/^agrippa\/run-1-[0-9a-f]{8}$/);
+    expect(pr?.head).toMatch(/^agrippa\/run-1-[0-9a-f]{12}$/);
     expect(pr?.title).toBe("Deliver dark mode");
     expect(pr?.body).toContain("Delivered: Add dark mode");
     expect(pr?.body).toContain("## Accepted review findings");
@@ -1498,6 +1499,89 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
       .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "analyze")));
     expect(analyzeRows.at(-1)?.status).toBe("failed");
     expect((analyzeRows.at(-1)?.error as { code: string } | null)?.code).toBe("contract_violation");
+  });
+
+  it("refreshes stale patch evidence at push time (reviewer-drift guard)", async () => {
+    const fx = await setupV2Fixture();
+    const cleanReview: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          { type: "artifact", key: "review-report", kind: "json", inline: { findings: [] } },
+        ],
+        output: "clean",
+      },
+    };
+    const quickImpl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+
+    // plan approval first
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe(
+      "waiting_approval",
+    );
+    const [plan] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    await decideCheckpoint(fx.db, plan?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    // implement runs and stores its patch; review reports findings → gate pause
+    const dirtyReview: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "one issue",
+      },
+    };
+    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe(
+      "waiting_approval",
+    );
+    const [gate] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    await decideCheckpoint(fx.db, gate?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: {
+        kind: "review-gate",
+        outcome: "pass",
+        selectedFindings: [],
+        acceptedFindings: [FINDING_A] as never,
+        acceptedFindingIds: ["f1"],
+      },
+    });
+    // the workspace moved AFTER the implement step stored its patch (e.g. the
+    // reviewer wrote something) — push must refresh the evidence first
+    fx.workspace.diffOutput = "diff --git a/drifted b/drifted\n+reviewer touched this\n";
+    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe("succeeded");
+
+    const changeRows = await fx.db
+      .select()
+      .from(artifacts)
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "changes")));
+    const latest = changeRows.at(-1);
+    expect(String(latest?.inline)).toContain("reviewer touched this");
+    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+    expect(
+      events.some((e) => e.type === "artifact" && (e.payload as { refreshed?: boolean }).refreshed),
+    ).toBe(true);
   });
 
   it("retries transient scm push failures per the template retry policy", async () => {
