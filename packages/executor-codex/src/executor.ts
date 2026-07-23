@@ -44,6 +44,12 @@ function buildArgs(req: StepExecutionRequest): string[] {
     "exec",
     "--json",
     "--skip-git-repo-check",
+    // ~/.codex/config.toml could add MCP servers or other behavior the
+    // catalog says this executor doesn't have, bypassing project resource
+    // governance; auth still resolves from CODEX_HOME per the CLI docs.
+    // .rules execpolicy files (user or checked-out repo) are untrusted too.
+    "--ignore-user-config",
+    "--ignore-rules",
     "--cd",
     req.workspaceDir,
     "--sandbox",

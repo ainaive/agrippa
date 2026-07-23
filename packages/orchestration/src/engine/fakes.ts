@@ -130,6 +130,12 @@ export class FakeScmService implements ScmService {
 
   async openPullRequest(runId: string, spec: PullRequestSpec): Promise<{ url: string }> {
     this.consumeFailure("pr");
+    // like the real providers post-dup-recovery: re-opening for the same
+    // head/base returns the existing PR instead of creating a duplicate
+    const existing = this.pullRequests.findIndex(
+      (p) => p.spec.head === spec.head && p.spec.base === spec.base,
+    );
+    if (existing >= 0) return { url: `https://fake.scm/pr/${existing + 1}` };
     this.pullRequests.push({ runId, spec });
     return { url: `https://fake.scm/pr/${this.pullRequests.length}` };
   }

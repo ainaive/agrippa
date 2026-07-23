@@ -2,7 +2,17 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createDb, migrateDb, orgs, projects, repoConnections, users } from "@agrippa/db";
+import {
+  createDb,
+  encryptSecret,
+  loadSecretKey,
+  migrateDb,
+  orgs,
+  projects,
+  repoConnections,
+  secrets,
+  users,
+} from "@agrippa/db";
 import { sql } from "drizzle-orm";
 
 // WORKSPACE_ROOT is read at module load — point it at a scratch dir BEFORE
@@ -52,6 +62,7 @@ function makeSourceRepo(): string {
 
 describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   const runId = crypto.randomUUID();
+  let orgId: string;
   let projectId: string;
   let repoConnectionId: string;
   let sourceDir: string;
@@ -65,6 +76,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     await migrateDb(db);
 
     const [org] = await db.insert(orgs).values({ slug: "ws", name: "WS" }).returning();
+    orgId = org?.id as string;
     const [user] = await db
       .insert(users)
       .values({
@@ -144,6 +156,77 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(res.exitCode).toBe(0);
     // the diff still reports against the clone base after branching
     expect(await workspace.diff(runId)).toContain("committed line");
+  });
+
+  it("recovers an existing PR when the provider rejects the duplicate", async () => {
+    // a fake GHES forge: first POST creates, later POSTs 422; the lookup
+    // endpoint returns the open PR — the recovery path a lost response or a
+    // crash-before-store forces the retry through
+    const state = { created: 0, recoverable: true };
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "POST" && url.pathname === "/api/v3/repos/acme/widget/pulls") {
+          state.created += 1;
+          if (state.created === 1) {
+            return Response.json({ html_url: "https://forge.local/acme/widget/pull/7" });
+          }
+          return Response.json({ message: "Validation Failed" }, { status: 422 });
+        }
+        if (req.method === "GET" && url.pathname === "/api/v3/repos/acme/widget/pulls") {
+          if (!state.recoverable) return Response.json([]);
+          if (url.searchParams.get("head") !== "acme:agrippa/run-1-abcd1234") {
+            return Response.json([]);
+          }
+          return Response.json([{ html_url: "https://forge.local/acme/widget/pull/7" }]);
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      process.env.AGRIPPA_SECRET_KEY ??= btoa(
+        String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))),
+      );
+      const [secret] = await db
+        .insert(secrets)
+        .values({
+          orgId,
+          kind: "git_credential",
+          ciphertext: encryptSecret("forge-token", loadSecretKey()),
+        })
+        .returning();
+      const [forgeConn] = await db
+        .insert(repoConnections)
+        .values({
+          projectId,
+          provider: "github",
+          url: `http://127.0.0.1:${server.port}/acme/widget.git`,
+          defaultBranch: "main",
+          credentialSecretRef: secret?.id,
+        })
+        .returning();
+      const spec = {
+        projectId,
+        repo: { repoConnectionId: forgeConn?.id as string },
+        head: "agrippa/run-1-abcd1234",
+        base: "main",
+        title: "T",
+        body: "B",
+      };
+
+      const first = await scm.openPullRequest(runId, spec);
+      expect(first.url).toBe("https://forge.local/acme/widget/pull/7");
+      // the retry's 422 recovers the same PR instead of failing the run
+      const retried = await scm.openPullRequest(runId, spec);
+      expect(retried.url).toBe("https://forge.local/acme/widget/pull/7");
+      expect(state.created).toBe(2);
+      // a 422 with nothing to recover still surfaces the original error
+      state.recoverable = false;
+      expect(scm.openPullRequest(runId, spec)).rejects.toThrow(/422/);
+    } finally {
+      server.stop(true);
+    }
   });
 
   it("falls back to a worktree diff when the base ref is missing", async () => {

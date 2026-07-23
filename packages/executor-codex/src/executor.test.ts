@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
+import { probeCodexCli } from "./cli";
 import { createCodexExecutor } from "./executor";
 
 const FIXTURE = path.resolve(import.meta.dirname, "../test/fixtures/fake-codex.ts");
@@ -102,6 +103,9 @@ describe("codex executor", () => {
     expect(argv).toContain("exec");
     expect(argv).toContain("--json");
     expect(argv).toContain("--skip-git-repo-check");
+    // user config.toml (MCP servers…) and execpolicy rules must never load
+    expect(argv).toContain("--ignore-user-config");
+    expect(argv).toContain("--ignore-rules");
     expect(argv.slice(argv.indexOf("--sandbox"))[1]).toBe("workspace-write");
     expect(argv.slice(argv.indexOf("--model"))[1]).toBe("gpt-5-codex");
     expect(argv).toContain("approval_policy=never");
@@ -183,6 +187,15 @@ describe("codex executor", () => {
     expect(Date.now() - start).toBeLessThan(4000);
     const terminal = events.at(-1);
     expect(terminal?.type === "step.failed" && terminal.error.code).toBe("aborted");
+  });
+
+  it("registers only CLIs that support the config-isolation flags", () => {
+    const cliFixture = path.resolve(import.meta.dirname, "../test/fixtures/fake-codex-cli.ts");
+    const modern = probeCodexCli([process.execPath, cliFixture, "modern"]);
+    expect(modern).toEqual({ ok: true, version: "codex-cli 0.145.0" });
+    const legacy = probeCodexCli([process.execPath, cliFixture, "legacy"]);
+    expect(legacy.ok).toBe(false);
+    if (!legacy.ok) expect(legacy.reason).toContain("--ignore-user-config");
   });
 
   it("scrubs the subprocess environment down to the allow-list", async () => {

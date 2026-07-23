@@ -18,6 +18,11 @@ The requirement-delivery workflow (ADR-0010) puts two agents in one run: an impl
 - **A codex "API executor"** (drive the Responses API directly): re-implements the agent loop the CLI already provides — the exact trade ADR-0005 declined for Claude.
 - **Reimplementing containment in the adapter** instead of using Codex's sandbox: ADR-0009 exists because scattered enforcement rots; where the seam cannot reach, we document the boundary rather than fake it.
 
+## Addendum (2026-07-23, post-review)
+
+- Every `codex exec` invocation passes `--ignore-user-config` and `--ignore-rules`: without them, `~/.codex/config.toml` could add MCP servers and repo-shipped execpolicy rules could alter command policy, bypassing the governance the catalog's `mcp: false` claims. Auth still resolves from `CODEX_HOME` per the CLI docs, and the boot probe checks `codex exec --help` for the flags — an older CLI is refused registration rather than failing every step (or worse, silently running unisolated).
+- `pr.open` recovers duplicates: on GitHub 422 / GitLab 409 the service looks up the existing open PR by head/base and returns its URL — safe because work branches are unique per run (`agrippa/run-<n>-<shortId>`).
+
 ## Consequences
 
 - A third registered executor id (`codex-cli`), registered only when the CLI probe and auth succeed; templates referencing it still validate everywhere.

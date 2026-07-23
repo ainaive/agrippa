@@ -6,6 +6,8 @@ The `Executor` interface (`@agrippa/executor-core`) is the hinge of the architec
 
 Since agrippa/v2 (ADR-0010), a run may use **several executors** — one per agent slot, resolved from `runs.agent_bindings`. The API/SPA-visible registry is the static `EXECUTOR_CATALOG` in `@agrippa/core` (id → label, provider filter, capability flags); the worker registers concrete executors and asserts them against the catalog at boot, so capability drift fails fast instead of surfacing as runtime template errors. `StepExecutionRequest` carries `iteration` and `agentSlot` so executors and scripted fakes can distinguish loop rounds and slots.
 
+The catalog says what **can** exist; the `executor_registrations` table says what **does**: workers upsert their registered executor ids at boot and heartbeat them on the sweeper interval, and submission rejects a resolved binding whose executor has no recent registration (`executor_unavailable`) — a codex-less deployment fails at submit with an actionable error instead of exhausting queue retries. An empty live set (fresh deployment) skips the check. Known limitation: with heterogeneous workers (one has codex, one doesn't) a run can still land on the wrong worker and bounce through queue retries; per-executor queues are future work.
+
 ## Interface
 
 ```ts
@@ -118,6 +120,7 @@ All executor work happens in the **worker container** (`apps/worker`), one run p
 | `instructions` + `systemPrompt` + `priorContext` | one stdin prompt (`## Role` preamble + prior-step block + instructions + artifact directions) |
 | `model` | `--model <providerModelId>` |
 | `toolPolicy.access` | `--sandbox read-only` \| `--sandbox workspace-write` (native Seatbelt/Landlock), `-c sandbox_workspace_write.network_access=false`, `-c approval_policy=never` |
+| Config isolation | `--ignore-user-config` (no `~/.codex/config.toml` MCP servers riding in; auth still uses `CODEX_HOME`) + `--ignore-rules`; the boot probe refuses CLIs lacking these flags |
 | Streaming | `thread.started` → `step.started{sessionId}`; `item.*` agent messages / command executions → `message.completed` / `tool.*` |
 | Usage | `turn.completed.usage` — `input_tokens` is cached-inclusive and split into `inputTokens`/`cacheReadTokens` |
 | Resume | `codex exec resume <thread_id>` (same-step crash recovery only, per ADR-0005) |

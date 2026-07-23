@@ -89,6 +89,10 @@ Checkpoints **do not hold a worker slot**. When a checkpoint step pauses: a `che
 - approval `rejected` → run → `failed` with `error.code = "approval_rejected"`.
 - expiry → per-template `onTimeout` (`cancel | reject | approve` for approvals; `cancel` otherwise).
 
+**Gate-without-evidence rule.** Artifacts that drive an input/review-gate checkpoint are validated against the shared interaction schemas **at store time** — a malformed questions/review-report artifact fails the *producing step* with `contract_violation` while its attempt is still open, so template `retry`/`onFailure` apply. The checkpoint-time read is a strict backstop (it protects resumed runs whose artifact rows predate the validation): an **absent** review report fails the run — a gate must never pass on missing evidence — while an absent/empty questions list is the designed "nothing to ask" auto-pass; an artifact too large to inline gets a distinct error rather than being read as empty.
+
+**Work branch naming.** `git.branch` defaults to `agrippa/run-${run.number}-${run.shortId}`: run numbers are unique per *task*, so the run id's random tail (`run.shortId`, the last 8 hex chars of the UUIDv7 — the head is timestamp bits) disambiguates across tasks. Unique branches are also what makes `pr.open`'s duplicate-recovery safe: a provider 422/409 on retry looks up the existing open PR by head/base and returns its URL.
+
 Decisions are a compare-and-swap on `status = 'pending'` (`run-lifecycle.decideCheckpoint`), so a user decision and the expiry worker can't overwrite each other. The decision is durable before the resume enqueue; if that enqueue is lost, the reconciliation sweeper re-enqueues any `waiting_approval` run whose checkpoints are all decided, so a run can't be stranded.
 
 ### Loops

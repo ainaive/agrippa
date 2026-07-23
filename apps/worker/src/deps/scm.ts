@@ -55,14 +55,15 @@ export class GitScmService implements ScmService {
     // github.com uses api.github.com; GHES exposes the API under /api/v3
     const apiBase =
       url.hostname === "github.com" ? "https://api.github.com" : `${url.origin}/api/v3`;
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+      "user-agent": "agrippa",
+    };
     const response = await fetch(`${apiBase}/repos/${owner}/${repo}/pulls`, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: "application/vnd.github+json",
-        "content-type": "application/json",
-        "user-agent": "agrippa",
-      },
+      headers,
       body: JSON.stringify({
         title: spec.title,
         head: spec.head,
@@ -72,6 +73,21 @@ export class GitScmService implements ScmService {
     });
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
+      // A retry after a lost response (or a crash before the URL was stored)
+      // re-POSTs and GitHub answers 422. Recover the existing open PR by
+      // head/base instead of failing a run whose PR actually exists — work
+      // branches are unique per run, so the lookup can't match another run's.
+      if (response.status === 422) {
+        const lookup = await fetch(
+          `${apiBase}/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(`${owner}:${spec.head}`)}&base=${encodeURIComponent(spec.base)}&state=open`,
+          { headers },
+        );
+        if (lookup.ok) {
+          const open = (await lookup.json()) as Array<{ html_url?: string }>;
+          const existing = open[0]?.html_url;
+          if (existing) return { url: existing };
+        }
+      }
       throw new Error(`GitHub PR creation failed (${response.status}): ${detail}`);
     }
     const json = (await response.json()) as { html_url?: string };
@@ -86,24 +102,32 @@ export class GitScmService implements ScmService {
   ): Promise<{ url: string }> {
     const url = new URL(repoUrl);
     const projectPath = url.pathname.replace(/^\//, "").replace(/\.git$/, "");
-    const response = await fetch(
-      `${url.origin}/api/v4/projects/${encodeURIComponent(projectPath)}/merge_requests`,
-      {
-        method: "POST",
-        headers: {
-          "private-token": token,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          source_branch: spec.head,
-          target_branch: spec.base,
-          title: spec.title,
-          description: spec.body,
-        }),
-      },
-    );
+    const apiBase = `${url.origin}/api/v4/projects/${encodeURIComponent(projectPath)}`;
+    const headers = { "private-token": token, "content-type": "application/json" };
+    const response = await fetch(`${apiBase}/merge_requests`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        source_branch: spec.head,
+        target_branch: spec.base,
+        title: spec.title,
+        description: spec.body,
+      }),
+    });
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
+      // GitLab reports an existing MR for the branch pair as 409 — recover it
+      if (response.status === 409) {
+        const lookup = await fetch(
+          `${apiBase}/merge_requests?source_branch=${encodeURIComponent(spec.head)}&target_branch=${encodeURIComponent(spec.base)}&state=opened`,
+          { headers },
+        );
+        if (lookup.ok) {
+          const open = (await lookup.json()) as Array<{ web_url?: string }>;
+          const existing = open[0]?.web_url;
+          if (existing) return { url: existing };
+        }
+      }
       throw new Error(`GitLab MR creation failed (${response.status}): ${detail}`);
     }
     const json = (await response.json()) as { web_url?: string };

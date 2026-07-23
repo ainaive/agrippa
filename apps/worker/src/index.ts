@@ -41,18 +41,18 @@ const executors: Record<string, Executor> = {
   "claude-agent-sdk": createClaudeExecutor(),
   fake: new DemoExecutor(),
 };
-// codex registers only when the CLI is actually usable on this host
-const codexVersion = probeCodexCli();
+// codex registers only when the CLI is actually usable on this host — which
+// includes supporting the config-isolation flags every step passes
+const codexProbe = probeCodexCli();
 const codexAuth = Boolean(
   process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || process.env.CODEX_HOME,
 );
-if (codexVersion && codexAuth) {
+if (codexProbe.ok && codexAuth) {
   executors["codex-cli"] = createCodexExecutor();
-  console.log(`[worker] codex executor registered (${codexVersion})`);
+  console.log(`[worker] codex executor registered (${codexProbe.version})`);
 } else {
-  console.log(
-    `[worker] codex executor not registered (cli=${codexVersion ?? "missing"} auth=${codexAuth})`,
-  );
+  const reason = codexProbe.ok ? "no auth configured" : codexProbe.reason;
+  console.log(`[worker] codex executor not registered (${reason})`);
 }
 // the static catalog in @agrippa/core is what the API/SPA trust — a drifting
 // capability set here would let templates pass validation and fail at runtime
