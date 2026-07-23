@@ -104,6 +104,7 @@ export function SubmitTaskPage() {
               <AgentSlotPicker
                 agents={detail.agents}
                 fabriOptions={detail.fabriOptions}
+                availableExecutorIds={detail.availableExecutorIds}
                 value={agentOverrides}
                 onChange={setAgentOverrides}
               />

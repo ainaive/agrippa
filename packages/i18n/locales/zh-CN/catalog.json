@@ -18,6 +18,7 @@
     "docsUnsupported": "文档引用暂不可用。",
     "agents": "代理",
     "agentFaber": "人设",
-    "agentExecutor": "引擎"
+    "agentExecutor": "引擎",
+    "agentUnavailable": "当前部署不可用"
   }
 }

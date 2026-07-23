@@ -23,11 +23,14 @@ export type AgentOverrides = Record<string, { faberId?: string; executorId?: str
 export function AgentSlotPicker({
   agents,
   fabriOptions,
+  availableExecutorIds,
   value,
   onChange,
 }: {
   agents: Record<string, AgentSlotMeta>;
   fabriOptions: FaberOption[];
+  /** Live executor ids from worker heartbeats; null = none advertised yet. */
+  availableExecutorIds: string[] | null;
   value: AgentOverrides;
   onChange: (next: AgentOverrides) => void;
 }) {
@@ -92,11 +95,16 @@ export function AgentSlotPicker({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {Object.entries(EXECUTOR_CATALOG).map(([id, entry]) => (
-                    <SelectItem key={id} value={id}>
-                      {entry.label}
-                    </SelectItem>
-                  ))}
+                  {Object.entries(EXECUTOR_CATALOG).map(([id, entry]) => {
+                    const unavailable =
+                      availableExecutorIds !== null && !availableExecutorIds.includes(id);
+                    return (
+                      <SelectItem key={id} value={id} disabled={unavailable}>
+                        {entry.label}
+                        {unavailable ? ` — ${t("form.agentUnavailable")}` : ""}
+                      </SelectItem>
+                    );
+                  })}
                 </SelectContent>
               </Select>
             </div>

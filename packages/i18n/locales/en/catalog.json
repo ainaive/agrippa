@@ -18,6 +18,7 @@
     "docsUnsupported": "Document references are not available yet.",
     "agents": "Agents",
     "agentFaber": "Persona",
-    "agentExecutor": "Engine"
+    "agentExecutor": "Engine",
+    "agentUnavailable": "not available in this deployment"
   }
 }

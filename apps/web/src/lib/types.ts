@@ -60,6 +60,8 @@ export type AgentSlotMeta = {
   defaultFaberId: string | null;
   defaultExecutorId: string;
   executorLabel: string;
+  /** Whether a worker in this deployment has registered the default executor. */
+  available: boolean;
 };
 
 export type FaberOption = {
@@ -81,6 +83,8 @@ export type TaskTypeDetail = {
   budgets: { maxCostUsd?: number; maxDurationMinutes?: number } | null;
   /** Agent slots of the pinned template (null before any published version). */
   agents: Record<string, AgentSlotMeta> | null;
+  /** Live executor ids from worker heartbeats; null = none advertised yet. */
+  availableExecutorIds: string[] | null;
   /** Active fabri selectable for overridable slots. */
   fabriOptions: FaberOption[];
 };
@@ -213,6 +217,7 @@ export type RunComment = {
 export type Artifact = {
   id: string;
   artifactKey: string;
+  iteration: number;
   kind: string;
   name: string;
   size: number | null;

@@ -4,6 +4,7 @@ import { upgradeCompiledTemplate } from "@agrippa/orchestration";
 import { asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
+import { liveExecutorIds } from "../lib/executors";
 
 const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
 
@@ -60,6 +61,7 @@ export const catalogRoutes = new Hono<AppEnv>()
     let inputs: unknown[] = [];
     let budgets: unknown = null;
     let agents: Record<string, unknown> | null = null;
+    const live = await liveExecutorIds(db);
     if (template?.latestPublishedVersionId) {
       const [row] = await db
         .select()
@@ -90,6 +92,8 @@ export const catalogRoutes = new Hono<AppEnv>()
                 executorLabel: isExecutorId(executorId)
                   ? EXECUTOR_CATALOG[executorId].label
                   : executorId,
+                // no live rows = no worker has advertised yet → assume available
+                available: live.size === 0 || live.has(executorId),
               },
             ];
           }),
@@ -115,6 +119,8 @@ export const catalogRoutes = new Hono<AppEnv>()
       inputs,
       budgets,
       agents,
+      // null = no worker heartbeat yet (fresh deployment) — treat all as available
+      availableExecutorIds: live.size === 0 ? null : [...live],
       fabriOptions,
     });
   });

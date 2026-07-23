@@ -166,6 +166,14 @@ export async function resolveAgentBindings(
   compiled: CompiledTemplate,
   defaults: { faberId: string; executorId: string },
   overrides: Record<string, { executorId?: string; faberId?: string }> = {},
+  opts: {
+    /**
+     * The deployment's live executor set (worker heartbeats). undefined or
+     * empty — no worker has advertised yet (fresh deployment, tests) — skips
+     * the availability check rather than blocking every submission.
+     */
+    registeredExecutors?: Set<string>;
+  } = {},
 ): Promise<AgentBindingResolution> {
   const slots = compiled.spec.agents;
   const slotIds = Object.keys(slots);
@@ -235,6 +243,18 @@ export async function resolveAgentBindings(
     const entry: ExecutorCatalogEntry | null = isExecutorId(executorId)
       ? EXECUTOR_CATALOG[executorId]
       : null;
+    // the FINAL resolved binding must be live in this deployment — templates
+    // can pin an executor (the delivery reviewer pins codex-cli) with no
+    // override involved, so checking overrides alone would miss it. Runs
+    // before model resolution: "this deployment has no codex" beats "no
+    // openai model satisfies the role" when both would fire.
+    const registered = opts.registeredExecutors;
+    if (entry && !demoMode && registered && registered.size > 0 && !registered.has(executorId)) {
+      throw new SubmitError(
+        "executor_unavailable",
+        `Executor '${executorId}' is not available in this deployment (no worker has registered it)`,
+      );
+    }
     if (entry) {
       for (const step of allSteps) {
         if (step.kind !== "agent" || (step.agent ?? slotIds[0]) !== slotId) continue;

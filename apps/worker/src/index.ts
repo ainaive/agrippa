@@ -7,7 +7,7 @@ import {
   QUEUE_RUN_EXECUTE,
   type RunExecutePayload,
 } from "@agrippa/core";
-import { checkpoints, createDb, runs } from "@agrippa/db";
+import { checkpoints, createDb, executorRegistrations, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
@@ -67,6 +67,26 @@ for (const [id, executor] of Object.entries(executors)) {
     }
   }
 }
+
+/**
+ * Advertise what this worker actually registered: the API rejects submissions
+ * that bind an executor with no recent registration, so a codex-less
+ * deployment fails at submit with an actionable error instead of exhausting
+ * queue retries later. Heartbeated below so a reconfigured deployment ages
+ * out of the live set.
+ */
+async function registerExecutors(): Promise<void> {
+  for (const executorId of Object.keys(executors)) {
+    await db
+      .insert(executorRegistrations)
+      .values({ executorId, registeredAt: new Date() })
+      .onConflictDoUpdate({
+        target: executorRegistrations.executorId,
+        set: { registeredAt: new Date() },
+      });
+  }
+}
+await registerExecutors();
 
 const deps: EngineDeps = {
   db,
@@ -172,6 +192,9 @@ setInterval(async () => {
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
     for (const runId of await findStrandedCheckpointRuns(db)) await queue.enqueueRun(runId);
+
+    // executor-availability heartbeat (the API's live window is minutes-wide)
+    await registerExecutors();
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }

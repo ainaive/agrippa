@@ -46,6 +46,7 @@ import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
+import { liveExecutorIds } from "../lib/executors";
 import { assertQuotaHeadroom } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
@@ -316,13 +317,15 @@ export const executionRoutes = new Hono<AppEnv>()
           mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
         });
         // every agent slot resolves to a concrete faber + executor here (with
-        // per-slot provider-filtered models) and freezes onto the run
+        // per-slot provider-filtered models and a check against the executors
+        // the deployment's workers actually registered) and freezes onto the run
         const agentResolution = await resolveAgentBindings(
           db,
           projectId,
           compiled,
           { faberId: taskType.defaultFaberId, executorId: DEFAULT_EXECUTOR },
           input.agents ?? {},
+          { registeredExecutors: await liveExecutorIds(db) },
         );
 
         const { task, run } = await db.transaction(async (tx) => {
@@ -698,10 +701,13 @@ export const executionRoutes = new Hono<AppEnv>()
   // ── Artifacts ───────────────────────────────────────────────────────────────
   .get("/runs/:id/artifacts", async (c) => {
     const run = await loadRunScoped(c, c.req.param("id"), "viewer");
+    // creation order matters: loop rounds re-produce the same key, and the
+    // checkpoint panels must present the LATEST row per key, not the first
     const rows = await c.var.db
       .select({
         id: artifacts.id,
         artifactKey: artifacts.artifactKey,
+        iteration: artifacts.iteration,
         kind: artifacts.kind,
         name: artifacts.name,
         mime: artifacts.mime,
@@ -709,7 +715,8 @@ export const executionRoutes = new Hono<AppEnv>()
         createdAt: artifacts.createdAt,
       })
       .from(artifacts)
-      .where(eq(artifacts.runId, run.id));
+      .where(eq(artifacts.runId, run.id))
+      .orderBy(asc(artifacts.createdAt), asc(artifacts.id));
     return c.json(rows);
   })
   .get("/artifacts/:id/download", async (c) => {

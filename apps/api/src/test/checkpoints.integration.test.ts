@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
 import {
   checkpoints,
+  executorRegistrations,
   fabri,
   orchestrationTemplates,
   repoConnections,
@@ -299,7 +300,11 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
     expect(badSlot.status).toBe(400);
     expect((await jsonOf<{ code: string }>(badSlot)).code).toBe("slot_unknown");
 
-    // codex needs an openai model — none granted, so submit fails actionably
+    // codex needs an openai model — none granted, so submit fails actionably.
+    // NOTE: this expects model_unresolvable only while no executor
+    // registrations exist (the availability check is skipped on an empty live
+    // set); a fixture that seeds registrations first would flip the code to
+    // executor_unavailable, which is checked separately below.
     const noProvider = await member.request(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST",
       json: {
@@ -311,6 +316,30 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
     });
     expect(noProvider.status).toBe(400);
     expect((await jsonOf<{ code: string }>(noProvider)).code).toBe("model_unresolvable");
+
+    // with worker heartbeats present, an executor nobody registered (or whose
+    // registration is stale) is rejected before model resolution
+    await db.insert(executorRegistrations).values([
+      { executorId: "claude-agent-sdk", registeredAt: new Date() },
+      { executorId: "fake", registeredAt: new Date() },
+      { executorId: "codex-cli", registeredAt: new Date(Date.now() - 60 * 60 * 1000) }, // stale
+    ]);
+    const unavailable = await member.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId,
+        title: "Deliver it",
+        params: { requirement: "Add dark mode", repo: { repoConnectionId } },
+        agents: { reviewer: { executorId: "codex-cli" } },
+      },
+    });
+    expect(unavailable.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(unavailable)).code).toBe("executor_unavailable");
+    // the task-type detail reflects deployment availability for the pickers
+    const detailWithLive = await jsonOf<{ availableExecutorIds: string[] | null }>(
+      await member.request(`/api/v1/task-types/${taskTypeId}`),
+    );
+    expect(detailWithLive.availableExecutorIds?.sort()).toEqual(["claude-agent-sdk", "fake"]);
 
     const res = await member.request(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST",

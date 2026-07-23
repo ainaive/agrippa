@@ -43,6 +43,13 @@
       "when": 1784757171366,
       "tag": "0005_requirement-delivery",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784771086602,
+      "tag": "0006_executor-registrations",
+      "breakpoints": true
     }
   ]
 }

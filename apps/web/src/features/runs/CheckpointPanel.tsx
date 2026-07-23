@@ -60,7 +60,9 @@ export function CheckpointPanel({
   const presentKeys = checkpoint.payload.present ?? [];
   const presented = presentKeys.map((key) => ({
     key,
-    artifact: artifacts.find((a) => a.artifactKey === key),
+    // loop rounds re-produce the same key — present the LATEST row, not the
+    // first (the API returns rows in creation order)
+    artifact: artifacts.findLast((a) => a.artifactKey === key),
   }));
   // Evidence gating only matters when the checkpoint presents something:
   // while it loads, no decision; if it failed, approving blind is forbidden
