@@ -1,8 +1,10 @@
 import {
   type CheckpointStoredResponse,
   isTerminalRunStatus,
+  type Question,
   questionsArtifactSchema,
   type ReviewFinding,
+  type ReviewReport,
   type RunStatus,
   reviewReportSchema,
   type StepStatus,
@@ -183,6 +185,8 @@ class RunEngine {
   private artifactValues: Record<string, unknown> = {};
   /** Latest decided response per checkpoint id — the `checkpoints.<id>` root. */
   private checkpointResponses: Record<string, CheckpointStoredResponse> = {};
+  /** Artifact keys that drive an input/review-gate checkpoint — validated at store time. */
+  private interactionSources = new Map<string, "input" | "review-gate">();
   // rowKey → crashed-attempt count + last executor session, for crash resume
   private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
   // scrubs known secret values from event payloads before persist/publish
@@ -205,6 +209,13 @@ class RunEngine {
         output: entry.outputCostPerMtok,
         modelId: entry.modelId,
       });
+    }
+    for (const { phase } of flattenPhases(template.spec.phases)) {
+      for (const step of phase.steps) {
+        if (step.kind === "checkpoint" && step.checkpoint.kind !== "approval") {
+          this.interactionSources.set(step.checkpoint.source, step.checkpoint.kind);
+        }
+      }
     }
   }
 
@@ -588,18 +599,59 @@ class RunEngine {
     };
   }
 
-  /** Auto-pass response when the source artifact is absent or empty; null = must pause. */
-  private autoPassResponse(spec: CheckpointStep["checkpoint"]): CheckpointStoredResponse | null {
-    if (spec.kind === "approval") return null;
-    const value = jsonValue(this.artifactValues[spec.source]);
-    if (spec.kind === "input") {
-      const parsed = questionsArtifactSchema.safeParse(value ?? { questions: [] });
-      const questions = parsed.success ? parsed.data.questions : [];
-      return questions.length === 0 ? { kind: "input", outcome: "pass", auto: true } : null;
+  /**
+   * Read and validate a checkpoint's source artifact. The primary validation
+   * happens at store time (the producing step fails, retryably); this re-check
+   * protects resumed runs whose artifact rows predate that validation. A gate
+   * must never pass on missing or unreadable evidence, so every non-ok state
+   * for a review-gate (and invalid/too-large for input) fails the run.
+   */
+  private readInteractionSource(
+    spec: Exclude<CheckpointStep["checkpoint"], { kind: "approval" }>,
+    checkpointId: string,
+  ): { questions: Question[] } | ReviewReport {
+    const produced = this.producedArtifacts.has(spec.source);
+    const raw = this.artifactValues[spec.source];
+    if (produced && raw === "") {
+      // stored, but too large to inline — never classify as "absent"
+      throw new RunFailure(
+        "contract_violation",
+        `checkpoint ${checkpointId}: source artifact '${spec.source}' exceeds the inline limit and cannot drive the checkpoint`,
+      );
     }
-    const parsed = reviewReportSchema.safeParse(value ?? { findings: [] });
-    const findings = parsed.success ? parsed.data.findings : [];
-    return findings.length === 0
+    if (!produced) {
+      if (spec.kind === "input") return { questions: [] }; // no questions is the designed signal
+      throw new RunFailure(
+        "contract_violation",
+        `checkpoint ${checkpointId}: review gate has no '${spec.source}' report — a gate without evidence cannot pass`,
+      );
+    }
+    const value = jsonValue(raw);
+    const parsed =
+      spec.kind === "input"
+        ? questionsArtifactSchema.safeParse(value)
+        : reviewReportSchema.safeParse(value);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new RunFailure(
+        "contract_violation",
+        `checkpoint ${checkpointId}: source artifact '${spec.source}' is invalid — ${issue?.message ?? "schema mismatch"}`,
+      );
+    }
+    return parsed.data as { questions: Question[] } | ReviewReport;
+  }
+
+  /** Auto-pass response when the source artifact is legitimately empty; null = must pause. */
+  private autoPassResponse(
+    spec: CheckpointStep["checkpoint"],
+    checkpointId: string,
+  ): CheckpointStoredResponse | null {
+    if (spec.kind === "approval") return null;
+    const source = this.readInteractionSource(spec, checkpointId);
+    if ("questions" in source) {
+      return source.questions.length === 0 ? { kind: "input", outcome: "pass", auto: true } : null;
+    }
+    return source.findings.length === 0
       ? {
           kind: "review-gate",
           outcome: "pass",
@@ -612,15 +664,14 @@ class RunEngine {
   }
 
   /** The parsed source content snapshotted into the pending row for the UI. */
-  private sourceSnapshot(spec: CheckpointStep["checkpoint"]): Record<string, unknown> {
+  private sourceSnapshot(
+    spec: CheckpointStep["checkpoint"],
+    checkpointId: string,
+  ): Record<string, unknown> {
     if (spec.kind === "approval") return {};
-    const value = jsonValue(this.artifactValues[spec.source]);
-    if (spec.kind === "input") {
-      const parsed = questionsArtifactSchema.safeParse(value ?? { questions: [] });
-      return { questions: parsed.success ? parsed.data.questions : [] };
-    }
-    const parsed = reviewReportSchema.safeParse(value ?? { findings: [] });
-    return parsed.success ? { summary: parsed.data.summary, findings: parsed.data.findings } : {};
+    const source = this.readInteractionSource(spec, checkpointId);
+    if ("questions" in source) return { questions: source.questions };
+    return { summary: source.summary, findings: source.findings };
   }
 
   /**
@@ -653,7 +704,7 @@ class RunEngine {
       );
 
     if (!row) {
-      const auto = this.autoPassResponse(spec);
+      const auto = this.autoPassResponse(spec, step.id);
       if (auto) {
         await this.db.insert(checkpoints).values({
           runId: this.run.id,
@@ -679,7 +730,7 @@ class RunEngine {
         });
         return "done";
       }
-      const snapshot = this.sourceSnapshot(spec);
+      const snapshot = this.sourceSnapshot(spec, step.id);
       await this.db.insert(checkpoints).values({
         runId: this.run.id,
         checkpointId: step.id,
@@ -910,7 +961,9 @@ class RunEngine {
     }
 
     if (step.action === "git.branch") {
-      const name = interpolate(step.with.name ?? "agrippa/run-${run.number}", ctx);
+      // the default includes the run id's random tail: run.number is only
+      // unique per TASK, so "agrippa/run-1" would collide across tasks
+      const name = interpolate(step.with.name ?? "agrippa/run-${run.number}-${run.shortId}", ctx);
       await this.wrapScm(step, () => scm.createBranch(this.run.id, name));
       await this.db.update(runs).set({ workBranch: name }).where(eq(runs.id, this.run.id));
       this.run.workBranch = name;
@@ -1087,6 +1140,14 @@ class RunEngine {
       const contract = this.template.spec.outputs.artifacts.find((a) => a.key === key);
       if (contract?.kind === "patch") {
         const diff = await this.deps.workspace.diff(this.run.id);
+        // fail the producing step (retryable) instead of letting the run march
+        // on to push/pr.open and only die at the end-of-flow contract check
+        if (!diff && contract.required) {
+          throw new StepFailed(`step produced no changes for required patch '${key}'`, {
+            code: "contract_violation",
+            message: `the workspace diff for required artifact '${key}' is empty — no changes were made`,
+          });
+        }
         await this.storeArtifact(row, { key, kind: "patch", inline: diff });
       }
     }
@@ -1242,6 +1303,9 @@ class RunEngine {
       run: {
         id: this.run.id,
         number: this.run.number,
+        // UUIDv7: the LAST hex chars are random; the first are timestamp bits
+        // shared by every run created in the same ~minute — never use those
+        shortId: this.run.id.replaceAll("-", "").slice(-8),
         workBranch: this.run.workBranch,
         taskTitle: this.refs.taskTitle,
       },
@@ -1323,6 +1387,30 @@ class RunEngine {
     // (and don't mark the key produced, so a required-but-empty artifact still
     // fails the contract rather than passing it)
     if (stored.size === 0 && stored.storageRef === null) return;
+    // an artifact that drives a checkpoint must parse against its interaction
+    // schema NOW, while the producing step's attempt is still open — so a
+    // malformed report fails the step (template retry/onFailure apply) instead
+    // of silently auto-passing the gate later
+    const interactionKind = this.interactionSources.get(event.key);
+    if (interactionKind) {
+      if (stored.inline === null) {
+        throw new StepFailed(`interaction artifact '${event.key}' exceeds the inline limit`, {
+          code: "contract_violation",
+          message: `artifact '${event.key}' is too large to drive its checkpoint (${stored.size} bytes; inline limit applies)`,
+        });
+      }
+      const parsed =
+        interactionKind === "input"
+          ? questionsArtifactSchema.safeParse(jsonValue(stored.inline))
+          : reviewReportSchema.safeParse(jsonValue(stored.inline));
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        throw new StepFailed(`interaction artifact '${event.key}' is invalid`, {
+          code: "contract_violation",
+          message: `artifact '${event.key}' does not match the ${interactionKind} schema: ${issue?.message ?? "schema mismatch"}`,
+        });
+      }
+    }
     await this.db.insert(artifacts).values({
       runId: this.run.id,
       stepId: row.id,

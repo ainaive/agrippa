@@ -60,10 +60,11 @@ spec:
         - id: checkout
           kind: system
           action: workspace.checkout
+        # default branch name: agrippa/run-<n>-<shortId> — the shortId suffix
+        # keeps branches unique across tasks (run numbers restart per task)
         - id: branch
           kind: system
           action: git.branch
-          with: { name: "agrippa/run-${run.number}" }
 
     - kind: loop
       id: clarify
@@ -88,10 +89,13 @@ spec:
                 If material ambiguities remain, write the questions artifact as JSON:
                 {"questions": [{"id": "q1", "text": "…", "kind": "text|select|boolean",
                 "options": ["…"], "required": true, "recommended": "your suggested answer"}]}
-                Ask only what genuinely changes the implementation; recommend an answer
-                for every question. If everything is clear, write an EMPTY questions list
-                ({"questions": []}) and write clarification-notes summarizing the agreed
-                scope, the affected areas of the code, and the acceptance criteria.
+                Rules: select questions MUST list their options; `recommended` must match
+                the question kind (true/false for boolean, one of the options for select,
+                a string otherwise). Ask only what genuinely changes the implementation;
+                recommend an answer for every question. If everything is clear, write an
+                EMPTY questions list ({"questions": []}) and write clarification-notes
+                summarizing the agreed scope, the affected areas of the code, and the
+                acceptance criteria.
 
                 --- REQUIREMENT ---
                 ${inputs.requirement}
@@ -171,6 +175,9 @@ spec:
               kind: agent
               agent: reviewer
               model: { role: review }
+              # an invalid review-report fails this step at store time; one
+              # retry gives the reviewer a second chance at well-formed JSON
+              retry: { max: 1 }
               instructions: |
                 Review the committed changes on this branch against the base branch
                 (`git log ${inputs.branch}..HEAD`, `git diff ${inputs.branch}...HEAD`)

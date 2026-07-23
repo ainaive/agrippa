@@ -18,6 +18,9 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? path.join(tmpdir(), "agripp
  */
 const REPO_CONFIG_TO_STRIP = [".claude", ".mcp.json", ".agrippa"];
 
+/** Records the clone-time HEAD; diff() reports everything since it. */
+const BASE_REF = "refs/agrippa/base";
+
 async function sanitizeWorkspace(dir: string): Promise<void> {
   for (const entry of REPO_CONFIG_TO_STRIP) {
     await rm(path.join(dir, entry), { recursive: true, force: true });
@@ -120,6 +123,11 @@ export class GitWorkspaceManager implements WorkspaceManager {
     // scrub the credential from the remote before any agent code runs
     await git(["remote", "set-url", "origin", connection.url], dir);
     await sanitizeWorkspace(dir);
+    // pin the checkout base so diff() can include COMMITTED work — templates
+    // instruct agents to commit, and a plain worktree diff would come back
+    // empty for a cleanly committed change. A ref (not a marker file) is
+    // gc-safe and gives a clean existence check.
+    await git(["update-ref", BASE_REF, "HEAD"], dir);
   }
 
   async diff(runId: string): Promise<string> {
@@ -127,8 +135,24 @@ export class GitWorkspaceManager implements WorkspaceManager {
     try {
       // intent-to-add so new files show up in the diff
       await git(["add", "-A", "-N"], dir);
-      return await git(["diff"], dir);
-    } catch {
+      let hasBase = true;
+      try {
+        await git(["rev-parse", "--verify", "--quiet", BASE_REF], dir);
+      } catch {
+        hasBase = false; // workspace from before the base ref existed
+      }
+      if (!hasBase) return await git(["diff"], dir);
+      // diff against the clone base: committed + staged + worktree changes.
+      // The sanitization deletions (.claude/.mcp.json/.agrippa are stripped
+      // right after clone) must not pollute every patch, hence the excludes.
+      return await git(
+        ["diff", BASE_REF, "--", ".", ...REPO_CONFIG_TO_STRIP.map((p) => `:(exclude)${p}`)],
+        dir,
+      );
+    } catch (err) {
+      // an empty required patch fails the producing step upstream — surface
+      // why the diff itself broke instead of silently reporting "no changes"
+      console.warn(`[worker] workspace diff failed for run ${runId}: ${String(err)}`);
       return "";
     }
   }

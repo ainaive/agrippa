@@ -124,7 +124,25 @@ const SCRIPT: Record<string, FakeStepBehavior> = {
         type: "artifact",
         key: "questions",
         kind: "json",
-        inline: { questions: [{ id: "q1", text: "Which flavor?", recommended: "vanilla" }] },
+        inline: {
+          questions: [
+            { id: "q1", text: "Which flavor?", recommended: "vanilla" },
+            {
+              id: "q2",
+              text: "Which store?",
+              kind: "select",
+              options: ["a", "b"],
+              required: false,
+            },
+            {
+              id: "q3",
+              text: "Feature flag?",
+              kind: "boolean",
+              required: false,
+              recommended: true,
+            },
+          ],
+        },
       },
     ],
   },
@@ -321,7 +339,8 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
       checkpoints: Array<{ id: string; kind: string; status: string }>;
       workBranch: string | null;
     }>(await member.request(`/api/v1/runs/${runId}`));
-    expect(detail.workBranch).toBe(`agrippa/run-1`);
+    // default branch name carries the run id's random tail for uniqueness
+    expect(detail.workBranch).toMatch(/^agrippa\/run-1-[0-9a-f]{8}$/);
     expect(detail.agents.reviewer?.faberSlug).toBe("navigator");
     const pending = detail.checkpoints.find((ckpt) => ckpt.status === "pending");
     expect(pending?.kind).toBe("input");
@@ -357,16 +376,28 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
     );
     expect(missing.status).toBe(400);
 
+    // answers must match the snapshotted question kinds
+    const wrongBool = await member.request(
+      `/api/v1/runs/${runId}/checkpoints/${checkpointId}/respond`,
+      { method: "POST", json: { kind: "input", answers: { q1: "vanilla", q3: "yes" } } },
+    );
+    expect(wrongBool.status).toBe(400);
+    const offMenu = await member.request(
+      `/api/v1/runs/${runId}/checkpoints/${checkpointId}/respond`,
+      { method: "POST", json: { kind: "input", answers: { q1: "vanilla", q2: "z" } } },
+    );
+    expect(offMenu.status).toBe(400);
+
     const ok = await member.request(`/api/v1/runs/${runId}/checkpoints/${checkpointId}/respond`, {
       method: "POST",
-      json: { kind: "input", answers: { q1: "vanilla" } },
+      json: { kind: "input", answers: { q1: "vanilla", q2: "a", q3: true } },
     });
     expect(ok.status).toBe(200);
 
     // double-respond conflicts
     const again = await member.request(
       `/api/v1/runs/${runId}/checkpoints/${checkpointId}/respond`,
-      { method: "POST", json: { kind: "input", answers: { q1: "chocolate" } } },
+      { method: "POST", json: { kind: "input", answers: { q1: "chocolate", q2: "b", q3: false } } },
     );
     expect(again.status).toBe(409);
   });

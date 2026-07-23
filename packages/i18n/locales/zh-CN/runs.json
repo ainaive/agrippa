@@ -138,7 +138,9 @@
       "fix": "已要求修复",
       "expired": "已超时",
       "pending": "待处理"
-    }
+    },
+    "yes": "是",
+    "no": "否"
   },
   "comments": {
     "placeholder": "给团队写一条评论…（⌘↵ 发送）",

@@ -9,16 +9,45 @@ import { REVIEW_SEVERITIES } from "./domain";
  * artifact drives a `review-gate` checkpoint. Both auto-pass when empty.
  */
 
-export const questionSchema = z.object({
-  id: z.string().min(1).max(64),
-  text: z.string().min(1).max(2000),
-  kind: z.enum(["text", "select", "boolean"]).default("text"),
-  /** Choices for kind=select. */
-  options: z.array(z.string().min(1).max(200)).max(20).optional(),
-  required: z.boolean().default(true),
-  /** The agent's suggested answer, offered as a one-click fill in the UI. */
-  recommended: z.string().max(2000).optional(),
-});
+export const questionSchema = z
+  .object({
+    id: z.string().min(1).max(64),
+    text: z.string().min(1).max(2000),
+    kind: z.enum(["text", "select", "boolean"]).default("text"),
+    /** Choices for kind=select. */
+    options: z.array(z.string().min(1).max(200)).max(20).optional(),
+    required: z.boolean().default(true),
+    /** The agent's suggested answer, offered as a one-click fill in the UI. */
+    recommended: z.union([z.string().max(2000), z.boolean()]).optional(),
+  })
+  .superRefine((q, ctx) => {
+    // a required select without options is an unanswerable form — the input
+    // checkpoint has no reject path, so the run would deadlock until timeout
+    if (q.kind === "select" && (q.options === undefined || q.options.length === 0)) {
+      ctx.addIssue({ code: "custom", message: `question '${q.id}': select needs options` });
+    }
+    if (q.recommended === undefined) return;
+    if (q.kind === "boolean" && typeof q.recommended !== "boolean") {
+      ctx.addIssue({
+        code: "custom",
+        message: `question '${q.id}': boolean questions need a boolean recommendation`,
+      });
+    }
+    if (q.kind !== "boolean" && typeof q.recommended !== "string") {
+      ctx.addIssue({
+        code: "custom",
+        message: `question '${q.id}': recommendation must be a string`,
+      });
+    }
+    if (q.kind === "select" && typeof q.recommended === "string") {
+      if (!(q.options ?? []).includes(q.recommended)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `question '${q.id}': recommendation must be one of the options`,
+        });
+      }
+    }
+  });
 export type Question = z.infer<typeof questionSchema>;
 
 export const questionsArtifactSchema = z.object({
@@ -32,14 +61,18 @@ export const reviewFindingSchema = z.object({
   file: z.string().max(500).optional(),
   line: z.number().int().positive().optional(),
   title: z.string().min(1).max(300),
-  detail: z.string().min(1).max(5000),
-  suggestion: z.string().max(5000).optional(),
+  detail: z.string().min(1).max(2000),
+  suggestion: z.string().max(2000).optional(),
 });
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
 
+// caps keep typical reports well under the 64 KB inline artifact limit (an
+// interaction artifact that only exists on disk cannot drive its checkpoint);
+// a pathological maximal report can still exceed it, which the engine reports
+// as a distinct too-large contract violation rather than "no findings"
 export const reviewReportSchema = z.object({
   summary: z.string().max(5000).default(""),
-  findings: z.array(reviewFindingSchema).max(100).default([]),
+  findings: z.array(reviewFindingSchema).max(50).default([]),
 });
 export type ReviewReport = z.infer<typeof reviewReportSchema>;
 

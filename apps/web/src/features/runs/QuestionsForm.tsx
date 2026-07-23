@@ -90,10 +90,15 @@ export function QuestionsForm({
               type="button"
               className="flex items-center gap-1 text-xs text-primary hover:underline"
               disabled={disabled}
-              onClick={() => setAnswer(question.id, question.recommended as string)}
+              onClick={() => setAnswer(question.id, question.recommended as string | boolean)}
             >
               <WandSparklesIcon className="size-3" />
-              {t("checkpoint.useRecommendation", { value: question.recommended })}
+              {t("checkpoint.useRecommendation", {
+                value:
+                  typeof question.recommended === "boolean"
+                    ? t(question.recommended ? "checkpoint.yes" : "checkpoint.no")
+                    : question.recommended,
+              })}
             </button>
           ) : null}
         </div>
@@ -114,7 +119,7 @@ export function QuestionsForm({
             onClick={() => {
               const filled: Answers = { ...answers };
               for (const q of recommendable)
-                filled[q.id] = filled[q.id] ?? (q.recommended as string);
+                filled[q.id] = filled[q.id] ?? (q.recommended as string | boolean);
               onSubmit(filled);
             }}
           >

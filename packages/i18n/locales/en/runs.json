@@ -138,7 +138,9 @@
       "fix": "Fix requested",
       "expired": "Expired",
       "pending": "Pending"
-    }
+    },
+    "yes": "Yes",
+    "no": "No"
   },
   "comments": {
     "placeholder": "Write a comment for your team… (⌘↵ to send)",

@@ -153,6 +153,27 @@ async function respondToCheckpoint(
     if (missing.length > 0) {
       throw AppError.validation([{ message: `answers required for: ${missing.join(", ")}` }]);
     }
+    // each answer must match its snapshotted question's kind — the answer re-
+    // enters agent prompts, so a select value outside the options (or a string
+    // where a boolean was asked) must be rejected here, not interpolated later
+    for (const question of questions) {
+      const answer = input.answers[question.id];
+      if (answer === undefined) continue;
+      const kind = question.kind ?? "text"; // pre-fix snapshots may lack kind
+      if (kind === "boolean" && typeof answer !== "boolean") {
+        throw AppError.validation([
+          { message: `question '${question.id}' expects a boolean answer` },
+        ]);
+      }
+      if (kind !== "boolean" && typeof answer !== "string") {
+        throw AppError.validation([{ message: `question '${question.id}' expects a text answer` }]);
+      }
+      if (kind === "select" && !(question.options ?? []).includes(answer as string)) {
+        throw AppError.validation([
+          { message: `question '${question.id}' answer must be one of its options` },
+        ]);
+      }
+    }
     response = { kind: "input", outcome: "answered", answers: input.answers };
   } else {
     const findings = payload.findings ?? [];
