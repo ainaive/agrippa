@@ -1,5 +1,7 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
+import { providerDefaultBaseUrl, type WireProtocol } from "@agrippa/core";
+import type { ProviderAuth } from "./types";
 
 /**
  * Execution-isolation seam (docs/design/03 §Sandboxing, ADR-0005).
@@ -240,6 +242,60 @@ export function buildScrubbedEnv(
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
     if (SDK_AUTH_ALLOW.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * The complete auth-var family per wire protocol. overlayProviderAuth deletes
+ * the whole family before setting the mapped vars — leaving any member behind
+ * would let a worker-env credential outrank the project's (the SDK prefers
+ * some vars over others), which inverts the documented precedence.
+ */
+const PROTOCOL_AUTH_VARS: Record<WireProtocol, readonly string[]> = {
+  anthropic: [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ],
+  openai: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY", "CODEX_HOME"],
+};
+
+/** The endpoint a credential points at: explicit override ?? catalog default. */
+export function effectiveBaseUrl(
+  auth: ProviderAuth | undefined,
+  protocol: WireProtocol,
+): string | undefined {
+  if (!auth) return undefined;
+  return auth.baseUrl ?? providerDefaultBaseUrl(auth.provider, protocol);
+}
+
+/**
+ * Apply a project provider credential on top of an already-scrubbed env.
+ * The project credential wins by construction: the protocol's auth-var family
+ * is removed wholesale, then exactly the mapped vars are set. No-op without
+ * a credential, so the worker-env fallback keeps working unchanged.
+ */
+export function overlayProviderAuth(
+  env: Record<string, string>,
+  auth: ProviderAuth | undefined,
+  protocol: WireProtocol,
+): Record<string, string> {
+  if (!auth) return env;
+  const out = { ...env };
+  for (const key of PROTOCOL_AUTH_VARS[protocol]) delete out[key];
+  const baseUrl = effectiveBaseUrl(auth, protocol);
+  if (protocol === "anthropic") {
+    // The native API authenticates with x-api-key (ANTHROPIC_API_KEY);
+    // Anthropic-compatible gateways (Bailian) document bearer auth
+    // (ANTHROPIC_AUTH_TOKEN).
+    if (auth.provider === "anthropic") out.ANTHROPIC_API_KEY = auth.apiKey;
+    else out.ANTHROPIC_AUTH_TOKEN = auth.apiKey;
+    if (baseUrl !== undefined) out.ANTHROPIC_BASE_URL = baseUrl;
+  } else {
+    out.OPENAI_API_KEY = auth.apiKey;
+    if (baseUrl !== undefined) out.OPENAI_BASE_URL = baseUrl;
   }
   return out;
 }

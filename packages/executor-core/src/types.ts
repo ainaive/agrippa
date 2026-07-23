@@ -59,6 +59,19 @@ export type PriorStepSummary = {
   artifactKeys: string[];
 };
 
+/**
+ * Project-scoped provider credential, resolved by the engine at step build.
+ * Absent = the worker's env auth applies. Executors map this onto their own
+ * auth variables via overlayProviderAuth (./isolation) — the request stays
+ * executor-agnostic.
+ */
+export type ProviderAuth = {
+  provider: string;
+  apiKey: string;
+  /** Explicit endpoint override; absent = the provider catalog default. */
+  baseUrl?: string;
+};
+
 export type StepExecutionRequest = {
   runId: string;
   stepId: string;
@@ -69,6 +82,8 @@ export type StepExecutionRequest = {
   instructions: string;
   systemPrompt: string;
   model: ResolvedModel;
+  /** Per-project provider credential; absent = worker env fallback. */
+  providerAuth?: ProviderAuth;
   subagents: SubagentSpec[];
   skills: ResolvedSkill[];
   mcpServers: ResolvedMcpServer[];
