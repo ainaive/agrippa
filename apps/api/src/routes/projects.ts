@@ -5,6 +5,8 @@ import {
   memberUpdateSchema,
   projectCreateSchema,
   projectUpdateSchema,
+  providerCredentialCreateSchema,
+  providerCredentialUpdateSchema,
   quotaUpdateSchema,
   type ResourceType,
   repoCreateSchema,
@@ -21,6 +23,7 @@ import {
   projectQuotas,
   projectResourceGrants,
   projects,
+  providerCredentials,
   repoConnections,
   secrets,
   skills,
@@ -320,6 +323,156 @@ export const projectRoutes = new Hono<AppEnv>()
       resourceType: "repo_connection",
       resourceId: c.req.param("repoId"),
       projectId: c.req.param("projectId"),
+    });
+    return c.json({ removed: true });
+  })
+
+  // ── Provider credentials ───────────────────────────────────────────────────
+  // The key is write-only: stored encrypted via the secrets table, surfaced
+  // only as hasCredential. Clearing a key = DELETE (a keyless row is useless).
+  .get("/:projectId/providers", requireProjectRole("viewer"), async (c) => {
+    const rows = await c.var.db
+      .select({
+        id: providerCredentials.id,
+        provider: providerCredentials.provider,
+        baseUrl: providerCredentials.baseUrl,
+        createdAt: providerCredentials.createdAt,
+        rotatedAt: secrets.rotatedAt,
+      })
+      .from(providerCredentials)
+      .leftJoin(secrets, eq(secrets.id, providerCredentials.secretRef))
+      .where(eq(providerCredentials.projectId, c.req.param("projectId")));
+    return c.json(rows.map((r) => ({ ...r, hasCredential: true })));
+  })
+  .post(
+    "/:projectId/providers",
+    requireProjectRole("admin"),
+    validate("json", providerCredentialCreateSchema),
+    async (c) => {
+      const projectId = c.req.param("projectId");
+      const { apiKey, provider, baseUrl } = c.req.valid("json");
+      const db = c.var.db;
+      const [existing] = await db
+        .select({ id: providerCredentials.id })
+        .from(providerCredentials)
+        .where(
+          and(
+            eq(providerCredentials.projectId, projectId),
+            eq(providerCredentials.provider, provider),
+          ),
+        );
+      if (existing) {
+        throw AppError.conflict(
+          "provider_exists",
+          `Provider '${provider}' already has a credential — rotate or remove it`,
+        );
+      }
+      const created = await db.transaction(async (tx) => {
+        const [secret] = await tx
+          .insert(secrets)
+          .values({
+            orgId: c.var.user.orgId,
+            kind: "provider_api_key",
+            ciphertext: encryptSecret(apiKey, loadSecretKey()),
+            createdBy: c.var.user.id,
+          })
+          .returning();
+        if (!secret) throw new Error("secret insert failed");
+        const [row] = await tx
+          .insert(providerCredentials)
+          .values({ projectId, provider, baseUrl: baseUrl ?? null, secretRef: secret.id })
+          .returning();
+        await audit(
+          c,
+          {
+            action: "project.provider.add",
+            resourceType: "provider_credential",
+            resourceId: row?.id,
+            projectId,
+            payload: { provider },
+          },
+          tx,
+        );
+        return row;
+      });
+      return c.json(
+        created ? { ...created, secretRef: undefined, hasCredential: true } : null,
+        201,
+      );
+    },
+  )
+  .patch(
+    "/:projectId/providers/:provider",
+    requireProjectRole("admin"),
+    validate("json", providerCredentialUpdateSchema),
+    async (c) => {
+      const projectId = c.req.param("projectId");
+      const provider = c.req.param("provider");
+      const patch = c.req.valid("json");
+      const db = c.var.db;
+      const [current] = await db
+        .select()
+        .from(providerCredentials)
+        .where(
+          and(
+            eq(providerCredentials.projectId, projectId),
+            eq(providerCredentials.provider, provider),
+          ),
+        );
+      if (!current) throw AppError.notFound("Provider credential");
+      const rotated = patch.apiKey !== undefined;
+      if (patch.apiKey !== undefined) {
+        // rotate in place: the ref stays stable, running steps see the new key
+        await db
+          .update(secrets)
+          .set({ ciphertext: encryptSecret(patch.apiKey, loadSecretKey()), rotatedAt: new Date() })
+          .where(eq(secrets.id, current.secretRef));
+      }
+      if (patch.baseUrl !== undefined) {
+        await db
+          .update(providerCredentials)
+          .set({ baseUrl: patch.baseUrl })
+          .where(eq(providerCredentials.id, current.id));
+      }
+      await audit(c, {
+        action: "project.provider.update",
+        resourceType: "provider_credential",
+        resourceId: current.id,
+        projectId,
+        payload: { provider, rotated, baseUrlChanged: patch.baseUrl !== undefined },
+      });
+      return c.json({ updated: true, hasCredential: true });
+    },
+  )
+  .delete("/:projectId/providers/:provider", requireProjectRole("admin"), async (c) => {
+    const projectId = c.req.param("projectId");
+    const provider = c.req.param("provider");
+    const db = c.var.db;
+    const [current] = await db
+      .select()
+      .from(providerCredentials)
+      .where(
+        and(
+          eq(providerCredentials.projectId, projectId),
+          eq(providerCredentials.provider, provider),
+        ),
+      );
+    if (!current) throw AppError.notFound("Provider credential");
+    await db.transaction(async (tx) => {
+      await tx.delete(providerCredentials).where(eq(providerCredentials.id, current.id));
+      // the secret dies with the credential — no orphaned key material
+      await tx.delete(secrets).where(eq(secrets.id, current.secretRef));
+      await audit(
+        c,
+        {
+          action: "project.provider.remove",
+          resourceType: "provider_credential",
+          resourceId: current.id,
+          projectId,
+          payload: { provider },
+        },
+        tx,
+      );
     });
     return c.json({ removed: true });
   })
