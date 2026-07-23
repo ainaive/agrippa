@@ -98,6 +98,21 @@ export class DemoExecutor implements Executor {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
     };
+    // patch artifacts come from the engine's real workspace diff — and an
+    // empty diff on a required patch now fails the step — so a demo step that
+    // owes a patch must actually change the workspace
+    if (req.expectedArtifacts.some((artifact) => artifact.kind === "patch")) {
+      try {
+        const file = `${req.workspaceDir}/AGRIPPA_DEMO.md`;
+        const existing = (await Bun.file(file).exists()) ? await Bun.file(file).text() : "";
+        await Bun.write(
+          file,
+          `${existing}- demo change from step \`${req.stepId}\` (round ${req.iteration ?? 1})\n`,
+        );
+      } catch {
+        // scratch workspaces without write access — the engine will report it
+      }
+    }
     for (const artifact of req.expectedArtifacts) {
       if (artifact.kind === "patch") continue; // the engine diffs the workspace
       yield {
