@@ -58,7 +58,7 @@ sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstr
 | `AGRIPPA_SECRET_KEY` | api、worker | **必填。**加密存储凭证的 32 字节 base64 密钥。丢失将使全部已存令牌不可恢复 |
 | `BETTER_AUTH_SECRET` | api | **必填。**会话签名密钥 |
 | `AGRIPPA_BASE_URL` | api | 实例的公开地址 |
-| `ANTHROPIC_API_KEY` | worker | Claude 执行器凭证 |
+| `ANTHROPIC_API_KEY` | worker | Claude 执行器凭证——部署级回退；项目自己的服务商凭证（设置 → 模型服务商）会覆盖对应服务商的该密钥 |
 | `AGRIPPA_EXECUTOR` | api | 新执行的默认执行器：`claude-agent-sdk` 或 `fake`（零 Token 演示） |
 | `WORKER_SLOTS` | worker | 单 worker 并发执行数（默认 2） |
 | `WORKSPACE_ROOT` | worker | 每次执行的检出目录（镜像内默认 `/work/runs`） |

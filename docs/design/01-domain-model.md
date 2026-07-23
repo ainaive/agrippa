@@ -55,7 +55,7 @@ invitations (id pk, org_id fk, email,                         -- invite-only onb
            accepted_at null, accepted_user_id fk users null)  -- null = pending
            -- self-registration is closed (05); this is the only path a new member joins
 
-secrets   (id pk, org_id fk, kind text,                       -- 'mcp_auth' | 'git_credential' | ...
+secrets   (id pk, org_id fk, kind text,                       -- 'mcp_auth' | 'git_credential' | 'provider_api_key' | ...
            ciphertext bytea, created_by fk, created_at, rotated_at)
            -- AES-256-GCM via node:crypto; key from AGRIPPA_SECRET_KEY env
 ```
@@ -73,6 +73,12 @@ project_members (id pk, project_id fk, user_id fk,
 
 repo_connections (id pk, project_id fk, provider text,        -- 'github' | 'gitlab' | 'generic-git'
            url, default_branch, credential_secret_ref fk secrets null, status)
+
+provider_credentials (id pk, project_id fk, provider text,    -- PROVIDER_CATALOG id, e.g. 'dashscope'
+           base_url null,                                     -- overrides the catalog's default endpoints
+           secret_ref fk secrets not null,                    -- the API key, write-only via the API
+           unique (project_id, provider))
+           -- present → overrides worker-env auth for this provider (ADR-0013)
 
 project_resource_grants (id pk, project_id fk,
            resource_type text check in ('skill','mcp_server','model','template','faber'),

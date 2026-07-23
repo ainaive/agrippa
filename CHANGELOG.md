@@ -6,6 +6,14 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Per-project provider credentials (Aliyun Bailian/DashScope first)** — projects configure model-provider API keys in Settings → Providers instead of relying on worker env ([ADR-0013](docs/adr/0013-per-project-provider-credentials.md)):
+  - *Generic credential store.* One `provider_credentials` row per (project, provider) with an optional endpoint override; the key lives encrypted in `secrets` (new kind `provider_api_key`), write-only through the API (reads expose `hasCredential` only), rotated in place, deleted together with its secret, audited on every mutation.
+  - *Provider catalog.* `PROVIDER_CATALOG` in `@agrippa/core` declares per-wire-protocol default endpoints and an auth policy per provider — `dashscope` requires a project credential (no legitimate env fallback), `anthropic`/`openai` keep worker env as the deployment default. Qwen models (`qwen3.7-max/plus`, `qwen3.6-flash`) are seeded; claude-agent-sdk and codex-cli now serve `dashscope`.
+  - *Executor injection, project wins.* The engine materializes the project's key per step (decrypted in the worker, memoized per run, redactor-registered before use) and executors overlay it by replacing the wire protocol's entire auth-var family — Bailian lands as bearer `ANTHROPIC_AUTH_TOKEN` + gateway URL on claude, and as a synthesized `-c model_providers` entry with a per-run `CODEX_HOME` on codex (so ambient `auth.json` can't outrank the project key). Codex now registers on a CLI probe alone; env auth at boot is no longer required.
+  - *Role-scoped, single-provider slot resolution.* Slots resolve only the model roles their steps (and subagents) reference, and provider-constrained slots resolve all of them from one provider (credentialed provider first, then cheapest, deterministic) — a step's base URL is process-wide, so mixed-provider slots could never execute. A slot blocked only by a missing credential fails submission with the new `provider_credential_required` error; demo/`fake` resolution is unchanged.
+
 ### Fixed
 
 - **Fourth review round (PR #5)** — the evidence boundary now excludes all agent-writable Git metadata:

@@ -58,7 +58,7 @@ Documented in `infra/env/.env.example`; the full set:
 | `AGRIPPA_SECRET_KEY` | api, worker | **Required.** 32-byte base64 key encrypting stored credentials. Losing it orphans every stored token |
 | `BETTER_AUTH_SECRET` | api | **Required.** Session signing secret |
 | `AGRIPPA_BASE_URL` | api | Public URL of the instance |
-| `ANTHROPIC_API_KEY` | worker | Claude executor credential |
+| `ANTHROPIC_API_KEY` | worker | Claude executor credential — the deployment-wide fallback; a project's own provider credential (Settings → Providers) overrides it for that provider |
 | `AGRIPPA_EXECUTOR` | api | Default executor for new runs: `claude-agent-sdk` or `fake` (token-free demo) |
 | `WORKER_SLOTS` | worker | Concurrent runs per worker (default 2) |
 | `WORKSPACE_ROOT` | worker | Per-run checkout directory (default `/work/runs` in the image) |
