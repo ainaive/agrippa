@@ -28,6 +28,24 @@ describe("interaction schemas (strict artifact contracts)", () => {
     expect(report.success).toBe(true);
   });
 
+  it("rejects duplicate ids — every consumer keys questions and findings by id", () => {
+    const dupQuestions = questionsArtifactSchema.safeParse({
+      questions: [
+        { id: "q1", text: "First?" },
+        { id: "q1", text: "Second?" },
+      ],
+    });
+    expect(dupQuestions.success).toBe(false);
+
+    const dupFindings = reviewReportSchema.safeParse({
+      findings: [
+        { id: "f1", severity: "major", title: "A", detail: "a" },
+        { id: "f1", severity: "minor", title: "B", detail: "b" },
+      ],
+    });
+    expect(dupFindings.success).toBe(false);
+  });
+
   it("enforces question contracts: select options and kind-matched recommendations", () => {
     const optionless = questionsArtifactSchema.safeParse({
       questions: [{ id: "q1", text: "Pick", kind: "select", required: true }],

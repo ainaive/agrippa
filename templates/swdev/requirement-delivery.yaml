@@ -175,6 +175,10 @@ spec:
               kind: agent
               agent: reviewer
               model: { role: review }
+              # the reviewer never writes: anything it changed would be
+              # published without re-review, and the engine refuses to push a
+              # workspace that drifted from the reviewed patch
+              access: readOnly
               # an invalid review-report fails this step at store time; one
               # retry gives the reviewer a second chance at well-formed JSON
               retry: { max: 1 }

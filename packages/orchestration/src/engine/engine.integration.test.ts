@@ -869,6 +869,7 @@ spec:
             - id: review
               kind: agent
               agent: reviewer
+              access: readOnly
               model: { role: review }
               instructions: "Review the diff"
               produces: [review-report]
@@ -1501,7 +1502,77 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
     expect((analyzeRows.at(-1)?.error as { code: string } | null)?.code).toBe("contract_violation");
   });
 
-  it("refreshes stale patch evidence at push time (reviewer-drift guard)", async () => {
+  it("fails the run instead of publishing evidence that drifted after review", async () => {
+    const fx = await setupV2Fixture();
+    const quickImpl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+    const dirtyReview: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "one issue",
+      },
+    };
+
+    // plan approval first
+    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe(
+      "waiting_approval",
+    );
+    const [plan] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    await decideCheckpoint(fx.db, plan?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+    // implement runs and stores its patch; review reports findings → gate pause.
+    // The reviewer must run read-only: its writes could never be re-reviewed.
+    const pauseDeps = fx.makeDeps(quickImpl, dirtyReview);
+    expect(await executeRun(pauseDeps, fx.runId)).toBe("waiting_approval");
+    expect(pauseDeps.rev.requests[0]?.toolPolicy.access).toBe("readOnly");
+    expect(pauseDeps.impl.requests[0]?.toolPolicy.access).toBe("readWrite");
+    const [gate] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    await decideCheckpoint(fx.db, gate?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: {
+        kind: "review-gate",
+        outcome: "pass",
+        selectedFindings: [],
+        acceptedFindings: [FINDING_A] as never,
+        acceptedFindingIds: ["f1"],
+      },
+    });
+    // the workspace moved AFTER the gate approved the stored patch — the run
+    // must refuse to publish what nobody reviewed, not silently refresh it
+    fx.workspace.diffOutput = "diff --git a/drifted b/drifted\n+somebody touched this\n";
+    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe("failed");
+
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    expect((run?.error as { message: string } | null)?.message).toContain("changed after");
+    expect(fx.scm.pushes).toHaveLength(0);
+  });
+
+  it("fails a resumed run whose workspace is gone (host changed)", async () => {
     const fx = await setupV2Fixture();
     const cleanReview: Record<string, FakeStepBehavior> = {
       review: {
@@ -1521,7 +1592,7 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
       },
     };
 
-    // plan approval first
+    // checkout succeeds, then the run pauses at the plan approval
     expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe(
       "waiting_approval",
     );
@@ -1534,54 +1605,12 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
       decidedBy: fx.userId,
       response: { kind: "approval", outcome: "approved" },
     });
-    // implement runs and stores its patch; review reports findings → gate pause
-    const dirtyReview: Record<string, FakeStepBehavior> = {
-      review: {
-        kind: "succeed",
-        events: [
-          {
-            type: "artifact",
-            key: "review-report",
-            kind: "json",
-            inline: { findings: [FINDING_A] },
-          },
-        ],
-        output: "one issue",
-      },
-    };
-    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe(
-      "waiting_approval",
-    );
-    const [gate] = await fx.db
-      .select()
-      .from(checkpoints)
-      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
-    await decideCheckpoint(fx.db, gate?.id as string, {
-      status: "approved",
-      decidedBy: fx.userId,
-      response: {
-        kind: "review-gate",
-        outcome: "pass",
-        selectedFindings: [],
-        acceptedFindings: [FINDING_A] as never,
-        acceptedFindingIds: ["f1"],
-      },
-    });
-    // the workspace moved AFTER the implement step stored its patch (e.g. the
-    // reviewer wrote something) — push must refresh the evidence first
-    fx.workspace.diffOutput = "diff --git a/drifted b/drifted\n+reviewer touched this\n";
-    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe("succeeded");
-
-    const changeRows = await fx.db
-      .select()
-      .from(artifacts)
-      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "changes")));
-    const latest = changeRows.at(-1);
-    expect(String(latest?.inline)).toContain("reviewer touched this");
-    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
-    expect(
-      events.some((e) => e.type === "artifact" && (e.payload as { refreshed?: boolean }).refreshed),
-    ).toBe(true);
+    // the resume lands on a worker host that never had the checkout — the run
+    // must fail with the real reason, not proceed against an empty directory
+    fx.workspace.intact = false;
+    expect(await executeRun(fx.makeDeps(quickImpl, cleanReview), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("workspace_lost");
   });
 
   it("throws the typed unavailable error before any status transition when a slot's executor is missing", async () => {

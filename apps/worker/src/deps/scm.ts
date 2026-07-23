@@ -1,6 +1,13 @@
 import type { Db } from "@agrippa/db";
 import type { PullRequestSpec, ScmService } from "@agrippa/orchestration";
-import { credentialedUrl, git, loadRepoConnection, workspaceDirFor } from "./workspace";
+import {
+  credentialedUrl,
+  git,
+  loadRepoConnection,
+  platformBaseSha,
+  restorePlatformConfig,
+  workspaceDirFor,
+} from "./workspace";
 
 /**
  * Platform-side git write-path (ADR-0011): branch creation, credentialed push,
@@ -22,6 +29,10 @@ export class GitScmService implements ScmService {
     spec: { projectId: string; repo: unknown; branch: string },
   ): Promise<void> {
     const dir = workspaceDirFor(runId);
+    // an agent-rewritten .git/config (filters, insteadOf on the push URL,
+    // credential.helper) must never shape the platform's add/commit/push —
+    // restore the provision-time snapshot first
+    await restorePlatformConfig(runId);
     // Finalizing commit: the patch evidence covers committed + staged +
     // worktree changes, but a push ships only commits — anything the agent
     // left uncommitted would be approved yet never published. Committing it
@@ -44,24 +55,23 @@ export class GitScmService implements ScmService {
           "chore: commit remaining workspace changes",
         ],
         dir,
-        // host-level gitconfig (signing keys, hooksPath) must not affect the
-        // platform's commit
-        { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
       );
     }
     // publishing an empty branch would only fail later at pr.open with an
-    // opaque provider error — fail here with the real reason
-    try {
+    // opaque provider error — fail here with the real reason. The base SHA
+    // comes from the platform sidecar (agent-writable refs don't count);
+    // refs/agrippa/base is the fallback for pre-sidecar workspaces.
+    let base = await platformBaseSha(runId);
+    if (!base) {
+      base = await git(["rev-parse", "--verify", "--quiet", "refs/agrippa/base"], dir)
+        .then((out) => out.trim())
+        .catch(() => null);
+    }
+    if (base) {
       const head = (await git(["rev-parse", "HEAD"], dir)).trim();
-      const base = (
-        await git(["rev-parse", "--verify", "--quiet", "refs/agrippa/base"], dir)
-      ).trim();
       if (head === base) {
         throw new Error("nothing to publish — the run produced no commits and no changes");
       }
-    } catch (err) {
-      if (String(err).includes("nothing to publish")) throw err;
-      // base ref missing (pre-fix workspace) — skip the emptiness check
     }
     const { connection, token } = await loadRepoConnection(this.db, spec.projectId, spec.repo);
     const pushUrl = credentialedUrl(connection.url, token);

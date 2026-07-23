@@ -36,6 +36,13 @@ export class FakeWorkspaceManager implements WorkspaceManager {
     return this.diffOutput;
   }
 
+  /** Flip to false to simulate a resume on a host that lacks the workspace. */
+  intact = true;
+
+  async isIntact(_runId: string): Promise<boolean> {
+    return this.intact;
+  }
+
   async cleanup(runId: string): Promise<void> {
     this.cleaned.push(runId);
     this.dirs.delete(runId);

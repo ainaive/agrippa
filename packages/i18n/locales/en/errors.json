@@ -32,5 +32,7 @@
   "invite_invalid": "This invite is invalid or revoked",
   "invite_expired": "This invite has expired",
   "invite_already_accepted": "This invite has already been used",
-  "invite_self": "You cannot invite yourself"
+  "invite_self": "You cannot invite yourself",
+  "contract_violation": "An agent output violated its contract",
+  "workspace_lost": "The run's workspace is no longer on this worker host"
 }

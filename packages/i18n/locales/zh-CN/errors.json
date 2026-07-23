@@ -32,5 +32,7 @@
   "invite_invalid": "该邀请无效或已被撤销",
   "invite_expired": "该邀请已过期",
   "invite_already_accepted": "该邀请已被使用",
-  "invite_self": "不能邀请自己"
+  "invite_self": "不能邀请自己",
+  "contract_violation": "智能体输出违反了约定契约",
+  "workspace_lost": "该执行的工作区已不在当前工作节点上"
 }

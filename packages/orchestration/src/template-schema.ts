@@ -246,6 +246,13 @@ const agentStepV2Schema = z.object({
   kind: z.literal("agent"),
   /** Agent slot; the compiler defaults it to the first declared slot. */
   agent: idSchema.optional(),
+  /**
+   * Per-step workspace access, overriding the workspace-level default. A
+   * reviewer step in a readWrite workspace should be readOnly: whatever it
+   * writes would never be re-reviewed evidence, and the engine refuses to
+   * publish a workspace that changed after the reviewed patch.
+   */
+  access: z.enum(["readOnly", "readWrite"]).optional(),
   model: z.object({ role: z.string() }),
   instructions: z.string().min(1),
   subagents: z.array(idSchema).default([]),

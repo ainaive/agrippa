@@ -53,11 +53,26 @@ export const questionSchema = z
   });
 export type Question = z.infer<typeof questionSchema>;
 
+// every consumer keys by id (answer records, selection sets, React keys) —
+// a duplicate would make two entries inseparable everywhere downstream
+function requireUniqueIds(items: Array<{ id: string }>, ctx: z.RefinementCtx, noun: string): void {
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (seen.has(item.id)) {
+      ctx.addIssue({ code: "custom", message: `duplicate ${noun} id '${item.id}'` });
+      return;
+    }
+    seen.add(item.id);
+  }
+}
+
 // strict + required: `{}`, a typo'd key ({"questionz": …}), or stray
 // top-level fields must FAIL parsing, not silently read as "no questions"
-export const questionsArtifactSchema = z.strictObject({
-  questions: z.array(questionSchema).max(20),
-});
+export const questionsArtifactSchema = z
+  .strictObject({
+    questions: z.array(questionSchema).max(20),
+  })
+  .superRefine((a, ctx) => requireUniqueIds(a.questions, ctx, "question"));
 export type QuestionsArtifact = z.infer<typeof questionsArtifactSchema>;
 
 export const reviewFindingSchema = z.object({
@@ -78,10 +93,12 @@ export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
 // strict + required findings: a malformed report must never read as a clean
 // one — `{}` or {"findingz": …} auto-passing the review gate is exactly the
 // failure this guards against. Nested objects stay tolerant of extra keys.
-export const reviewReportSchema = z.strictObject({
-  summary: z.string().max(5000).default(""),
-  findings: z.array(reviewFindingSchema).max(50),
-});
+export const reviewReportSchema = z
+  .strictObject({
+    summary: z.string().max(5000).default(""),
+    findings: z.array(reviewFindingSchema).max(50),
+  })
+  .superRefine((r, ctx) => requireUniqueIds(r.findings, ctx, "finding"));
 export type ReviewReport = z.infer<typeof reviewReportSchema>;
 
 /**

@@ -70,6 +70,8 @@ workspace:
 
 If present, the engine provisions an isolated per-run checkout before the first step (see [04-execution-runtime](04-execution-runtime.md)). Omitted → the run gets an empty scratch workspace.
 
+An agent step may override the workspace access with its own `access:` — the canonical case is a **reviewer step declaring `access: readOnly` inside a readWrite workspace**: whatever a reviewer wrote would be published without ever being re-reviewed, and the engine refuses to push a workspace that drifted from the reviewed patch evidence, so a writable reviewer would only be able to fail runs.
+
 ### Resources
 
 Declared requirements, resolved against **project grants** at submit time. Submission fails fast with an actionable error if a required resource isn't granted to the project.

@@ -65,7 +65,9 @@ for each flow node (phase | loop):
                       decided: fold response into the expression context
                       (checkpoints.<id>), settle the step row, continue
     kind system → platform action (workspace.checkout | git.branch | git.push |
-                  pr.open via EngineDeps.scm; pr.open appends the waiver section)
+                  pr.open via EngineDeps.scm; pr.open appends the waiver section;
+                  git.push FAILS the run if the workspace no longer matches the
+                  stored patch evidence — drift is never silently republished)
     kind agent  → resolve the slot binding (executor + faber prompt) + request
                   → executor.executeStep(req, ctx)
                   → persist every event to run_events (seq++), publish to Redis,

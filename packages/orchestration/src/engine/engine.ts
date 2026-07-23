@@ -428,6 +428,33 @@ class RunEngine {
     if (run.cancelRequested) this.triggerAbort("cancelled");
 
     this.workspaceDir = await this.deps.workspace.ensureDir(run.id);
+
+    // Workspaces are host-local. A resume that landed on a different host
+    // sees the checkout step row as succeeded (so it will never re-run) while
+    // ensureDir() above just made an empty directory — every subsequent step
+    // would silently operate on nothing. Re-provisioning can't help either:
+    // a fresh clone lacks the work branch and all agent commits. Fail fast
+    // with the real reason instead.
+    const checkoutSucceeded = [...this.stepRows.values()].some(
+      (row) => row.status === "succeeded" && this.isCheckoutStep(row.stepId),
+    );
+    if (checkoutSucceeded && !(await this.deps.workspace.isIntact(run.id))) {
+      throw new RunFailure(
+        "workspace_lost",
+        "the run's workspace is gone (worker host changed or files were removed) — it cannot resume here",
+      );
+    }
+  }
+
+  private isCheckoutStep(stepId: string): boolean {
+    for (const { phase } of flattenPhases(this.template.spec.phases)) {
+      for (const step of phase.steps) {
+        if (step.id === stepId && step.kind === "system" && step.action === "workspace.checkout") {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -996,11 +1023,13 @@ class RunEngine {
     }
 
     if (step.action === "git.push") {
-      // Reviewer-drift guard: steps can touch the worktree AFTER the last
-      // patch artifact was stored (the reviewer runs between fix and publish,
-      // with the workspace's access mode), and the SCM finalizing commit will
-      // ship that state. Refresh stale patch evidence first, so what the
-      // timeline shows equals what the PR contains.
+      // Evidence-drift guard: the workspace at push time must equal the last
+      // stored patch artifact — that patch is what humans reviewed and gates
+      // decided on. Publishing anything else would ship unapproved changes,
+      // so drift FAILS the run (it is never silently refreshed: refreshed
+      // evidence is not approved evidence). In the shipped templates this is
+      // unreachable — the reviewer runs readOnly and every patch-producing
+      // step re-stores its diff — so any hit is a real violation.
       const patchContracts = this.template.spec.outputs.artifacts.filter(
         (a) => a.kind === "patch" && this.producedArtifacts.has(a.key),
       );
@@ -1008,19 +1037,10 @@ class RunEngine {
         const current = await this.deps.workspace.diff(this.run.id);
         for (const contract of patchContracts) {
           if (current && this.artifactValues[contract.key] !== current) {
-            await this.emit(
-              "artifact",
-              {
-                phaseId: phase.id,
-                stepId: step.id,
-                iteration: this.currentIteration,
-                key: contract.key,
-                kind: "patch",
-                refreshed: true,
-              },
-              row.id,
+            throw new RunFailure(
+              "contract_violation",
+              `workspace changed after the reviewed '${contract.key}' evidence — refusing to publish unapproved changes`,
             );
-            await this.storeArtifact(row, { key: contract.key, kind: "patch", inline: current });
           }
         }
       }
@@ -1310,10 +1330,13 @@ class RunEngine {
       skills,
       mcpServers,
       // no workspace repo → scratch dir with nothing to protect (readWrite);
-      // a repo checkout carries the template's declared access (default readOnly)
+      // a repo checkout carries the template's declared access (default
+      // readOnly), which a step may override — e.g. a reviewer step declares
+      // readOnly inside a readWrite workspace so its writes can never become
+      // unreviewed published changes
       toolPolicy: {
         writeRoot: this.workspaceDir,
-        access: this.template.spec.workspace?.access ?? "readWrite",
+        access: step.access ?? this.template.spec.workspace?.access ?? "readWrite",
       },
       limits: { maxTurns: 50 },
       workspaceDir: this.workspaceDir,

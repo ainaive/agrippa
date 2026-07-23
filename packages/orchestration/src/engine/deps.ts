@@ -24,6 +24,13 @@ export interface WorkspaceManager {
   checkout(runId: string, spec: WorkspaceSpec): Promise<void>;
   /** git diff against the checkout base — engine-side patch artifacts. */
   diff(runId: string): Promise<string>;
+  /**
+   * Whether a previously checked-out workspace is actually present here.
+   * Workspaces are host-local; a resume that landed on a different host sees
+   * a succeeded checkout step but no repository, and must fail fast rather
+   * than run against an empty directory.
+   */
+  isIntact(runId: string): Promise<boolean>;
   cleanup(runId: string): Promise<void>;
 }
 
