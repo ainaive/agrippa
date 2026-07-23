@@ -62,9 +62,10 @@ export function buildQueryArgs(
     systemPrompt: { type: "preset", preset: "claude_code", append: req.systemPrompt },
     agents: Object.keys(agents).length > 0 ? agents : undefined,
     mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-    // skills load from <workspace>/.claude/skills; 'project' also pulls CLAUDE.md.
-    // The worker strips repo-supplied .claude settings/hooks before this runs, so
-    // 'project' cannot load attacker-controlled hooks or permission overrides.
+    // Skills load from <workspace>/.claude/skills; 'project' also pulls
+    // CLAUDE.md. Before every attempt the worker replaces .claude with a fresh
+    // directory containing only the authorized skills, so settings/hooks from
+    // the repository or an earlier agent invocation never survive into this one.
     settingSources: ["project"],
     skills: skillNames.length > 0 ? skillNames : undefined,
     // ignore any .mcp.json in the checked-out repo — only our resolved servers

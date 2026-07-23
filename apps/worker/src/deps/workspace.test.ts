@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { appendFile, chmod, rm } from "node:fs/promises";
+import { appendFile, chmod, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -19,7 +19,14 @@ import { sql } from "drizzle-orm";
 // WORKSPACE_ROOT is read at module load — point it at a scratch dir BEFORE
 // importing the workspace module
 process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "agrippa-ws-test-"));
-const { GitWorkspaceManager, git, platformDirFor, workspaceDirFor } = await import("./workspace");
+const {
+  GitWorkspaceManager,
+  buildPlatformGitEnv,
+  git,
+  platformBaseSha,
+  platformDirFor,
+  workspaceDirFor,
+} = await import("./workspace");
 const { GitScmService } = await import("./scm");
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
@@ -63,6 +70,7 @@ function makeSourceRepo(): string {
 
 describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   const runId = crypto.randomUUID();
+  const publishBranch = "agrippa/run-1-abcd1234";
   let orgId: string;
   let projectId: string;
   let repoConnectionId: string;
@@ -117,12 +125,12 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
       access: "readWrite",
       projectId,
     });
+    await scm.createBranch(runId, publishBranch);
   });
 
   it("records the clone base and keeps sanitization out of the diff", async () => {
     const dir = workspaceDirFor(runId);
-    // the base ref exists and points at the clone-time HEAD
-    const base = (await git(["rev-parse", "refs/agrippa/base"], dir)).trim();
+    const base = await platformBaseSha(runId);
     expect(base).toMatch(/^[0-9a-f]{40}$/);
     // .claude was stripped by sanitizeWorkspace, but the diff must not report
     // its deletion in every patch
@@ -166,14 +174,24 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(committed).toContain("new-file.ts"); // the legitimate change went in
   });
 
-  it("creates the work branch, finalize-commits leftovers, and pushes", async () => {
-    const branch = "agrippa/run-1-abcd1234";
+  it("publishes one idempotent snapshot commit with all legitimate changes", async () => {
+    const branch = publishBranch;
     const dir = workspaceDirFor(runId);
     await Bun.write(path.join(dir, "left-uncommitted.txt"), "the agent forgot me\n");
-    await scm.createBranch(runId, branch);
-    // -B is idempotent for retries
-    await scm.createBranch(runId, branch);
-    await scm.push(runId, { projectId, repo: { repoConnectionId }, branch });
+    const approved = await workspace.diff(runId);
+    const first = await scm.push(runId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+    const retried = await scm.push(runId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+    expect(first).toEqual(retried);
 
     const show = (spec: string) =>
       Bun.spawnSync(["git", "show", spec], { cwd: sourceDir, stdout: "pipe", stderr: "pipe" });
@@ -186,6 +204,10 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(show(`${branch}:.claude/settings.json`).exitCode).toBe(0);
     // nothing under the sanitized paths shipped either
     expect(show(`${branch}:.claude/agent-note.md`).exitCode).not.toBe(0);
+    expect((await git(["rev-list", "--count", `main..${branch}`], sourceDir)).trim()).toBe("1");
+    expect((await git(["show", "-s", "--format=%an <%ae>|%s", branch], sourceDir)).trim()).toBe(
+      "Agrippa <agrippa@agrippa.local>|chore: publish approved Agrippa changes",
+    );
     // the diff still reports against the clone base after branching
     expect(await workspace.diff(runId)).toContain("committed line");
   });
@@ -198,6 +220,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
       projectId,
     });
     const branch = "agrippa/run-2-00000000dead";
+    await scm.createBranch(emptyRunId, branch);
     await scm.createBranch(emptyRunId, branch);
     expect(scm.push(emptyRunId, { projectId, repo: { repoConnectionId }, branch })).rejects.toThrow(
       /nothing to publish/,
@@ -284,8 +307,10 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     });
     expect(await workspace.isIntact(hostileRunId)).toBe(true);
     const dir = workspaceDirFor(hostileRunId);
+    const branch = "agrippa/run-3-cafe0123beef";
+    await scm.createBranch(hostileRunId, branch);
 
-    // legitimate agent work, left uncommitted so push's finalizing commit runs
+    // legitimate agent work, left uncommitted for the snapshot publisher
     await Bun.write(path.join(dir, "feature.ts"), "export const ok = true;\n");
 
     // a prompt-injected agent weaponizes its workspace: hooks that exfiltrate
@@ -304,12 +329,15 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     );
     await Bun.write(path.join(dir, ".gitattributes"), "*.ts filter=steal\n");
 
-    // the whole platform write-path: evidence, branch, finalize commit, push
+    // the whole post-agent platform write-path: evidence, snapshot commit, push
     const diff = await workspace.diff(hostileRunId);
     expect(diff).toContain("feature.ts");
-    const branch = "agrippa/run-3-cafe0123beef";
-    await scm.createBranch(hostileRunId, branch);
-    await scm.push(hostileRunId, { projectId, repo: { repoConnectionId }, branch });
+    await scm.push(hostileRunId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: diff,
+    });
 
     // the push landed at the REAL origin — insteadOf did not redirect it
     const shown = Bun.spawnSync(["git", "show", `${branch}:feature.ts`], {
@@ -322,10 +350,141 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(await Bun.file(path.join(dir, "hook-ran.txt")).exists()).toBe(false);
     expect(await Bun.file(path.join(dir, "hook-leak.txt")).exists()).toBe(false);
     expect(await Bun.file(path.join(dir, "filter-ran.txt")).exists()).toBe(false);
-    // and the agent's config rewrite was replaced by the provision snapshot
+    // Platform Git never repairs or reads the agent copy — it is simply ignored.
     const config = await Bun.file(path.join(dir, ".git", "config")).text();
-    expect(config).not.toContain("nonexistent-evil");
-    expect(config).not.toContain("hooksPath");
+    expect(config).toContain("nonexistent-evil");
+    expect(config).toContain("hooksPath");
+  });
+
+  it("never follows an agent-controlled .git/config symlink", async () => {
+    const symlinkRunId = crypto.randomUUID();
+    await workspace.checkout(symlinkRunId, {
+      repo: { repoConnectionId },
+      access: "readWrite",
+      projectId,
+    });
+    const branch = "agrippa/run-4-deadbeefcafe";
+    await scm.createBranch(symlinkRunId, branch);
+    const dir = workspaceDirFor(symlinkRunId);
+    const victim = path.join(tmpdir(), `agrippa-config-victim-${crypto.randomUUID()}`);
+    await Bun.write(victim, "do not overwrite\n");
+    await rm(path.join(dir, ".git", "config"), { force: true });
+    await symlink(victim, path.join(dir, ".git", "config"));
+    await Bun.write(path.join(dir, "safe-change.ts"), "export const safe = true;\n");
+
+    const approved = await workspace.diff(symlinkRunId);
+    await scm.push(symlinkRunId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+    expect(await Bun.file(victim).text()).toBe("do not overwrite\n");
+    expect(
+      Bun.spawnSync(["git", "show", `${branch}:safe-change.ts`], {
+        cwd: sourceDir,
+        stdout: "ignore",
+        stderr: "pipe",
+      }).exitCode,
+    ).toBe(0);
+    await rm(victim, { force: true });
+  });
+
+  it("never opens an agent-controlled .git/config FIFO", async () => {
+    const fifoRunId = crypto.randomUUID();
+    await workspace.checkout(fifoRunId, {
+      repo: { repoConnectionId },
+      access: "readWrite",
+      projectId,
+    });
+    const branch = "agrippa/run-5-f1f0f1f0f1f0";
+    await scm.createBranch(fifoRunId, branch);
+    const dir = workspaceDirFor(fifoRunId);
+    const config = path.join(dir, ".git", "config");
+    await rm(config, { force: true });
+    const made = Bun.spawnSync(["mkfifo", config], { stdout: "ignore", stderr: "pipe" });
+    if (made.exitCode !== 0) throw new Error(`mkfifo failed: ${made.stderr.toString()}`);
+    await Bun.write(path.join(dir, "fifo-safe.ts"), "export const safe = true;\n");
+
+    const approved = await workspace.diff(fifoRunId);
+    await scm.push(fifoRunId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+    expect(
+      Bun.spawnSync(["git", "show", `${branch}:fifo-safe.ts`], {
+        cwd: sourceDir,
+        stdout: "ignore",
+        stderr: "pipe",
+      }).exitCode,
+    ).toBe(0);
+  });
+
+  it("ignores an agent-corrupted index and exclude file when publishing", async () => {
+    const protectedRunId = crypto.randomUUID();
+    await workspace.checkout(protectedRunId, {
+      repo: { repoConnectionId },
+      access: "readWrite",
+      projectId,
+    });
+    const branch = "agrippa/run-6-feedfacecafe";
+    await scm.createBranch(protectedRunId, branch);
+    const dir = workspaceDirFor(protectedRunId);
+
+    await rm(path.join(dir, ".git", "info", "exclude"), { force: true });
+    await gitIn(dir, ["update-index", "--no-skip-worktree", ".claude/settings.json"]);
+    await Bun.write(path.join(dir, ".claude", "agent-note.md"), "must not ship\n");
+    await Bun.write(path.join(dir, ".agrippa", "artifacts", "report.json"), "{}\n");
+    await Bun.write(path.join(dir, "legitimate.ts"), "export const legitimate = true;\n");
+    await gitIn(dir, ["add", "-A"]);
+    await gitIn(dir, ["commit", "-m", "feat: hostile agent commit"]);
+
+    const approved = await workspace.diff(protectedRunId);
+    expect(approved).toContain("legitimate.ts");
+    expect(approved).not.toContain(".claude");
+    expect(approved).not.toContain(".agrippa");
+    await scm.push(protectedRunId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+
+    const show = (spec: string) =>
+      Bun.spawnSync(["git", "show", spec], { cwd: sourceDir, stdout: "pipe", stderr: "pipe" });
+    expect(show(`${branch}:.claude/settings.json`).stdout.toString()).toBe("{}\n");
+    expect(show(`${branch}:.claude/agent-note.md`).exitCode).not.toBe(0);
+    expect(show(`${branch}:.agrippa/artifacts/report.json`).exitCode).not.toBe(0);
+    expect(show(`${branch}:legitimate.ts`).exitCode).toBe(0);
+  });
+
+  it("refuses stale evidence before creating or pushing a snapshot commit", async () => {
+    const staleRunId = crypto.randomUUID();
+    await workspace.checkout(staleRunId, {
+      repo: { repoConnectionId },
+      access: "readWrite",
+      projectId,
+    });
+    const branch = "agrippa/run-7-badc0ffeeeee";
+    await scm.createBranch(staleRunId, branch);
+    await Bun.write(path.join(workspaceDirFor(staleRunId), "drift.ts"), "changed\n");
+
+    const result = await scm.push(staleRunId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: "",
+    });
+    expect(result).toEqual({ status: "evidence_mismatch" });
+    expect(
+      Bun.spawnSync(["git", "show", branch], {
+        cwd: sourceDir,
+        stdout: "ignore",
+        stderr: "pipe",
+      }).exitCode,
+    ).not.toBe(0);
   });
 
   it("reports a never-checked-out workspace as not intact", async () => {
@@ -342,11 +501,30 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(diff).toContain("committed line"); // committed work stays in evidence
   });
 
-  it("falls back to a worktree diff for pre-sidecar workspaces", async () => {
+  it("fails closed when trusted platform metadata is missing", async () => {
     await rm(platformDirFor(runId), { recursive: true, force: true });
+    expect(await workspace.isIntact(runId)).toBe(false);
+    expect(workspace.diff(runId)).rejects.toThrow(/trusted platform git base is missing/);
+  });
+});
 
-    const diff = await workspace.diff(runId);
-    expect(diff).toContain("uncommitted.txt"); // worktree changes still visible
-    expect(diff).not.toContain("committed line"); // pre-base-ref behavior
+describe("platform Git environment", () => {
+  it("contains system variables but no platform or provider credentials", () => {
+    const env = buildPlatformGitEnv({
+      PATH: "/bin",
+      HOME: "/tmp/home",
+      ANTHROPIC_API_KEY: "anthropic-secret",
+      OPENAI_API_KEY: "openai-secret",
+      CODEX_API_KEY: "codex-secret",
+      DATABASE_URL: "postgres://secret",
+      AGRIPPA_SECRET_KEY: "master-secret",
+    });
+    expect(env.PATH).toBe("/bin");
+    expect(env.HOME).toBe("/tmp/home");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.CODEX_API_KEY).toBeUndefined();
+    expect(env.DATABASE_URL).toBeUndefined();
+    expect(env.AGRIPPA_SECRET_KEY).toBeUndefined();
   });
 });

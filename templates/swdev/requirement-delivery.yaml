@@ -153,9 +153,10 @@ spec:
           skills: ["builtin/git-workflow@^1", "builtin/test-runner@^1"]
           instructions: |
             Implement the confirmed plan on the CURRENT branch — the platform already
-            created it; do NOT create or switch branches. Commit in reviewable,
-            conventional-message increments and run the repository's test suite
-            before finishing.
+            created it; do NOT create or switch branches. Local commits are optional
+            checkpoints only: the platform publishes the approved filesystem state as
+            one verified snapshot commit. Run the repository's test suite before
+            finishing.
 
             The confirmed plan:
             ${artifacts.implementation-plan}
@@ -183,10 +184,12 @@ spec:
               # retry gives the reviewer a second chance at well-formed JSON
               retry: { max: 1 }
               instructions: |
-                Review the committed changes on this branch against the base branch
-                (`git log ${inputs.branch}..HEAD`, `git diff ${inputs.branch}...HEAD`)
-                for correctness, security, and codebase conventions. Do NOT modify any
-                code — you are the reviewer.
+                Review the COMPLETE workspace state against the base branch for
+                correctness, security, and codebase conventions. Use
+                `git diff ${inputs.branch} --` plus `git status --short`, and inspect
+                every untracked file. Local commit history is advisory only; the
+                platform publishes one verified snapshot commit. Do NOT modify any code
+                — you are the reviewer.
 
                 The plan the change claims to implement:
                 ${artifacts.implementation-plan}
@@ -212,8 +215,9 @@ spec:
               when: checkpoints.review-gate.outcome == 'fix'
               skills: ["builtin/test-runner@^1"]
               instructions: |
-                Fix EXACTLY these review findings on the current branch, then commit.
-                Do not expand the scope beyond them; re-run the tests before finishing.
+                Fix EXACTLY these review findings on the current branch. Do not expand
+                the scope beyond them; re-run the tests before finishing. A local commit
+                is optional because the platform publishes one verified snapshot commit.
 
                 ${checkpoints.review-gate.selectedFindings}
               produces: [changes]

@@ -201,6 +201,17 @@ const SYSTEM_ENV_ALLOW = new Set([
   "CURL_CA_BUNDLE",
 ]);
 
+/** Build the non-secret system environment shared by executors and platform tools. */
+export function buildSystemEnv(
+  source: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && SYSTEM_ENV_ALLOW.has(key)) out[key] = value;
+  }
+  return out;
+}
+
 /**
  * Platform secrets whose VALUES are redacted from event payloads (below). The
  * env allow-list already keeps these out of the subprocess; this set feeds the
@@ -225,10 +236,10 @@ const SECRET_ENV_KEYS = new Set([
 export function buildScrubbedEnv(
   source: Record<string, string | undefined> = process.env,
 ): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out = buildSystemEnv(source);
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
-    if (SDK_AUTH_ALLOW.has(key) || SYSTEM_ENV_ALLOW.has(key)) out[key] = value;
+    if (SDK_AUTH_ALLOW.has(key)) out[key] = value;
   }
   return out;
 }

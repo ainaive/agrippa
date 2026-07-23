@@ -1502,7 +1502,84 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
     expect((analyzeRows.at(-1)?.error as { code: string } | null)?.code).toBe("contract_violation");
   });
 
-  it("fails the run instead of publishing evidence that drifted after review", async () => {
+  it("fails instead of publishing drifted, empty, or atomically changed evidence", async () => {
+    for (const scenario of [
+      { diff: "diff --git a/drifted b/drifted\n+somebody touched this\n", atomic: false },
+      { diff: "", atomic: false },
+      { diff: null, atomic: true },
+    ]) {
+      const fx = await setupV2Fixture();
+      const quickImpl: Record<string, FakeStepBehavior> = {
+        ...IMPL_SCRIPT,
+        "analyze@1": {
+          kind: "succeed",
+          events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+          output: "no questions",
+        },
+      };
+      const dirtyReview: Record<string, FakeStepBehavior> = {
+        review: {
+          kind: "succeed",
+          events: [
+            {
+              type: "artifact",
+              key: "review-report",
+              kind: "json",
+              inline: { findings: [FINDING_A] },
+            },
+          ],
+          output: "one issue",
+        },
+      };
+
+      // plan approval first
+      expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe(
+        "waiting_approval",
+      );
+      const [plan] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, plan?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: { kind: "approval", outcome: "approved" },
+      });
+      // implement runs and stores its patch; review reports findings → gate pause.
+      // The reviewer must run read-only: its writes could never be re-reviewed.
+      const pauseDeps = fx.makeDeps(quickImpl, dirtyReview);
+      expect(await executeRun(pauseDeps, fx.runId)).toBe("waiting_approval");
+      expect(pauseDeps.rev.requests[0]?.toolPolicy.access).toBe("readOnly");
+      expect(pauseDeps.impl.requests[0]?.toolPolicy.access).toBe("readWrite");
+      const [gate] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, gate?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: {
+          kind: "review-gate",
+          outcome: "pass",
+          selectedFindings: [],
+          acceptedFindings: [FINDING_A] as never,
+          acceptedFindingIds: ["f1"],
+        },
+      });
+      // the workspace moved AFTER the gate approved the stored patch — the run
+      // must refuse to publish what nobody reviewed, not silently refresh it
+      if (scenario.diff !== null) fx.workspace.diffOutput = scenario.diff;
+      if (scenario.atomic) fx.scm.evidenceMismatchNext = true;
+      expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe("failed");
+
+      const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+      expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+      expect((run?.error as { message: string } | null)?.message).toContain("changed");
+      expect(fx.scm.pushes).toHaveLength(0);
+    }
+  });
+
+  it("reports a workspace diff failure as a step tool error", async () => {
     const fx = await setupV2Fixture();
     const quickImpl: Record<string, FakeStepBehavior> = {
       ...IMPL_SCRIPT,
@@ -1512,23 +1589,8 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
         output: "no questions",
       },
     };
-    const dirtyReview: Record<string, FakeStepBehavior> = {
-      review: {
-        kind: "succeed",
-        events: [
-          {
-            type: "artifact",
-            key: "review-report",
-            kind: "json",
-            inline: { findings: [FINDING_A] },
-          },
-        ],
-        output: "one issue",
-      },
-    };
 
-    // plan approval first
-    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe(
+    expect(await executeRun(fx.makeDeps(quickImpl, REV_CLEAN_ON_2), fx.runId)).toBe(
       "waiting_approval",
     );
     const [plan] = await fx.db
@@ -1540,36 +1602,17 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
       decidedBy: fx.userId,
       response: { kind: "approval", outcome: "approved" },
     });
-    // implement runs and stores its patch; review reports findings → gate pause.
-    // The reviewer must run read-only: its writes could never be re-reviewed.
-    const pauseDeps = fx.makeDeps(quickImpl, dirtyReview);
-    expect(await executeRun(pauseDeps, fx.runId)).toBe("waiting_approval");
-    expect(pauseDeps.rev.requests[0]?.toolPolicy.access).toBe("readOnly");
-    expect(pauseDeps.impl.requests[0]?.toolPolicy.access).toBe("readWrite");
-    const [gate] = await fx.db
-      .select()
-      .from(checkpoints)
-      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
-    await decideCheckpoint(fx.db, gate?.id as string, {
-      status: "approved",
-      decidedBy: fx.userId,
-      response: {
-        kind: "review-gate",
-        outcome: "pass",
-        selectedFindings: [],
-        acceptedFindings: [FINDING_A] as never,
-        acceptedFindingIds: ["f1"],
-      },
-    });
-    // the workspace moved AFTER the gate approved the stored patch — the run
-    // must refuse to publish what nobody reviewed, not silently refresh it
-    fx.workspace.diffOutput = "diff --git a/drifted b/drifted\n+somebody touched this\n";
-    expect(await executeRun(fx.makeDeps(quickImpl, dirtyReview), fx.runId)).toBe("failed");
+    fx.workspace.diffError = new Error("trusted sidecar index is unreadable");
 
-    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
-    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
-    expect((run?.error as { message: string } | null)?.message).toContain("changed after");
-    expect(fx.scm.pushes).toHaveLength(0);
+    expect(await executeRun(fx.makeDeps(quickImpl, REV_CLEAN_ON_2), fx.runId)).toBe("failed");
+    const implementRows = await fx.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "implement")));
+    expect((implementRows.at(-1)?.error as { code: string } | null)?.code).toBe("tool_error");
+    expect((implementRows.at(-1)?.error as { message: string } | null)?.message).toContain(
+      "sidecar index",
+    );
   });
 
   it("fails a resumed run whose workspace is gone (host changed)", async () => {

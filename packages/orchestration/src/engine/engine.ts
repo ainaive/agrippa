@@ -897,6 +897,12 @@ class RunEngine {
       await this.markSkipped(phase, step, "when_false");
       return;
     }
+    // Resource availability checks materialize skills. Clear any project
+    // configuration left by the preceding agent before that path can touch
+    // .claude; buildRequest repeats this immediately before each attempt.
+    if (step.kind === "agent" && step.requires?.skills.length) {
+      await this.deps.resources.prepareWorkspace(this.workspaceDir);
+    }
     if (step.requires) {
       const authorizedMcp = this.authorizedMcpRefs(step.requires.mcpServers);
       const ungrantedMcp = step.requires.mcpServers.filter((ref) => !authorizedMcp.includes(ref));
@@ -1033,24 +1039,34 @@ class RunEngine {
       const patchContracts = this.template.spec.outputs.artifacts.filter(
         (a) => a.kind === "patch" && this.producedArtifacts.has(a.key),
       );
+      let expectedPatch: string | undefined;
       if (patchContracts.length > 0) {
-        const current = await this.deps.workspace.diff(this.run.id);
+        const current = await this.wrapScm(step, () => this.deps.workspace.diff(this.run.id));
         for (const contract of patchContracts) {
-          if (current && this.artifactValues[contract.key] !== current) {
+          const stored = this.artifactValues[contract.key] ?? "";
+          if (stored !== current) {
             throw new RunFailure(
               "contract_violation",
               `workspace changed after the reviewed '${contract.key}' evidence — refusing to publish unapproved changes`,
             );
           }
+          expectedPatch ??= stored;
         }
       }
-      await this.wrapScm(step, () =>
+      const result = await this.wrapScm(step, () =>
         scm.push(this.run.id, {
           projectId: this.run.projectId,
           repo: this.workspaceRepoValue(),
           branch,
+          ...(expectedPatch === undefined ? {} : { expectedPatch }),
         }),
       );
+      if (result.status === "evidence_mismatch") {
+        throw new RunFailure(
+          "contract_violation",
+          "workspace changed while preparing the approved snapshot — refusing to publish",
+        );
+      }
       await this.emit("branch.pushed", { branch });
       return;
     }
@@ -1203,7 +1219,15 @@ class RunEngine {
       if (await this.stepProducedArtifact(step.id, key)) continue;
       const contract = this.template.spec.outputs.artifacts.find((a) => a.key === key);
       if (contract?.kind === "patch") {
-        const diff = await this.deps.workspace.diff(this.run.id);
+        let diff: string;
+        try {
+          diff = await this.deps.workspace.diff(this.run.id);
+        } catch (err) {
+          throw new StepFailed(`workspace diff failed for patch '${key}'`, {
+            code: "tool_error",
+            message: `workspace diff failed: ${String((err as Error).message ?? err).slice(0, 500)}`,
+          });
+        }
         // fail the producing step (retryable) instead of letting the run march
         // on to push/pr.open and only die at the end-of-flow contract check
         if (!diff && contract.required) {
@@ -1278,6 +1302,8 @@ class RunEngine {
         tools: s.tools,
         model: modelFor(s.model.role),
       }));
+
+    await this.deps.resources.prepareWorkspace(this.workspaceDir);
 
     // resolve only what the run is authorized for — ungranted optional
     // resources are dropped here, never resolved from the global registry

@@ -37,6 +37,8 @@ The sidebar's **Approvals** page is your cross-project **"waiting on you"** inbo
 
 Everyone in the project sees the same live timeline; whoever responds to a checkpoint first wins (a second response gets a friendly conflict). Decided checkpoints show **who** responded and when. Members can comment anywhere in the run's timeline — questions, context, "shipping it" — and comments appear instantly for every watcher. Accepted review findings are never silent: they appear in the PR body with the accepter's name.
 
+For delivery workflows, the final branch contains one platform-created snapshot commit whose tree exactly matches the reviewed patch. Agents may make local commits as working checkpoints, but that intermediate commit history is not carried into the pull request.
+
 ## Cancel, retry, and failures
 
 - **Cancel** (members+) stops a run — immediately for queued/paused runs, at the next safe point for executing ones.

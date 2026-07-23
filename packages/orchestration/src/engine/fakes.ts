@@ -18,6 +18,7 @@ export class FakeWorkspaceManager implements WorkspaceManager {
   readonly checkouts: Array<{ runId: string; spec: unknown }> = [];
   readonly cleaned: string[] = [];
   diffOutput = "diff --git a/fake b/fake\n";
+  diffError: Error | null = null;
 
   async ensureDir(runId: string): Promise<string> {
     let dir = this.dirs.get(runId);
@@ -33,6 +34,7 @@ export class FakeWorkspaceManager implements WorkspaceManager {
   }
 
   async diff(_runId: string): Promise<string> {
+    if (this.diffError) throw this.diffError;
     return this.diffOutput;
   }
 
@@ -50,7 +52,13 @@ export class FakeWorkspaceManager implements WorkspaceManager {
 }
 
 export class FakeResourceMaterializer implements ResourceMaterializer {
+  readonly preparedWorkspaces: string[] = [];
+
   constructor(private readonly available: { skills?: string[]; mcpServers?: string[] } = {}) {}
+
+  async prepareWorkspace(workspaceDir: string): Promise<void> {
+    this.preparedWorkspaces.push(workspaceDir);
+  }
 
   async skills(
     refs: string[],
@@ -114,6 +122,7 @@ export class FakeScmService implements ScmService {
   readonly branches: Array<{ runId: string; name: string }> = [];
   readonly pushes: Array<{ runId: string; branch: string }> = [];
   readonly pullRequests: Array<{ runId: string; spec: PullRequestSpec }> = [];
+  evidenceMismatchNext = false;
   /** Set to make the next call of that action throw once (retry testing). */
   failNext: Partial<Record<"branch" | "push" | "pr", number>> = {};
 
@@ -130,9 +139,17 @@ export class FakeScmService implements ScmService {
     this.branches.push({ runId, name });
   }
 
-  async push(runId: string, spec: { branch: string }): Promise<void> {
+  async push(
+    runId: string,
+    spec: { branch: string },
+  ): Promise<{ status: "pushed"; commitSha: string } | { status: "evidence_mismatch" }> {
     this.consumeFailure("push");
+    if (this.evidenceMismatchNext) {
+      this.evidenceMismatchNext = false;
+      return { status: "evidence_mismatch" };
+    }
     this.pushes.push({ runId, branch: spec.branch });
+    return { status: "pushed", commitSha: `fake-${this.pushes.length}` };
   }
 
   async openPullRequest(runId: string, spec: PullRequestSpec): Promise<{ url: string }> {

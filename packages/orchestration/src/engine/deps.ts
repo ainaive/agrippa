@@ -35,6 +35,11 @@ export interface WorkspaceManager {
 }
 
 export interface ResourceMaterializer {
+  /**
+   * Remove executor project configuration left by a prior agent invocation.
+   * Called before every attempt/resume, before trusted skills are materialized.
+   */
+  prepareWorkspace(workspaceDir: string): Promise<void>;
   /** Materialize the step's skills into the workspace; missing = unregistered or no active version. */
   skills(
     refs: string[],
@@ -73,6 +78,16 @@ export type PullRequestSpec = {
   body: string;
 };
 
+export type PushSpec = {
+  projectId: string;
+  repo: unknown;
+  branch: string;
+  /** Exact patch evidence approved by the workflow, when one exists. */
+  expectedPatch?: string;
+};
+
+export type PushResult = { status: "pushed"; commitSha: string } | { status: "evidence_mismatch" };
+
 /**
  * Platform-side git write-path (ADR-0011): branch creation before the
  * implementer runs, credentialed push, and PR creation via the provider REST
@@ -81,8 +96,11 @@ export type PullRequestSpec = {
 export interface ScmService {
   /** `git checkout -b <name>` inside the run workspace. */
   createBranch(runId: string, name: string): Promise<void>;
-  /** Push the branch using the stored repo credential (inject → scrub). */
-  push(runId: string, spec: { projectId: string; repo: unknown; branch: string }): Promise<void>;
+  /**
+   * Publish one platform-owned snapshot commit using the stored credential.
+   * Evidence mismatch is a typed result; operational failures reject.
+   */
+  push(runId: string, spec: PushSpec): Promise<PushResult>;
   /** Open a PR/MR; returns its web URL. */
   openPullRequest(runId: string, spec: PullRequestSpec): Promise<{ url: string }>;
 }

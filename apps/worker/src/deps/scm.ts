@@ -1,11 +1,12 @@
 import type { Db } from "@agrippa/db";
-import type { PullRequestSpec, ScmService } from "@agrippa/orchestration";
+import type { PullRequestSpec, PushResult, PushSpec, ScmService } from "@agrippa/orchestration";
 import {
   credentialedUrl,
   git,
   loadRepoConnection,
   platformBaseSha,
-  restorePlatformConfig,
+  platformGit,
+  stagePlatformSnapshot,
   workspaceDirFor,
 } from "./workspace";
 
@@ -20,62 +21,72 @@ export class GitScmService implements ScmService {
   constructor(private readonly db: Db) {}
 
   async createBranch(runId: string, name: string): Promise<void> {
-    // -B keeps this idempotent across step retries and crash-resume
+    // This is the last platform operation against agent-visible .git and runs
+    // before any agent step. The sidecar ref is the idempotency anchor used by
+    // the verified publisher later.
     await git(["checkout", "-B", name], workspaceDirFor(runId));
+    const baseSha = await platformBaseSha(runId);
+    if (!baseSha) throw new Error("trusted platform git base is missing");
+    await platformGit(runId, ["update-ref", `refs/heads/${name}`, baseSha]);
   }
 
-  async push(
-    runId: string,
-    spec: { projectId: string; repo: unknown; branch: string },
-  ): Promise<void> {
-    const dir = workspaceDirFor(runId);
-    // an agent-rewritten .git/config (filters, insteadOf on the push URL,
-    // credential.helper) must never shape the platform's add/commit/push —
-    // restore the provision-time snapshot first
-    await restorePlatformConfig(runId);
-    // Finalizing commit: the patch evidence covers committed + staged +
-    // worktree changes, but a push ships only commits — anything the agent
-    // left uncommitted would be approved yet never published. Committing it
-    // platform-side makes evidence == PR by construction. add -A is safe:
-    // the sanitized paths are invisible to git (skip-worktree + info/exclude)
-    // and .gitignore is honored.
-    await git(["add", "-A"], dir);
-    const staged = await git(["status", "--porcelain"], dir);
-    if (staged.trim().length > 0) {
-      await git(
-        [
-          "-c",
-          "user.name=Agrippa",
-          "-c",
-          "user.email=agrippa@agrippa.local",
-          "-c",
-          "commit.gpgsign=false",
-          "commit",
-          "-m",
-          "chore: commit remaining workspace changes",
-        ],
-        dir,
-      );
+  async push(runId: string, spec: PushSpec): Promise<PushResult> {
+    const snapshot = await stagePlatformSnapshot(runId);
+    if (spec.expectedPatch !== undefined && snapshot.patch !== spec.expectedPatch) {
+      return { status: "evidence_mismatch" };
     }
-    // publishing an empty branch would only fail later at pr.open with an
-    // opaque provider error — fail here with the real reason. The base SHA
-    // comes from the platform sidecar (agent-writable refs don't count);
-    // refs/agrippa/base is the fallback for pre-sidecar workspaces.
-    let base = await platformBaseSha(runId);
-    if (!base) {
-      base = await git(["rev-parse", "--verify", "--quiet", "refs/agrippa/base"], dir)
-        .then((out) => out.trim())
-        .catch(() => null);
+    if (snapshot.patch.length === 0) {
+      throw new Error("nothing to publish — the approved workspace snapshot is empty");
     }
-    if (base) {
-      const head = (await git(["rev-parse", "HEAD"], dir)).trim();
-      if (head === base) {
-        throw new Error("nothing to publish — the run produced no commits and no changes");
+
+    await platformGit(runId, ["check-ref-format", "--branch", spec.branch]);
+    const branchRef = `refs/heads/${spec.branch}`;
+    const existing = await platformGit(runId, ["rev-parse", "--verify", branchRef])
+      .then((out) => out.trim())
+      .catch(() => null);
+
+    let commitSha: string;
+    if (existing && existing !== snapshot.baseSha) {
+      const [tree, parent] = await Promise.all([
+        platformGit(runId, ["rev-parse", `${existing}^{tree}`]).then((out) => out.trim()),
+        platformGit(runId, ["rev-parse", `${existing}^`]).then((out) => out.trim()),
+      ]);
+      if (tree !== snapshot.treeSha || parent !== snapshot.baseSha) {
+        throw new Error("platform publish ref does not match the approved snapshot");
       }
+      commitSha = existing;
+    } else {
+      commitSha = (
+        await platformGit(
+          runId,
+          [
+            "commit-tree",
+            snapshot.treeSha,
+            "-p",
+            snapshot.baseSha,
+            "-m",
+            "chore: publish approved Agrippa changes",
+          ],
+          {
+            GIT_AUTHOR_NAME: "Agrippa",
+            GIT_AUTHOR_EMAIL: "agrippa@agrippa.local",
+            GIT_COMMITTER_NAME: "Agrippa",
+            GIT_COMMITTER_EMAIL: "agrippa@agrippa.local",
+          },
+        )
+      ).trim();
+      await platformGit(runId, [
+        "update-ref",
+        branchRef,
+        commitSha,
+        existing ?? "0000000000000000000000000000000000000000",
+      ]);
     }
+
     const { connection, token } = await loadRepoConnection(this.db, spec.projectId, spec.repo);
     const pushUrl = credentialedUrl(connection.url, token);
-    await git(["push", pushUrl, `${spec.branch}:${spec.branch}`], dir);
+    await platformGit(runId, ["push", pushUrl, `${branchRef}:${branchRef}`]);
+    return { status: "pushed", commitSha };
   }
 
   async openPullRequest(_runId: string, spec: PullRequestSpec): Promise<{ url: string }> {

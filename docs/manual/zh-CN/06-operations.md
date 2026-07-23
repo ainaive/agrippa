@@ -79,6 +79,8 @@ sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstr
 
 拉取新镜像后 `docker compose up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，费用也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
 
+升级到首次引入平台自有 Git 快照（ADR-0012）的版本前，请先排空仍在进行的**仓库型**执行。旧工作区没有可信的平台 gitdir，新 worker 恢复时会按设计以 `workspace_lost` 失败关闭；非仓库型执行不受影响。后续升级仍保持正常的步骤粒度续跑行为。
+
 反向代理注意：对 `/api/v1/runs/*/events`（SSE）**关闭响应缓冲**——如 nginx 的 `proxy_buffering off;`——否则实时进度会成批到达。
 
 ## 故障排查

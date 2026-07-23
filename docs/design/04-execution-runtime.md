@@ -66,9 +66,10 @@ for each flow node (phase | loop):
                       (checkpoints.<id>), settle the step row, continue
     kind system → platform action (workspace.checkout | git.branch | git.push |
                   pr.open via EngineDeps.scm; pr.open appends the waiver section;
-                  git.push FAILS the run if the workspace no longer matches the
-                  stored patch evidence — drift is never silently republished)
+                  git.push rebuilds a platform-owned snapshot and FAILS before
+                  push on Git error, empty output, or any evidence mismatch)
     kind agent  → resolve the slot binding (executor + faber prompt) + request
+                  → replace .claude/.mcp.json; materialize authorized resources
                   → executor.executeStep(req, ctx)
                   → persist every event to run_events (seq++), publish to Redis,
                     update run_steps, record token_usage, feed BudgetMeter
@@ -83,8 +84,15 @@ Steps are the idempotency unit. On retry/resume, the engine loads `run_steps`, *
 - A step left `running` by a dead worker is marked `crashed`. A crash is an *interrupted* attempt, not a consumed retry: it adds one extra attempt (so even a no-retry step re-executes rather than being silently skipped), and the crashed attempt's `executor_session_id` is carried onto the recovery attempt so a resume-capable executor resumes that session.
 - Otherwise → restart the step as `attempt + 1` (templates must keep steps restart-safe; the workspace checkout is deterministic and `system` actions are idempotent).
 - Workspaces are **host-local**: when a succeeded checkout has no repository behind it on this host (the resume landed elsewhere, or the files were removed), the engine's `isIntact()` probe fails the run with `workspace_lost` up front instead of letting every subsequent step run against an empty directory — see [03-executor-abstraction](03-executor-abstraction.md) on the host-affinity boundary.
+- Repository workspaces also require the trusted platform gitdir created at checkout. Legacy workspaces without it fail `workspace_lost`; they are never reconstructed from agent-writable metadata.
 
 Budget correctness on resume: the `BudgetMeter` initializes from **persisted** `token_usage` totals, and usage rows are keyed by `(run_id, step_id, attempt)` — a partially-executed attempt's cost is counted, never double-counted.
+
+### Patch evidence and snapshot publication
+
+Patch artifacts are generated from a platform-owned Git index, not the agent's `.git`. Each read resets that index to the trusted clone base, stages the current worktree with runtime paths excluded, and emits a binary cached diff. A Git failure is a retryable `tool_error`; an empty required patch fails its producing step.
+
+At `git.push`, the engine first compares the stored patch byte-for-byte with a fresh snapshot, including empty values. The SCM adapter stages again while holding its own operation boundary and returns a typed mismatch if the workspace changed between those checks. Only an exact, nonempty match becomes a single Agrippa-authored `commit-tree` child of the clone base. Its sidecar ref makes retries idempotent: a matching tree/parent reuses the commit; any other ref state fails. The pushed PR therefore represents the approved tree, while any local agent commit graph stays only in the disposable workspace (ADR-0012).
 
 ### Checkpoints (approvals, questions, review gates)
 
