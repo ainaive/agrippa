@@ -257,6 +257,15 @@ export type ModelRow = {
   status: string;
 };
 
+export type ProviderCredentialRow = {
+  id: string;
+  provider: string;
+  baseUrl: string | null;
+  hasCredential: boolean;
+  createdAt: string;
+  rotatedAt: string | null;
+};
+
 export type SkillRow = {
   id: string;
   slug: string;

@@ -4,6 +4,7 @@
     "members": "成员",
     "grants": "资源授权",
     "repos": "代码仓库",
+    "providers": "模型服务商",
     "quota": "配额"
   },
   "general": {
@@ -42,6 +43,22 @@
     "empty": "尚未关联代码仓库。",
     "private": "已配置凭证",
     "public": "公开"
+  },
+  "providers": {
+    "provider": "服务商",
+    "apiKey": "API 密钥",
+    "baseUrl": "接入地址（可选）",
+    "baseUrlHint": "留空则使用服务商的默认接入点",
+    "add": "添加",
+    "rotate": "更换密钥",
+    "save": "保存",
+    "cancel": "取消",
+    "remove": "移除",
+    "removeConfirm": "移除 {{provider}} 凭证？之后的执行将回退到平台工作节点自身的密钥。",
+    "empty": "尚无服务商凭证。执行将使用平台工作节点配置的密钥。",
+    "keySet": "已配置密钥",
+    "rotated": "密钥已更换",
+    "defaultEndpoint": "默认接入点"
   },
   "quota": {
     "costLimit": "每月费用上限（美元）",
