@@ -148,6 +148,20 @@ export const repoCreateSchema = z.object({
   token: z.string().min(1).optional(),
 });
 
+export const providerCredentialCreateSchema = z.object({
+  provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  /** Write-only; encrypted into the secrets table, never echoed back. */
+  apiKey: z.string().min(1),
+  /** Overrides the provider catalog's default endpoints (regional hosts). */
+  baseUrl: z.url().optional(),
+});
+
+/** A keyless credential is meaningless, so there is no `apiKey: null` state — clearing is DELETE. */
+export const providerCredentialUpdateSchema = z.object({
+  apiKey: z.string().min(1).optional(),
+  baseUrl: z.url().nullable().optional(),
+});
+
 // ── Execution ─────────────────────────────────────────────────────────────────
 
 export const taskSubmitSchema = z.object({

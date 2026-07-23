@@ -25,12 +25,12 @@ export type ExecutorCatalogEntry = {
 export const EXECUTOR_CATALOG = {
   "claude-agent-sdk": {
     label: "Claude Code",
-    providers: ["anthropic"],
+    providers: ["anthropic", "dashscope"],
     capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
   },
   "codex-cli": {
     label: "OpenAI Codex",
-    providers: ["openai"],
+    providers: ["openai", "dashscope"],
     capabilities: { subagents: false, mcp: false, skills: false, resume: true, streaming: true },
   },
   fake: {
