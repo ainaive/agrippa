@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   ARTIFACT_DIR,
@@ -9,7 +10,9 @@ import {
   type ExecutionContext,
   type Executor,
   type ExecutorEvent,
+  effectiveBaseUrl,
   expectedFilename,
+  overlayProviderAuth,
   priorContextBlock,
   type StepExecutionRequest,
 } from "@agrippa/executor-core";
@@ -61,6 +64,25 @@ function buildArgs(req: StepExecutionRequest): string[] {
     "-c",
     "sandbox_workspace_write.network_access=false",
   ];
+  const baseUrl = effectiveBaseUrl(req.providerAuth, "openai");
+  if (req.providerAuth && baseUrl !== undefined) {
+    // Route through a synthesized model provider: `-c` overrides survive
+    // --ignore-user-config, and env_key pins auth to the scrubbed env key
+    // set by overlayProviderAuth. Bailian's OpenAI-compatible mode speaks
+    // chat completions, not the responses wire API.
+    args.push(
+      "-c",
+      "model_provider=agrippa",
+      "-c",
+      `model_providers.agrippa.name=${req.providerAuth.provider}`,
+      "-c",
+      `model_providers.agrippa.base_url="${baseUrl}"`,
+      "-c",
+      "model_providers.agrippa.env_key=OPENAI_API_KEY",
+      "-c",
+      "model_providers.agrippa.wire_api=chat",
+    );
+  }
   if (req.resumeSessionId) args.push("resume", req.resumeSessionId);
   args.push("-"); // prompt on stdin
   return args;
@@ -149,10 +171,19 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       clearExpectedArtifacts(req.workspaceDir, req.expectedArtifacts);
 
       const collector = new CodexEventCollector(req.model.providerModelId);
+      const env = overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "openai");
+      if (req.providerAuth) {
+        // An ambient CODEX_HOME auth.json would outrank the project key, so
+        // the run gets its own home — per run, not per step, because resume
+        // sessions live under CODEX_HOME. Left for OS tmp reaping.
+        const home = path.join(tmpdir(), "agrippa-codex-home", req.runId);
+        mkdirSync(home, { recursive: true });
+        env.CODEX_HOME = home;
+      }
       const proc = Bun.spawn({
         cmd: [...command, ...buildArgs(req)],
         cwd: req.workspaceDir,
-        env: buildScrubbedEnv(),
+        env,
         stdin: new TextEncoder().encode(buildPrompt(req)),
         stdout: "pipe",
         stderr: "pipe",

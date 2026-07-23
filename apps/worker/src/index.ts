@@ -44,17 +44,19 @@ const executors: Record<string, Executor> = {
   fake: new DemoExecutor(),
 };
 // codex registers only when the CLI is actually usable on this host — which
-// includes supporting the config-isolation flags every step passes
+// includes supporting the config-isolation flags every step passes. Env auth
+// is no longer required at boot: a project provider credential can arrive
+// per-step, so a keyless worker is still a valid codex host.
 const codexProbe = probeCodexCli();
-const codexAuth = Boolean(
-  process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || process.env.CODEX_HOME,
-);
-if (codexProbe.ok && codexAuth) {
+if (codexProbe.ok) {
   executors["codex-cli"] = createCodexExecutor();
-  console.log(`[worker] codex executor registered (${codexProbe.version})`);
+  const authMode =
+    process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || process.env.CODEX_HOME
+      ? "env auth"
+      : "project credentials only";
+  console.log(`[worker] codex executor registered (${codexProbe.version}, ${authMode})`);
 } else {
-  const reason = codexProbe.ok ? "no auth configured" : codexProbe.reason;
-  console.log(`[worker] codex executor not registered (${reason})`);
+  console.log(`[worker] codex executor not registered (${codexProbe.reason})`);
 }
 // the static catalog in @agrippa/core is what the API/SPA trust — a drifting
 // capability set here would let templates pass validation and fail at runtime

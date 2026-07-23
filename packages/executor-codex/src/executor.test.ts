@@ -201,6 +201,58 @@ describe("codex executor", () => {
     if (!legacy.ok) expect(legacy.reason).toContain("--ignore-user-config");
   });
 
+  it("routes a project provider credential through a synthesized model provider", async () => {
+    const events = await collect(
+      makeReq(makeWorkspace("argv"), {
+        model: { provider: "dashscope", providerModelId: "qwen3.7-max" },
+        providerAuth: { provider: "dashscope", apiKey: "sk-bailian-project" },
+      }),
+    );
+    const done = events.find((e) => e.type === "step.completed");
+    const argv = JSON.parse(done?.type === "step.completed" ? done.output : "[]") as string[];
+    expect(argv).toContain("model_provider=agrippa");
+    expect(argv).toContain(
+      'model_providers.agrippa.base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"',
+    );
+    expect(argv).toContain("model_providers.agrippa.env_key=OPENAI_API_KEY");
+    expect(argv).toContain("model_providers.agrippa.wire_api=chat");
+  });
+
+  it("keeps plain argv for a credential with no base URL (native openai)", async () => {
+    const events = await collect(
+      makeReq(makeWorkspace("argv"), {
+        providerAuth: { provider: "openai", apiKey: "sk-openai-project" },
+      }),
+    );
+    const done = events.find((e) => e.type === "step.completed");
+    const argv = JSON.parse(done?.type === "step.completed" ? done.output : "[]") as string[];
+    expect(argv).not.toContain("model_provider=agrippa");
+  });
+
+  it("project credential replaces env auth and redirects CODEX_HOME", async () => {
+    savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    savedEnv.CODEX_HOME = process.env.CODEX_HOME;
+    process.env.OPENAI_API_KEY = "sk-worker-env";
+    process.env.CODEX_HOME = "/home/worker/.codex";
+
+    const events = await collect(
+      makeReq(makeWorkspace("env"), {
+        providerAuth: { provider: "dashscope", apiKey: "sk-bailian-project" },
+      }),
+    );
+    const done = events.find((e) => e.type === "step.completed");
+    const seen = JSON.parse(done?.type === "step.completed" ? done.output : "{}") as {
+      openai: string | null;
+      openaiBaseUrl: string | null;
+      codexHome: string | null;
+    };
+    expect(seen.openai).toBe("sk-bailian-project"); // project key wins over env
+    expect(seen.openaiBaseUrl).toBe("https://dashscope.aliyuncs.com/compatible-mode/v1");
+    // ambient auth.json under the worker's CODEX_HOME must not outrank the key
+    expect(seen.codexHome).toContain("agrippa-codex-home");
+    expect(seen.codexHome).toContain("run-1");
+  });
+
   it("scrubs the subprocess environment down to the allow-list", async () => {
     savedEnv.AGRIPPA_SECRET_KEY = process.env.AGRIPPA_SECRET_KEY;
     savedEnv.NODE_OPTIONS = process.env.NODE_OPTIONS;

@@ -10,6 +10,7 @@ import {
   evaluateToolCall,
   isReadTool,
   isWriteTool,
+  overlayProviderAuth,
   pathArgOf,
   priorContextBlock,
   realContained,
@@ -73,8 +74,11 @@ export function buildQueryArgs(
     // OS-level command isolation when the host supports it (bubblewrap); degrade
     // gracefully elsewhere (e.g. macOS dev) rather than refusing to run
     sandbox: { enabled: true, failIfUnavailable: false },
-    // secrets (master key, datastore URLs) must not reach the agent subprocess
-    env: buildScrubbedEnv(),
+    // secrets (master key, datastore URLs) must not reach the agent subprocess;
+    // a project provider credential (Bailian…) then replaces the anthropic
+    // auth family — the slot resolves single-provider, so one base URL also
+    // serves every subagent model in this query
+    env: overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "anthropic"),
     maxTurns: req.limits.maxTurns,
     includePartialMessages: true,
     resume: req.resumeSessionId,

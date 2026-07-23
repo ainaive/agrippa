@@ -167,6 +167,25 @@ describe("claude executor option mapping (docs/design/03)", () => {
       else process.env.AGRIPPA_SECRET_KEY = prev;
     }
   });
+
+  it("overlays a project provider credential onto the subprocess env", () => {
+    const req = makeRequest({
+      model: { provider: "dashscope", providerModelId: "qwen3.7-max" },
+      providerAuth: { provider: "dashscope", apiKey: "sk-bailian-project-key" },
+    });
+    const prev = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-worker-env";
+    try {
+      const { options } = buildQueryArgs(req, makeCtx(), new AbortController());
+      // project credential wins: the env family is replaced, not merged
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe("sk-bailian-project-key");
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe("https://dashscope.aliyuncs.com/apps/anthropic");
+      expect(options.env?.ANTHROPIC_API_KEY).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prev;
+    }
+  });
 });
 
 describe("claude executor event stream", () => {
