@@ -72,7 +72,11 @@ type Fixture = {
   };
 };
 
-type DepsOptions = { mcpServers?: string[]; skills?: string[] };
+type DepsOptions = {
+  mcpServers?: string[];
+  skills?: string[];
+  providerCredentials?: Record<string, { apiKey: string; baseUrl?: string }>;
+};
 
 type FixtureOptions = {
   params?: Record<string, unknown>;
@@ -201,6 +205,9 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
       resources: new FakeResourceMaterializer({
         mcpServers: opts.mcpServers ?? [],
         ...(opts.skills !== undefined ? { skills: opts.skills } : {}),
+        ...(opts.providerCredentials !== undefined
+          ? { providerCredentials: opts.providerCredentials }
+          : {}),
       }),
       artifacts: new InMemoryArtifactStore(),
       logger: silentLogger,
@@ -656,6 +663,56 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     const serialized = JSON.stringify(msg?.payload);
     expect(serialized).toContain("[REDACTED]");
     expect(serialized).not.toContain(secret);
+  });
+
+  it("materializes the project provider credential per step and redacts its key", async () => {
+    const fx = await setupFixture();
+    const apiKey = "sk-bailian-project-key-1234567890";
+    const script: Record<string, FakeStepBehavior> = {
+      ...HAPPY_SCRIPT,
+      "reproduce-bug": {
+        kind: "succeed",
+        events: [
+          { type: "message.completed", role: "assistant", text: `the key is ${apiKey} oops` },
+          { type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" },
+        ],
+        output: "done",
+      },
+    };
+    // same credential under every provider — the fixture resolution is
+    // mixed-provider ('*'), so the step's provider is data, not a constant
+    const cred = { apiKey };
+    const deps = fx.makeDeps(script, {
+      providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
+    });
+    await executeRun(deps, fx.runId);
+
+    // every request carries the credential matching its model's provider
+    expect(deps.executor.requests.length).toBeGreaterThan(0);
+    for (const req of deps.executor.requests) {
+      expect(req.providerAuth?.apiKey).toBe(apiKey);
+      expect(req.providerAuth?.provider).toBe(req.model.provider);
+    }
+
+    // memoized per run: one materializer call per distinct provider
+    const materializer = deps.resources as FakeResourceMaterializer;
+    const providers = new Set(deps.executor.requests.map((r) => r.model.provider));
+    expect(materializer.providerCredentialCalls.length).toBe(providers.size);
+
+    // the key was registered with the redactor at materialization — an agent
+    // echoing it can never persist it
+    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+    const serialized = JSON.stringify(events.map((e) => e.payload));
+    expect(serialized).not.toContain(apiKey);
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  it("omits providerAuth when the project has no provider credential", async () => {
+    const fx = await setupFixture();
+    const deps = fx.makeDeps(HAPPY_SCRIPT);
+    await executeRun(deps, fx.runId);
+    expect(deps.executor.requests.length).toBeGreaterThan(0);
+    for (const req of deps.executor.requests) expect(req.providerAuth).toBeUndefined();
   });
 });
 

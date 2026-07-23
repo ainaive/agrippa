@@ -53,8 +53,16 @@ export class FakeWorkspaceManager implements WorkspaceManager {
 
 export class FakeResourceMaterializer implements ResourceMaterializer {
   readonly preparedWorkspaces: string[] = [];
+  readonly providerCredentialCalls: Array<{ projectId: string; provider: string }> = [];
 
-  constructor(private readonly available: { skills?: string[]; mcpServers?: string[] } = {}) {}
+  constructor(
+    private readonly available: {
+      skills?: string[];
+      mcpServers?: string[];
+      /** provider → project credential returned by providerCredential. */
+      providerCredentials?: Record<string, { apiKey: string; baseUrl?: string }>;
+    } = {},
+  ) {}
 
   async prepareWorkspace(workspaceDir: string): Promise<void> {
     this.preparedWorkspaces.push(workspaceDir);
@@ -94,6 +102,14 @@ export class FakeResourceMaterializer implements ResourceMaterializer {
       }
     }
     return { resolved, missing };
+  }
+
+  async providerCredential(
+    projectId: string,
+    provider: string,
+  ): Promise<{ apiKey: string; baseUrl?: string } | null> {
+    this.providerCredentialCalls.push({ projectId, provider });
+    return this.available.providerCredentials?.[provider] ?? null;
   }
 }
 

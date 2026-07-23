@@ -47,6 +47,15 @@ export interface ResourceMaterializer {
   ): Promise<{ resolved: ResolvedSkill[]; missing: string[] }>;
   /** Resolve step MCP refs against the registry + secrets; missing = unregistered/disabled. */
   mcpServers(refs: string[]): Promise<{ resolved: ResolvedMcpServer[]; missing: string[] }>;
+  /**
+   * The project's decrypted credential for a model provider, or null when the
+   * project has none (worker env auth then applies). The engine memoizes per
+   * run and registers the key with the redactor before it reaches a request.
+   */
+  providerCredential(
+    projectId: string,
+    provider: string,
+  ): Promise<{ apiKey: string; baseUrl?: string } | null>;
 }
 
 export type StoredArtifact = {

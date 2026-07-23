@@ -32,6 +32,7 @@ import {
   type Executor,
   type ExecutorEvent,
   type PriorStepSummary,
+  type ProviderAuth,
   type ResolvedMcpServer,
   type ResolvedModel,
   type SecretRedactor,
@@ -207,6 +208,8 @@ class RunEngine {
   private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
   // scrubs known secret values from event payloads before persist/publish
   private readonly redactor: SecretRedactor = createSecretRedactor(collectEnvSecretValues());
+  // provider → project credential (or null), one materializer call per provider per run
+  private providerCredentialCache = new Map<string, { apiKey: string; baseUrl?: string } | null>();
 
   constructor(
     private readonly deps: EngineDeps,
@@ -1344,6 +1347,9 @@ class RunEngine {
       }),
     );
 
+    // slot resolution is single-provider, so the step model's provider also
+    // covers every subagent model in this request
+    const model = modelFor(step.model.role);
     return {
       runId: this.run.id,
       stepId: step.id,
@@ -1351,7 +1357,8 @@ class RunEngine {
       agentSlot: slot,
       instructions: interpolate(step.instructions, ctx),
       systemPrompt: binding.systemPrompt,
-      model: modelFor(step.model.role),
+      model,
+      providerAuth: await this.providerAuthFor(model.provider),
       subagents,
       skills,
       mcpServers,
@@ -1373,6 +1380,21 @@ class RunEngine {
         kind: this.template.spec.outputs.artifacts.find((a) => a.key === key)?.kind ?? "markdown",
       })),
     };
+  }
+
+  /**
+   * The project's credential for a provider, memoized per run (one decrypt
+   * per provider). The key is registered with the redactor the moment it is
+   * materialized — before any request can echo it into an event payload.
+   */
+  private async providerAuthFor(provider: string): Promise<ProviderAuth | undefined> {
+    if (!this.providerCredentialCache.has(provider)) {
+      const cred = await this.deps.resources.providerCredential(this.refs.project.id, provider);
+      if (cred) this.redactor.add([cred.apiKey]);
+      this.providerCredentialCache.set(provider, cred);
+    }
+    const cred = this.providerCredentialCache.get(provider);
+    return cred ? { provider, apiKey: cred.apiKey, baseUrl: cred.baseUrl } : undefined;
   }
 
   /** MCP refs the run is authorized to use (pinned at submit; see resolve.authorizeResources). */
