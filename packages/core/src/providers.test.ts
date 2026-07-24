@@ -35,13 +35,21 @@ describe("validateProviderBaseUrl", () => {
     expect(validateProviderBaseUrl("openai", "https://proxy.example.com/v1?key=x")).not.toBeNull();
   });
 
-  it("pins catalog host families: dashscope must stay on .aliyuncs.com", () => {
+  it("pins dashscope to the exact API hosts plus the workspace-gateway suffix", () => {
     expect(
       validateProviderBaseUrl("dashscope", "https://evil.example.com/apps/anthropic"),
-    ).toContain(".aliyuncs.com");
-    // suffix must match on a label boundary-ish suffix, not a lookalike TLD trick
+    ).toContain("aliyuncs.com");
+    // lookalike-suffix tricks
     expect(
       validateProviderBaseUrl("dashscope", "https://aliyuncs.com.evil.example.com/x"),
+    ).not.toBeNull();
+    // customer-controlled Aliyun neighbors (OSS buckets can log request
+    // headers) are NOT acceptable key destinations despite the shared zone
+    expect(
+      validateProviderBaseUrl("dashscope", "https://bucket.oss-cn-hangzhou.aliyuncs.com/x"),
+    ).not.toBeNull();
+    expect(
+      validateProviderBaseUrl("dashscope", "https://evil.dashscope.aliyuncs.com/x"),
     ).not.toBeNull();
   });
 });

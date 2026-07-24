@@ -52,8 +52,15 @@ export class FakeExecutor implements Executor {
   readonly attempts = new Map<string, number>();
   /** every request received, for mapping assertions. */
   readonly requests: StepExecutionRequest[] = [];
+  /** undefined = no env-auth gating (the default for demo/compliance runs). */
+  readonly envAuthProviders?: readonly string[];
 
-  constructor(private readonly script: Record<string, FakeStepBehavior> = {}) {}
+  constructor(
+    private readonly script: Record<string, FakeStepBehavior> = {},
+    opts: { envAuthProviders?: readonly string[] } = {},
+  ) {
+    this.envAuthProviders = opts.envAuthProviders;
+  }
 
   /** `<stepId>@<iteration>` keys override the bare step id (loop-round scripting). */
   behaviorFor(stepId: string, iteration = 1): FakeStepBehavior {

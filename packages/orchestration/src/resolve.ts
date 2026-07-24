@@ -2,6 +2,7 @@ import {
   EXECUTOR_CATALOG,
   EXECUTOR_DEFAULT_SENTINEL,
   type ExecutorCatalogEntry,
+  isCredentialGatedExecutor,
   isExecutorId,
   type ModelTier,
   providerAuthPolicy,
@@ -306,7 +307,6 @@ export async function assertResolutionCredentialed(
   agentBindings: Record<string, { executorId: string }> | null,
   executorId: string,
 ): Promise<void> {
-  const gated = (execId: string): boolean => execId !== "fake" && isExecutorId(execId);
   const required = new Set<string>();
   const collect = (entries: ModelResolutionEntry[]): void => {
     for (const entry of entries) {
@@ -318,11 +318,11 @@ export async function assertResolutionCredentialed(
     (v) => v !== null && typeof v === "object" && "providerModelId" in (v as object),
   );
   if (flat) {
-    if (gated(executorId)) collect(values as ModelResolutionEntry[]);
+    if (isCredentialGatedExecutor(executorId)) collect(values as ModelResolutionEntry[]);
   } else {
     for (const [slot, resolution] of Object.entries(modelResolution ?? {})) {
       const execId = agentBindings?.[slot]?.executorId ?? executorId;
-      if (!gated(execId)) continue;
+      if (!isCredentialGatedExecutor(execId)) continue;
       collect(Object.values(resolution as Record<string, ModelResolutionEntry>));
     }
   }

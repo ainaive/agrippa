@@ -34,6 +34,18 @@ export interface WorkspaceManager {
   cleanup(runId: string): Promise<void>;
 }
 
+/**
+ * Deterministic provider-credential misconfiguration (e.g. a base URL whose
+ * host resolves to private address space). The engine converts this into a
+ * run failure instead of letting pg-boss retry a config that cannot work.
+ */
+export class ProviderCredentialError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderCredentialError";
+  }
+}
+
 export interface ResourceMaterializer {
   /**
    * Remove executor project configuration left by a prior agent invocation.

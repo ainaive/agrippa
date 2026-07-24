@@ -166,6 +166,15 @@ export type ExecutorCapabilities = {
 export interface Executor {
   readonly id: string;
   readonly capabilities: ExecutorCapabilities;
+  /**
+   * Providers this executor instance can authenticate from the worker's own
+   * env (captured at construction). When defined, the engine defers a run —
+   * before claiming it — whose resolution needs an env-policy provider that
+   * is neither listed here nor covered by a project credential, so a keyless
+   * worker never claims work it would fail mid-run. undefined = no gating
+   * (fake/demo/custom executors).
+   */
+  readonly envAuthProviders?: readonly string[];
   /** Must terminate with exactly one step.completed | step.failed. */
   executeStep(req: StepExecutionRequest, ctx: ExecutionContext): AsyncIterable<ExecutorEvent>;
 }

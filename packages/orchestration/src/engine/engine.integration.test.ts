@@ -76,6 +76,8 @@ type DepsOptions = {
   mcpServers?: string[];
   skills?: string[];
   providerCredentials?: Record<string, { apiKey: string; baseUrl?: string }>;
+  /** Simulate a worker with limited env auth (undefined = no gating). */
+  envAuthProviders?: readonly string[];
 };
 
 type FixtureOptions = {
@@ -195,7 +197,7 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const workspace = new FakeWorkspaceManager();
 
   const makeDeps: Fixture["makeDeps"] = (script, opts = {}) => {
-    const executor = new FakeExecutor(script);
+    const executor = new FakeExecutor(script, { envAuthProviders: opts.envAuthProviders });
     return {
       db,
       executors: { fake: executor },
@@ -713,6 +715,25 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     await executeRun(deps, fx.runId);
     expect(deps.executor.requests.length).toBeGreaterThan(0);
     for (const req of deps.executor.requests) expect(req.providerAuth).toBeUndefined();
+  });
+
+  it("a worker without usable auth declines the run instead of failing it", async () => {
+    const fx = await setupFixture();
+    // this worker's executor advertises NO env auth, and the project has no
+    // credentials either → same pre-claim decline as an unregistered executor
+    const keyless = fx.makeDeps(HAPPY_SCRIPT, { envAuthProviders: [] });
+    await expect(executeRun(keyless, fx.runId)).rejects.toThrow(ExecutorUnavailableError);
+    const [still] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(still?.status).toBe("queued"); // untouched — another worker can claim it
+
+    // a project credential covers the gap even on a keyless worker
+    const cred = { apiKey: "sk-project-key-1234567890" };
+    const covered = fx.makeDeps(HAPPY_SCRIPT, {
+      envAuthProviders: [],
+      providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
+    });
+    expect(await executeRun(covered, fx.runId)).not.toBe("failed");
+    expect(covered.executor.requests.length).toBeGreaterThan(0);
   });
 });
 

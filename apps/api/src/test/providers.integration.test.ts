@@ -1,6 +1,16 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { auditLogs, providerCredentials, repoConnections, runs, secrets } from "@agrippa/db";
-import { eq } from "drizzle-orm";
+import { FakeExecutor } from "@agrippa/executor-core";
+import {
+  type EngineDeps,
+  executeRun,
+  FakeResourceMaterializer,
+  FakeWorkspaceManager,
+  InMemoryArtifactStore,
+  InProcessEventBus,
+  silentLogger,
+} from "@agrippa/orchestration";
+import { and, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
 import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
@@ -139,9 +149,11 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
       { provider: "openai", baseUrl: "https://user:pw@proxy.example.com/v1" }, // userinfo
     ];
     for (const { provider, baseUrl } of cases) {
+      // apiKey rides along so it is the URL policy being exercised, not the
+      // endpoint+key atomicity rule below
       const patched = await admin.request(`/api/v1/projects/${projectId}/providers/dashscope`, {
         method: "PATCH",
-        json: { baseUrl },
+        json: { apiKey: "sk-rotate", baseUrl },
       });
       // PATCH targets the existing dashscope row; provider-specific host pins
       // only apply to the dashscope cases, generic rules to the rest
@@ -156,6 +168,21 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
       expect(created.status).toBe(400);
       expect((await jsonOf<{ code: string }>(created)).code).toBe("base_url_invalid");
     }
+  });
+
+  it("endpoint and key travel together: baseUrl-only PATCH is rejected", async () => {
+    // redirecting an EXISTING write-only key would defeat the whole guarantee
+    const redirect = await admin.request(`/api/v1/projects/${projectId}/providers/dashscope`, {
+      method: "PATCH",
+      json: { baseUrl: "https://dashscope-intl.aliyuncs.com/apps/anthropic" },
+    });
+    expect(redirect.status).toBe(400);
+    // clearing back to the trusted catalog default needs no key
+    const cleared = await admin.request(`/api/v1/projects/${projectId}/providers/dashscope`, {
+      method: "PATCH",
+      json: { baseUrl: null },
+    });
+    expect(cleared.status).toBe(200);
   });
 
   let gatedProjectId: string;
@@ -251,6 +278,39 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
     });
     const retried = await admin.request(`/api/v1/tasks/${gatedTaskId}/retry`, { method: "POST" });
     expect(retried.status).toBe(202);
+  });
+
+  it("mid-run loss of a required credential fails the run before executor invocation", async () => {
+    // the retried run (still queued) froze a dashscope-only resolution; its
+    // credential disappearing must fail the run with the same actionable code
+    // the submit/retry gates use — never fall back to worker env auth, which
+    // cannot exist for a project-policy provider
+    await admin.request(`/api/v1/projects/${gatedProjectId}/providers/dashscope`, {
+      method: "DELETE",
+    });
+    const [queued] = await db
+      .select()
+      .from(runs)
+      .where(and(eq(runs.taskId, gatedTaskId), eq(runs.status, "queued")));
+    expect(queued).toBeDefined();
+
+    const deps: EngineDeps = {
+      db,
+      executors: { "claude-agent-sdk": new FakeExecutor() },
+      bus: new InProcessEventBus(),
+      workspace: new FakeWorkspaceManager(),
+      resources: new FakeResourceMaterializer(), // no project credentials — matches the DB
+      artifacts: new InMemoryArtifactStore(),
+      logger: silentLogger,
+    };
+    const outcome = await executeRun(deps, queued?.id as string);
+    expect(outcome).toBe("failed");
+    const [failed] = await db
+      .select()
+      .from(runs)
+      .where(eq(runs.id, queued?.id as string));
+    expect(failed?.status).toBe("failed");
+    expect((failed?.error as { code?: string } | null)?.code).toBe("provider_credential_required");
   });
 
   it("delete removes the credential AND its secret, with audit rows throughout", async () => {

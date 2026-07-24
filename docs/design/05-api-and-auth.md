@@ -59,7 +59,9 @@ GET    /projects/:id/providers            POST /projects/:id/providers          
 PATCH  /projects/:id/providers/:provider  DELETE /projects/:id/providers/:provider
    # key is write-only (encrypted into secrets, kind provider_api_key); reads expose hasCredential only.
    # viewer reads the list; admin writes. PATCH rotates the key in place and/or sets baseUrl (null clears
-   # back to the catalog default); DELETE removes row + secret in one tx. Duplicate provider → 409 provider_exists.
+   # back to the catalog default); setting a NEW baseUrl requires re-entering apiKey in the same request —
+   # endpoint and key travel together, so an existing write-only key can never be redirected (ADR-0013 am. 2).
+   # DELETE removes row + secret in one tx. Duplicate provider → 409 provider_exists; bad endpoint → 400 base_url_invalid.
 GET    /projects/:id/grants               PUT /projects/:id/grants # bulk enable/disable resources
 GET    /projects/:id/quota                PUT /projects/:id/quota
 GET    /projects/:id/usage   # current-month totals + byModel + byTaskType + byDay (same window as the quota gate)

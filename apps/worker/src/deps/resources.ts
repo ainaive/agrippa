@@ -14,6 +14,7 @@ import { type ResolvedMcpServer, type ResolvedSkill, realContained } from "@agri
 import type { ResourceMaterializer } from "@agrippa/orchestration";
 import { skillSlugOfRef } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
+import { assertPublicHost } from "./net";
 
 const TEMPLATES_DIR =
   process.env.AGRIPPA_TEMPLATES_DIR ?? path.resolve(import.meta.dirname, "../../../../templates");
@@ -151,6 +152,11 @@ export class DbResourceMaterializer implements ResourceMaterializer {
         ),
       );
     if (!row) return null;
+    if (row.baseUrl) {
+      // the key is about to be sent to this host — refuse names that resolve
+      // into private space (the API only rejects IP literals syntactically)
+      await assertPublicHost(new URL(row.baseUrl).hostname);
+    }
     const [secret] = await this.db.select().from(secrets).where(eq(secrets.id, row.secretRef));
     if (!secret) return null;
     return {

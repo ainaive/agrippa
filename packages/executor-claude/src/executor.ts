@@ -123,9 +123,17 @@ function textOf(content: Array<{ type: string; text?: string }>): string {
 }
 
 export function createClaudeExecutor(queryFn: QueryFn = sdkQuery as QueryFn): Executor {
+  const envAuth = Boolean(
+    process.env.ANTHROPIC_API_KEY ||
+      process.env.ANTHROPIC_AUTH_TOKEN ||
+      process.env.CLAUDE_CODE_OAUTH_TOKEN,
+  );
   return {
     id: "claude-agent-sdk",
     capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
+    // captured at construction: which env-policy providers this worker can
+    // serve without a project credential — the engine defers runs it can't
+    envAuthProviders: envAuth ? ["anthropic"] : [],
 
     async *executeStep(
       req: StepExecutionRequest,

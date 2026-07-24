@@ -27,9 +27,13 @@ export type ProviderCatalogEntry = {
    */
   auth: "project" | "env";
   /**
-   * Allowed hostname suffixes for a credential's baseUrl override. Absent =
-   * any public https host. The worker sends the decrypted key to this URL,
-   * so providers with a known host family pin it (SSRF/exfiltration guard).
+   * Allowed hostnames for a credential's baseUrl override — a leading dot
+   * means suffix match, otherwise exact host. Absent = any public https
+   * host. The worker sends the decrypted key to this URL, so providers with
+   * a known host family pin it (SSRF/exfiltration guard). Pins must exclude
+   * customer-controlled neighbors — e.g. Aliyun OSS bucket domains live
+   * under .aliyuncs.com and can log request headers, so dashscope pins the
+   * exact API hosts plus the workspace-gateway suffix, not the whole zone.
    */
   baseUrlHosts?: readonly string[];
 };
@@ -48,7 +52,7 @@ export const PROVIDER_CATALOG = {
       anthropic: "https://dashscope.aliyuncs.com/apps/anthropic",
     },
     auth: "project",
-    baseUrlHosts: [".aliyuncs.com"],
+    baseUrlHosts: ["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", ".maas.aliyuncs.com"],
   },
 } as const satisfies Record<string, ProviderCatalogEntry>;
 
@@ -111,8 +115,11 @@ export function validateProviderBaseUrl(provider: string, raw: string): string |
   if (host === "localhost" || !host.includes(".")) return "must be a public DNS hostname";
   if (isProviderId(provider)) {
     const entry: ProviderCatalogEntry = PROVIDER_CATALOG[provider];
-    if (entry.baseUrlHosts && !entry.baseUrlHosts.some((suffix) => host.endsWith(suffix))) {
-      return `host must end with ${entry.baseUrlHosts.join(" or ")}`;
+    const allowed = entry.baseUrlHosts?.some((pin) =>
+      pin.startsWith(".") ? host.endsWith(pin) : host === pin,
+    );
+    if (entry.baseUrlHosts && !allowed) {
+      return `host must be ${entry.baseUrlHosts.join(" or ")}`;
     }
   }
   return null;

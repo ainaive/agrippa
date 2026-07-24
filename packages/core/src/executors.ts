@@ -60,3 +60,13 @@ export const EXECUTOR_DEFAULT_SENTINEL = "__default__";
 export function executorSupportsProvider(entry: ExecutorCatalogEntry, provider: string): boolean {
   return entry.providers === "*" || entry.providers.includes(provider);
 }
+
+/**
+ * Whether provider-credential requirements apply to runs on this executor.
+ * The fake executor calls no provider API, and uncataloged custom executors
+ * resolved with no gating at submit — both stay exempt everywhere (submit,
+ * retry, and the engine's per-step check) so token-free demos keep working.
+ */
+export function isCredentialGatedExecutor(id: string): boolean {
+  return id !== "fake" && isExecutorId(id);
+}

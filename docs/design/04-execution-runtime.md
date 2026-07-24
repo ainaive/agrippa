@@ -17,7 +17,7 @@ After the transaction commits, the handler enqueues the pg-boss job `run.execute
 
 The enqueue is a post-commit send, so a narrow dual-write window exists (a crash between commit and send would leave a `queued` run with no job). It is mitigated, not eliminated: the worker's reconciliation sweeper re-enqueues `queued` runs older than 30 s. pg-boss stores jobs in Postgres, so once the send lands the job is durable — the primary reason for pg-boss over a Redis-backed queue.
 
-The same sweepers double as the recovery path for **heterogeneous fleets**: a worker that picks up a run bound to an executor it didn't register declines the job before any status transition (appending a `run.deferred` event) and lets the sweeps re-enqueue it until a capable worker claims it — see [03-executor-abstraction](03-executor-abstraction.md) for the mechanism and its limits.
+The same sweepers double as the recovery path for **heterogeneous fleets**: a worker that picks up a run bound to an executor it didn't register — or one it registered but cannot authenticate for the run's providers (a keyless worker, no matching project credential; executors advertise `envAuthProviders`, ADR-0013 amendment 2) — declines the job before any status transition (appending a `run.deferred` event) and lets the sweeps re-enqueue it until a capable worker claims it — see [03-executor-abstraction](03-executor-abstraction.md) for the mechanism and its limits.
 
 ## Run State Machine
 
