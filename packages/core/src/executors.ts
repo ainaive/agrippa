@@ -30,7 +30,10 @@ export const EXECUTOR_CATALOG = {
   },
   "codex-cli": {
     label: "OpenAI Codex",
-    providers: ["openai", "dashscope"],
+    // dashscope is claude-only for now: Codex CLI ≥0.122 removed wire_api
+    // "chat", and Bailian's Responses API doesn't yet cover the seeded Qwen
+    // models (ADR-0013 amendment).
+    providers: ["openai"],
     capabilities: { subagents: false, mcp: false, skills: false, resume: true, streaming: true },
   },
   fake: {

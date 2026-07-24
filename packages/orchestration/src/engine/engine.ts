@@ -208,8 +208,6 @@ class RunEngine {
   private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
   // scrubs known secret values from event payloads before persist/publish
   private readonly redactor: SecretRedactor = createSecretRedactor(collectEnvSecretValues());
-  // provider → project credential (or null), one materializer call per provider per run
-  private providerCredentialCache = new Map<string, { apiKey: string; baseUrl?: string } | null>();
 
   constructor(
     private readonly deps: EngineDeps,
@@ -1383,18 +1381,17 @@ class RunEngine {
   }
 
   /**
-   * The project's credential for a provider, memoized per run (one decrypt
-   * per provider). The key is registered with the redactor the moment it is
-   * materialized — before any request can echo it into an event payload.
+   * The project's credential for a provider, materialized fresh for every
+   * step so a rotated (or removed/added) key applies at the next step — the
+   * contract the API and manual document. The key is registered with the
+   * redactor the moment it is materialized — before any request can echo it
+   * into an event payload; superseded keys stay in the redactor's set.
    */
   private async providerAuthFor(provider: string): Promise<ProviderAuth | undefined> {
-    if (!this.providerCredentialCache.has(provider)) {
-      const cred = await this.deps.resources.providerCredential(this.refs.project.id, provider);
-      if (cred) this.redactor.add([cred.apiKey]);
-      this.providerCredentialCache.set(provider, cred);
-    }
-    const cred = this.providerCredentialCache.get(provider);
-    return cred ? { provider, apiKey: cred.apiKey, baseUrl: cred.baseUrl } : undefined;
+    const cred = await this.deps.resources.providerCredential(this.refs.project.id, provider);
+    if (!cred) return undefined;
+    this.redactor.add([cred.apiKey]);
+    return { provider, apiKey: cred.apiKey, baseUrl: cred.baseUrl };
   }
 
   /** MCP refs the run is authorized to use (pinned at submit; see resolve.authorizeResources). */

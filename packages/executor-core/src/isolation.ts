@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
-import { providerDefaultBaseUrl, type WireProtocol } from "@agrippa/core";
+import { providerDefaultBaseUrl, providerServesProtocol, type WireProtocol } from "@agrippa/core";
 import type { ProviderAuth } from "./types";
 
 /**
@@ -262,12 +262,18 @@ const PROTOCOL_AUTH_VARS: Record<WireProtocol, readonly string[]> = {
   openai: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY", "CODEX_HOME"],
 };
 
-/** The endpoint a credential points at: explicit override ?? catalog default. */
+/**
+ * The endpoint a credential points at: explicit override ?? catalog default —
+ * but never for a protocol the provider is not known to serve, so a single
+ * row override (e.g. a dashscope anthropic-protocol regional host) cannot
+ * leak onto the other executor family's wire protocol.
+ */
 export function effectiveBaseUrl(
   auth: ProviderAuth | undefined,
   protocol: WireProtocol,
 ): string | undefined {
   if (!auth) return undefined;
+  if (!providerServesProtocol(auth.provider, protocol)) return undefined;
   return auth.baseUrl ?? providerDefaultBaseUrl(auth.provider, protocol);
 }
 

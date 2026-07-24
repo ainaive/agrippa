@@ -129,6 +129,38 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
     expect(listed[0]?.rotatedAt).not.toBeNull();
   });
 
+  it("rejects exfiltration-shaped base URLs on create and update", async () => {
+    // the worker sends the decrypted key to baseUrl — policy-checked hard
+    const cases = [
+      { provider: "dashscope", baseUrl: "http://dashscope.aliyuncs.com/x" }, // not https
+      { provider: "dashscope", baseUrl: "https://169.254.169.254/latest" }, // metadata IP
+      { provider: "dashscope", baseUrl: "https://localhost/x" },
+      { provider: "dashscope", baseUrl: "https://evil.example.com/apps/anthropic" }, // host pin
+      { provider: "openai", baseUrl: "https://user:pw@proxy.example.com/v1" }, // userinfo
+    ];
+    for (const { provider, baseUrl } of cases) {
+      const patched = await admin.request(`/api/v1/projects/${projectId}/providers/dashscope`, {
+        method: "PATCH",
+        json: { baseUrl },
+      });
+      // PATCH targets the existing dashscope row; provider-specific host pins
+      // only apply to the dashscope cases, generic rules to the rest
+      if (provider === "dashscope") {
+        expect(patched.status).toBe(400);
+        expect((await jsonOf<{ code: string }>(patched)).code).toBe("base_url_invalid");
+      }
+      const created = await admin.request(`/api/v1/projects/${projectId}/providers`, {
+        method: "POST",
+        json: { provider, apiKey: "sk-x", baseUrl },
+      });
+      expect(created.status).toBe(400);
+      expect((await jsonOf<{ code: string }>(created)).code).toBe("base_url_invalid");
+    }
+  });
+
+  let gatedProjectId: string;
+  let gatedTaskId: string;
+
   it("gates submission: dashscope-only grants fail actionably until a credential exists", async () => {
     // fresh project so the credential created above doesn't leak in
     const gatedProject = (
@@ -190,13 +222,35 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
     expect(accepted.status).toBe(202);
 
     // the frozen resolution is single-provider dashscope for every slot role
-    const { runId } = await jsonOf<{ runId: string }>(accepted);
+    const { runId, taskId } = await jsonOf<{ runId: string; taskId: string }>(accepted);
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
     const entries = Object.values(run?.modelResolution ?? {}).flatMap((slot) =>
       Object.values(slot as Record<string, { provider: string }>),
     );
     expect(entries.length).toBeGreaterThan(0);
     for (const entry of entries) expect(entry.provider).toBe("dashscope");
+    gatedProjectId = gatedProject;
+    gatedTaskId = taskId;
+  });
+
+  it("retry re-checks the credential gate against the frozen resolution", async () => {
+    // no worker in this fixture — mark the queued run terminal so retry is legal
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, gatedTaskId));
+
+    // deleting the credential must block retry, not fail mid-run on auth
+    await admin.request(`/api/v1/projects/${gatedProjectId}/providers/dashscope`, {
+      method: "DELETE",
+    });
+    const blocked = await admin.request(`/api/v1/tasks/${gatedTaskId}/retry`, { method: "POST" });
+    expect(blocked.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(blocked)).code).toBe("provider_credential_required");
+
+    await admin.request(`/api/v1/projects/${gatedProjectId}/providers`, {
+      method: "POST",
+      json: { provider: "dashscope", apiKey: "sk-bailian-back-again" },
+    });
+    const retried = await admin.request(`/api/v1/tasks/${gatedTaskId}/retry`, { method: "POST" });
+    expect(retried.status).toBe(202);
   });
 
   it("delete removes the credential AND its secret, with audit rows throughout", async () => {

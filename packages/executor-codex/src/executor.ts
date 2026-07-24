@@ -68,8 +68,9 @@ function buildArgs(req: StepExecutionRequest): string[] {
   if (req.providerAuth && baseUrl !== undefined) {
     // Route through a synthesized model provider: `-c` overrides survive
     // --ignore-user-config, and env_key pins auth to the scrubbed env key
-    // set by overlayProviderAuth. Bailian's OpenAI-compatible mode speaks
-    // chat completions, not the responses wire API.
+    // set by overlayProviderAuth. No wire_api override — the CLI defaults
+    // custom providers to the responses API, and Codex ≥0.122 rejects
+    // wire_api=chat outright (chat-completions-only gateways can't run here).
     args.push(
       "-c",
       "model_provider=agrippa",
@@ -79,8 +80,6 @@ function buildArgs(req: StepExecutionRequest): string[] {
       `model_providers.agrippa.base_url="${baseUrl}"`,
       "-c",
       "model_providers.agrippa.env_key=OPENAI_API_KEY",
-      "-c",
-      "model_providers.agrippa.wire_api=chat",
     );
   }
   if (req.resumeSessionId) args.push("resume", req.resumeSessionId);

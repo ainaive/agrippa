@@ -10,6 +10,7 @@ import {
   quotaUpdateSchema,
   type ResourceType,
   repoCreateSchema,
+  validateProviderBaseUrl,
 } from "@agrippa/core";
 import {
   auditLogs,
@@ -330,6 +331,9 @@ export const projectRoutes = new Hono<AppEnv>()
   // ── Provider credentials ───────────────────────────────────────────────────
   // The key is write-only: stored encrypted via the secrets table, surfaced
   // only as hasCredential. Clearing a key = DELETE (a keyless row is useless).
+  // baseUrl is where the worker SENDS the key, so it is policy-checked here
+  // (https, public DNS name, per-provider host family) — a lax override would
+  // let one admin exfiltrate a key another admin entered.
   .get("/:projectId/providers", requireProjectRole("viewer"), async (c) => {
     const rows = await c.var.db
       .select({
@@ -351,6 +355,10 @@ export const projectRoutes = new Hono<AppEnv>()
     async (c) => {
       const projectId = c.req.param("projectId");
       const { apiKey, provider, baseUrl } = c.req.valid("json");
+      if (baseUrl !== undefined) {
+        const reason = validateProviderBaseUrl(provider, baseUrl);
+        if (reason) throw new AppError("base_url_invalid", 400, `Base URL ${reason}`);
+      }
       const db = c.var.db;
       const [existing] = await db
         .select({ id: providerCredentials.id })
@@ -409,6 +417,10 @@ export const projectRoutes = new Hono<AppEnv>()
       const projectId = c.req.param("projectId");
       const provider = c.req.param("provider");
       const patch = c.req.valid("json");
+      if (patch.baseUrl !== undefined && patch.baseUrl !== null) {
+        const reason = validateProviderBaseUrl(provider, patch.baseUrl);
+        if (reason) throw new AppError("base_url_invalid", 400, `Base URL ${reason}`);
+      }
       const db = c.var.db;
       const [current] = await db
         .select()
@@ -421,25 +433,36 @@ export const projectRoutes = new Hono<AppEnv>()
         );
       if (!current) throw AppError.notFound("Provider credential");
       const rotated = patch.apiKey !== undefined;
-      if (patch.apiKey !== undefined) {
-        // rotate in place: the ref stays stable, running steps see the new key
-        await db
-          .update(secrets)
-          .set({ ciphertext: encryptSecret(patch.apiKey, loadSecretKey()), rotatedAt: new Date() })
-          .where(eq(secrets.id, current.secretRef));
-      }
-      if (patch.baseUrl !== undefined) {
-        await db
-          .update(providerCredentials)
-          .set({ baseUrl: patch.baseUrl })
-          .where(eq(providerCredentials.id, current.id));
-      }
-      await audit(c, {
-        action: "project.provider.update",
-        resourceType: "provider_credential",
-        resourceId: current.id,
-        projectId,
-        payload: { provider, rotated, baseUrlChanged: patch.baseUrl !== undefined },
+      // one transaction: a partially applied rotate/baseUrl change with no
+      // audit row would break the every-mutation-is-audited invariant
+      await db.transaction(async (tx) => {
+        if (patch.apiKey !== undefined) {
+          // rotate in place: the ref stays stable, running steps see the new key
+          await tx
+            .update(secrets)
+            .set({
+              ciphertext: encryptSecret(patch.apiKey, loadSecretKey()),
+              rotatedAt: new Date(),
+            })
+            .where(eq(secrets.id, current.secretRef));
+        }
+        if (patch.baseUrl !== undefined) {
+          await tx
+            .update(providerCredentials)
+            .set({ baseUrl: patch.baseUrl })
+            .where(eq(providerCredentials.id, current.id));
+        }
+        await audit(
+          c,
+          {
+            action: "project.provider.update",
+            resourceType: "provider_credential",
+            resourceId: current.id,
+            projectId,
+            payload: { provider, rotated, baseUrlChanged: patch.baseUrl !== undefined },
+          },
+          tx,
+        );
       });
       return c.json({ updated: true, hasCredential: true });
     },

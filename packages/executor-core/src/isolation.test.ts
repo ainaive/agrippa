@@ -178,11 +178,11 @@ describe("overlayProviderAuth", () => {
   it("openai protocol clears CODEX_HOME so ambient codex auth cannot outrank", () => {
     const env = overlayProviderAuth(
       scrubbed(),
-      { provider: "dashscope", apiKey: "sk-bailian-project" },
+      { provider: "openai", apiKey: "sk-openai-project", baseUrl: "https://proxy.example.com/v1" },
       "openai",
     );
-    expect(env.OPENAI_API_KEY).toBe("sk-bailian-project");
-    expect(env.OPENAI_BASE_URL).toBe("https://dashscope.aliyuncs.com/compatible-mode/v1");
+    expect(env.OPENAI_API_KEY).toBe("sk-openai-project");
+    expect(env.OPENAI_BASE_URL).toBe("https://proxy.example.com/v1");
     expect(env.CODEX_HOME).toBeUndefined();
     // the anthropic family is untouched
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-worker-env");
@@ -201,14 +201,27 @@ describe("overlayProviderAuth", () => {
 
 describe("effectiveBaseUrl", () => {
   it("prefers the row override, falls back to the catalog default", () => {
-    expect(effectiveBaseUrl({ provider: "dashscope", apiKey: "k" }, "openai")).toBe(
-      "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    expect(effectiveBaseUrl({ provider: "dashscope", apiKey: "k" }, "anthropic")).toBe(
+      "https://dashscope.aliyuncs.com/apps/anthropic",
     );
     expect(
-      effectiveBaseUrl({ provider: "dashscope", apiKey: "k", baseUrl: "https://x" }, "openai"),
+      effectiveBaseUrl({ provider: "dashscope", apiKey: "k", baseUrl: "https://x" }, "anthropic"),
     ).toBe("https://x");
     expect(effectiveBaseUrl({ provider: "anthropic", apiKey: "k" }, "anthropic")).toBeUndefined();
     expect(effectiveBaseUrl(undefined, "anthropic")).toBeUndefined();
+  });
+
+  it("never applies an override to a protocol the provider does not serve", () => {
+    // dashscope is anthropic-protocol only — even an explicit row override
+    // must not leak onto the openai family (one baseUrl, one protocol)
+    expect(effectiveBaseUrl({ provider: "dashscope", apiKey: "k" }, "openai")).toBeUndefined();
+    expect(
+      effectiveBaseUrl({ provider: "dashscope", apiKey: "k", baseUrl: "https://x" }, "openai"),
+    ).toBeUndefined();
+    // unknown providers carry no restriction
+    expect(
+      effectiveBaseUrl({ provider: "some-gateway", apiKey: "k", baseUrl: "https://x" }, "openai"),
+    ).toBe("https://x");
   });
 });
 

@@ -201,7 +201,26 @@ describe("codex executor", () => {
     if (!legacy.ok) expect(legacy.reason).toContain("--ignore-user-config");
   });
 
-  it("routes a project provider credential through a synthesized model provider", async () => {
+  it("routes an explicit base-URL credential through a synthesized model provider", async () => {
+    const events = await collect(
+      makeReq(makeWorkspace("argv"), {
+        providerAuth: {
+          provider: "openai",
+          apiKey: "sk-openai-project",
+          baseUrl: "https://proxy.example.com/v1",
+        },
+      }),
+    );
+    const done = events.find((e) => e.type === "step.completed");
+    const argv = JSON.parse(done?.type === "step.completed" ? done.output : "[]") as string[];
+    expect(argv).toContain("model_provider=agrippa");
+    expect(argv).toContain('model_providers.agrippa.base_url="https://proxy.example.com/v1"');
+    expect(argv).toContain("model_providers.agrippa.env_key=OPENAI_API_KEY");
+    // Codex ≥0.122 rejects wire_api=chat; the CLI's responses default applies
+    expect(argv.some((a) => a.includes("wire_api"))).toBe(false);
+  });
+
+  it("a provider that does not serve the openai protocol gets no provider block", async () => {
     const events = await collect(
       makeReq(makeWorkspace("argv"), {
         model: { provider: "dashscope", providerModelId: "qwen3.7-max" },
@@ -210,12 +229,7 @@ describe("codex executor", () => {
     );
     const done = events.find((e) => e.type === "step.completed");
     const argv = JSON.parse(done?.type === "step.completed" ? done.output : "[]") as string[];
-    expect(argv).toContain("model_provider=agrippa");
-    expect(argv).toContain(
-      'model_providers.agrippa.base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"',
-    );
-    expect(argv).toContain("model_providers.agrippa.env_key=OPENAI_API_KEY");
-    expect(argv).toContain("model_providers.agrippa.wire_api=chat");
+    expect(argv).not.toContain("model_provider=agrippa");
   });
 
   it("keeps plain argv for a credential with no base URL (native openai)", async () => {
@@ -237,7 +251,11 @@ describe("codex executor", () => {
 
     const events = await collect(
       makeReq(makeWorkspace("env"), {
-        providerAuth: { provider: "dashscope", apiKey: "sk-bailian-project" },
+        providerAuth: {
+          provider: "openai",
+          apiKey: "sk-openai-project",
+          baseUrl: "https://proxy.example.com/v1",
+        },
       }),
     );
     const done = events.find((e) => e.type === "step.completed");
@@ -246,8 +264,8 @@ describe("codex executor", () => {
       openaiBaseUrl: string | null;
       codexHome: string | null;
     };
-    expect(seen.openai).toBe("sk-bailian-project"); // project key wins over env
-    expect(seen.openaiBaseUrl).toBe("https://dashscope.aliyuncs.com/compatible-mode/v1");
+    expect(seen.openai).toBe("sk-openai-project"); // project key wins over env
+    expect(seen.openaiBaseUrl).toBe("https://proxy.example.com/v1");
     // ambient auth.json under the worker's CODEX_HOME must not outrank the key
     expect(seen.codexHome).toContain("agrippa-codex-home");
     expect(seen.codexHome).toContain("run-1");

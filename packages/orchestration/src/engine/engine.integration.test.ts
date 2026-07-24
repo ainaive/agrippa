@@ -694,10 +694,10 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
       expect(req.providerAuth?.provider).toBe(req.model.provider);
     }
 
-    // memoized per run: one materializer call per distinct provider
+    // materialized fresh for every step, so a rotated/removed/added key
+    // genuinely applies at the next step (the documented contract)
     const materializer = deps.resources as FakeResourceMaterializer;
-    const providers = new Set(deps.executor.requests.map((r) => r.model.provider));
-    expect(materializer.providerCredentialCalls.length).toBe(providers.size);
+    expect(materializer.providerCredentialCalls.length).toBe(deps.executor.requests.length);
 
     // the key was registered with the redactor at materialization — an agent
     // echoing it can never persist it
