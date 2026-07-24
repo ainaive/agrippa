@@ -59,6 +59,18 @@ describe("isPublicAddress", () => {
     }
   });
 
+  it("rejects unallocated IPv6 space — only 2000::/3 is global unicast", () => {
+    // a denylist can never enumerate what IANA hasn't allocated; an internal
+    // network squatting on these prefixes must not pass the SSRF guard
+    for (const ip of ["4000::1", "8000::1", "a000::1", "c000::1", "e000::1", "f000::1"]) {
+      expect(isPublicAddress(ip)).toBe(false);
+    }
+    // the 2000::/3 boundary itself
+    expect(isPublicAddress("2000::1")).toBe(true);
+    expect(isPublicAddress("3ffe::1")).toBe(true);
+    expect(isPublicAddress("1fff:ffff::1")).toBe(false);
+  });
+
   it("accepts ordinary public IPv4 and IPv6 addresses and fails closed on invalid input", () => {
     for (const ip of [
       "8.8.8.8",

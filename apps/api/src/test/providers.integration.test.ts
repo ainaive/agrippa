@@ -313,6 +313,68 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
     expect((failed?.error as { code?: string } | null)?.code).toBe("provider_credential_required");
   });
 
+  it("mid-run loss of an env-policy credential on a keyless worker fails actionably", async () => {
+    // an anthropic-only project submits fine (env fallback assumed at submit)
+    const envProject = (
+      await jsonOf<{ id: string }>(
+        await admin.request("/api/v1/projects", {
+          method: "POST",
+          json: { slug: "envonly", name: "Env Only" },
+        }),
+      )
+    ).id;
+    const [conn] = await db
+      .insert(repoConnections)
+      .values({ projectId: envProject, provider: "github", url: "https://github.com/acme/w.git" })
+      .returning();
+    const modelRows = await jsonOf<Array<{ id: string; provider: string }>>(
+      await admin.request("/api/v1/models"),
+    );
+    const skillRows = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/skills"));
+    await admin.request(`/api/v1/projects/${envProject}/grants`, {
+      method: "PUT",
+      json: [
+        ...modelRows
+          .filter((m) => m.provider === "anthropic")
+          .map((m) => ({ resourceType: "model", resourceId: m.id })),
+        ...skillRows.map((s) => ({ resourceType: "skill", resourceId: s.id })),
+      ],
+    });
+    const types = await jsonOf<Array<{ id: string; slug: string }>>(
+      await admin.request("/api/v1/scenarios/software-development/task-types"),
+    );
+    const accepted = await admin.request(`/api/v1/projects/${envProject}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId: types.find((t) => t.slug === "bug-localize-fix")?.id,
+        title: "Env fallback run",
+        params: { bugReport: "It crashes", repo: { repoConnectionId: conn?.id } },
+      },
+    });
+    expect(accepted.status).toBe(202);
+    const { runId } = await jsonOf<{ runId: string }>(accepted);
+
+    // keyless worker: the credential was PRESENT at claim (presence probe →
+    // preflight passes) but is gone when the step materializes it — the run
+    // must fail with the gate's code before the executor is ever invoked,
+    // never call claude keyless
+    const executor = new FakeExecutor({}, { envAuthProviders: [] });
+    const deps: EngineDeps = {
+      db,
+      executors: { "claude-agent-sdk": executor },
+      bus: new InProcessEventBus(),
+      workspace: new FakeWorkspaceManager(),
+      resources: new FakeResourceMaterializer({ providerCredentialProviders: ["anthropic"] }),
+      artifacts: new InMemoryArtifactStore(),
+      logger: silentLogger,
+    };
+    expect(await executeRun(deps, runId)).toBe("failed");
+    const [failed] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(failed?.status).toBe("failed");
+    expect((failed?.error as { code?: string } | null)?.code).toBe("provider_credential_required");
+    expect(executor.requests).toHaveLength(0); // failed BEFORE executor invocation
+  });
+
   it("delete removes the credential AND its secret, with audit rows throughout", async () => {
     const [row] = await db
       .select()

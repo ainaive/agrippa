@@ -794,6 +794,20 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(run?.error).toBeNull();
     expect(deps.executor.requests).toHaveLength(0);
   });
+
+  it("does not decline a crash-recovered running run — per-step gating applies instead", async () => {
+    const fx = await setupFixture();
+    // a crashed `running` run has no re-enqueue path (execution lease is
+    // ADR-0009 future work): the auth preflight only guards the pre-claim
+    // states the worker can decline, so a keyless worker picking this run up
+    // proceeds — and the per-step gate fails it actionably if auth is truly
+    // unusable, instead of burning pg-boss retries into a generic internal
+    expect(await transitionRun(fx.db, fx.runId, "queued", "running")).toBe(true);
+    const keyless = fx.makeDeps(HAPPY_SCRIPT, { envAuthProviders: [] });
+    const outcome = await executeRun(keyless, fx.runId);
+    expect(outcome).not.toBe("failed"); // fake-bound run is ungated per-step
+    expect(keyless.executor.requests.length).toBeGreaterThan(0);
+  });
 });
 
 describe.skipIf(!dbUp)("run-lifecycle module", () => {

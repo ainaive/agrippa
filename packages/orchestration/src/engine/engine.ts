@@ -198,21 +198,27 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
   // (a keyless codex worker serving a project without its own credential).
   // Same decline path as an unregistered executor: throw before any status
   // transition so the worker defers and an authed worker picks the run up.
-  for (const [slot, binding] of Object.entries(bindings)) {
-    const envAuth = binding.executor.envAuthProviders;
-    if (envAuth === undefined) continue; // fake/demo/custom executors: no gating
-    for (const entry of slotResolutionEntries(run.modelResolution, slot)) {
-      if (providerAuthPolicy(entry.provider) !== "env") continue; // project-policy → per-step check
-      if (envAuth.includes(entry.provider)) continue;
-      const hasCredential = await deps.resources.hasProviderCredential(
-        run.projectId,
-        entry.provider,
-      );
-      if (!hasCredential) {
-        throw new ExecutorUnavailableError(
-          binding.executorId,
-          `has no usable auth for provider '${entry.provider}' on this worker (no project credential, no worker env auth)`,
+  // ONLY in the pre-claim states the worker actually declines — a crashed
+  // `running` run has no re-enqueue path (execution lease, ADR-0009 future
+  // work), so it proceeds and the per-step gate in providerAuthFor fails it
+  // actionably instead of this throw burning pg-boss retries into `internal`.
+  if (run.status === "queued" || run.status === "waiting_approval") {
+    for (const [slot, binding] of Object.entries(bindings)) {
+      const envAuth = binding.executor.envAuthProviders;
+      if (envAuth === undefined) continue; // fake/demo/custom executors: no gating
+      for (const entry of slotResolutionEntries(run.modelResolution, slot)) {
+        if (providerAuthPolicy(entry.provider) !== "env") continue; // project-policy → per-step check
+        if (envAuth.includes(entry.provider)) continue;
+        const hasCredential = await deps.resources.hasProviderCredential(
+          run.projectId,
+          entry.provider,
         );
+        if (!hasCredential) {
+          throw new ExecutorUnavailableError(
+            binding.executorId,
+            `has no usable auth for provider '${entry.provider}' on this worker (no project credential, no worker env auth)`,
+          );
+        }
       }
     }
   }
@@ -1396,12 +1402,16 @@ class RunEngine {
       instructions: interpolate(step.instructions, ctx),
       systemPrompt: binding.systemPrompt,
       model,
-      providerAuth: await this.providerAuthFor(
-        model.provider,
+      providerAuth: await this.providerAuthFor(model.provider, {
         // gate by the run's BOUND executor id (the resolution contract), not
         // the instance id — fixtures register fakes under real executor ids
-        isCredentialGatedExecutor(binding.executorId),
-      ),
+        gated: isCredentialGatedExecutor(binding.executorId),
+        // whether THIS worker's executor could still authenticate from env
+        // if the project credential is gone (undefined advertisement = yes)
+        envFallback:
+          binding.executor.envAuthProviders === undefined ||
+          binding.executor.envAuthProviders.includes(model.provider),
+      }),
       subagents,
       skills,
       mcpServers,
@@ -1432,14 +1442,17 @@ class RunEngine {
    * redactor the moment it is materialized — before any request can echo it
    * into an event payload; superseded keys stay in the redactor's set.
    *
-   * On a gated (real, cataloged) executor, a project-policy provider whose
-   * credential has been deleted mid-run fails the run here — before executor
-   * invocation, with the same code the submit/retry gates use — instead of
-   * falling back to worker env auth that cannot exist for such a provider.
+   * On a gated (real, cataloged) executor, a missing credential fails the
+   * run here — before executor invocation, with the same code the
+   * submit/retry gates use — whenever env auth cannot cover the gap: always
+   * for project-policy providers (their env fallback cannot exist), and for
+   * env-policy providers when this worker's executor advertises no env auth
+   * for them (a keyless worker that claimed the run because the credential
+   * existed must not invoke the executor keyless after it is deleted).
    */
   private async providerAuthFor(
     provider: string,
-    gated: boolean,
+    opts: { gated: boolean; envFallback: boolean },
   ): Promise<ProviderAuth | undefined> {
     let cred: { apiKey: string; baseUrl?: string } | null;
     try {
@@ -1453,10 +1466,12 @@ class RunEngine {
       throw err;
     }
     if (!cred) {
-      if (gated && providerAuthPolicy(provider) === "project") {
+      const needsCredential = providerAuthPolicy(provider) === "project" || !opts.envFallback;
+      if (opts.gated && needsCredential) {
         throw new RunFailure(
           "provider_credential_required",
-          `provider '${provider}' requires a project credential that no longer exists`,
+          `provider '${provider}' requires a project credential that no longer exists` +
+            (providerAuthPolicy(provider) === "env" ? " (this worker has no env auth for it)" : ""),
           "failed",
         );
       }

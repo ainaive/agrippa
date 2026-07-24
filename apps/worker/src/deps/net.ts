@@ -31,13 +31,17 @@ for (const [network, prefix] of [
   nonPublicV4.addSubnet(network, prefix, "ipv4");
 }
 
+// IPv6 is allowlist-first: IANA allocates global unicast ONLY from 2000::/3,
+// so everything outside it — loopback, mapped, translation, ULA, link-local,
+// multicast, AND all still-unallocated space (4000::/2, 8000::/1, …) — is
+// refused without needing to be enumerated. A denylist can never cover
+// unallocated prefixes an internal network might squat on.
+const globalUnicastV6 = new BlockList();
+globalUnicastV6.addSubnet("2000::", 3, "ipv6");
+
+// Special-use carve-outs that live INSIDE 2000::/3.
 const nonPublicV6 = new BlockList();
 for (const [network, prefix] of [
-  ["::", 96], // unspecified, loopback, and IPv4-compatible
-  ["::ffff:0:0", 96], // IPv4-mapped
-  ["64:ff9b::", 96], // IPv4/IPv6 translation
-  ["64:ff9b:1::", 48], // local-use translation
-  ["100::", 64], // discard-only
   ["2001::", 32], // Teredo
   ["2001:2::", 48], // benchmarking
   ["2001:10::", 28], // deprecated ORCHID
@@ -45,11 +49,6 @@ for (const [network, prefix] of [
   ["2001:db8::", 32], // documentation
   ["2002::", 16], // 6to4
   ["3fff::", 20], // documentation
-  ["5f00::", 16], // segment-routing SIDs
-  ["fc00::", 7], // unique-local
-  ["fe80::", 10], // link-local
-  ["fec0::", 10], // deprecated site-local
-  ["ff00::", 8], // multicast
 ] as const) {
   nonPublicV6.addSubnet(network, prefix, "ipv6");
 }
@@ -58,7 +57,9 @@ for (const [network, prefix] of [
 export function isPublicAddress(ip: string): boolean {
   const family = isIP(ip);
   if (family === 4) return !nonPublicV4.check(ip, "ipv4");
-  if (family === 6) return !nonPublicV6.check(ip, "ipv6");
+  if (family === 6) {
+    return globalUnicastV6.check(ip, "ipv6") && !nonPublicV6.check(ip, "ipv6");
+  }
   return false;
 }
 
