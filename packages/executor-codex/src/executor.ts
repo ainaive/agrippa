@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   ARTIFACT_DIR,
@@ -9,7 +10,9 @@ import {
   type ExecutionContext,
   type Executor,
   type ExecutorEvent,
+  effectiveBaseUrl,
   expectedFilename,
+  overlayProviderAuth,
   priorContextBlock,
   type StepExecutionRequest,
 } from "@agrippa/executor-core";
@@ -61,6 +64,24 @@ function buildArgs(req: StepExecutionRequest): string[] {
     "-c",
     "sandbox_workspace_write.network_access=false",
   ];
+  const baseUrl = effectiveBaseUrl(req.providerAuth, "openai");
+  if (req.providerAuth && baseUrl !== undefined) {
+    // Route through a synthesized model provider: `-c` overrides survive
+    // --ignore-user-config, and env_key pins auth to the scrubbed env key
+    // set by overlayProviderAuth. No wire_api override — the CLI defaults
+    // custom providers to the responses API, and Codex ≥0.122 rejects
+    // wire_api=chat outright (chat-completions-only gateways can't run here).
+    args.push(
+      "-c",
+      "model_provider=agrippa",
+      "-c",
+      `model_providers.agrippa.name=${req.providerAuth.provider}`,
+      "-c",
+      `model_providers.agrippa.base_url="${baseUrl}"`,
+      "-c",
+      "model_providers.agrippa.env_key=OPENAI_API_KEY",
+    );
+  }
   if (req.resumeSessionId) args.push("resume", req.resumeSessionId);
   args.push("-"); // prompt on stdin
   return args;
@@ -138,9 +159,16 @@ function* collectStepArtifacts(
  */
 export function createCodexExecutor(options: CodexExecutorOptions = {}): Executor {
   const command = options.command ?? ["codex"];
+  const envAuth = Boolean(
+    process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || process.env.CODEX_HOME,
+  );
   return {
     id: "codex-cli",
     capabilities: { subagents: false, mcp: false, skills: false, resume: true, streaming: true },
+    // captured at construction: a keyless worker registers (project
+    // credentials may cover its runs) but the engine defers any run whose
+    // providers need env auth this worker doesn't have
+    envAuthProviders: envAuth ? ["openai"] : [],
 
     async *executeStep(
       req: StepExecutionRequest,
@@ -149,10 +177,19 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       clearExpectedArtifacts(req.workspaceDir, req.expectedArtifacts);
 
       const collector = new CodexEventCollector(req.model.providerModelId);
+      const env = overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "openai");
+      if (req.providerAuth) {
+        // An ambient CODEX_HOME auth.json would outrank the project key, so
+        // the run gets its own home — per run, not per step, because resume
+        // sessions live under CODEX_HOME. Left for OS tmp reaping.
+        const home = path.join(tmpdir(), "agrippa-codex-home", req.runId);
+        mkdirSync(home, { recursive: true });
+        env.CODEX_HOME = home;
+      }
       const proc = Bun.spawn({
         cmd: [...command, ...buildArgs(req)],
         cwd: req.workspaceDir,
-        env: buildScrubbedEnv(),
+        env,
         stdin: new TextEncoder().encode(buildPrompt(req)),
         stdout: "pipe",
         stderr: "pipe",

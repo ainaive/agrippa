@@ -6,8 +6,10 @@ import path from "node:path";
 import {
   buildScrubbedEnv,
   createSecretRedactor,
+  effectiveBaseUrl,
   evaluateToolCall,
   isWithin,
+  overlayProviderAuth,
   realContained,
 } from "./isolation";
 
@@ -112,6 +114,114 @@ describe("buildScrubbedEnv", () => {
     expect(env.CLAUDE_ADMIN_TOKEN).toBeUndefined();
     expect(env.NODE_OPTIONS).toBeUndefined();
     expect(env.SOME_INTERNAL_URL).toBeUndefined();
+  });
+});
+
+describe("overlayProviderAuth", () => {
+  const scrubbed = () =>
+    buildScrubbedEnv({
+      PATH: "/usr/bin",
+      ANTHROPIC_API_KEY: "sk-ant-worker-env",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth-worker-env",
+      OPENAI_API_KEY: "sk-openai-worker-env",
+      CODEX_HOME: "/home/worker/.codex",
+    });
+
+  it("is a no-op without a credential (worker env fallback)", () => {
+    const env = scrubbed();
+    expect(overlayProviderAuth(env, undefined, "anthropic")).toBe(env);
+  });
+
+  it("project credential wins: the whole protocol auth family is replaced", () => {
+    const env = overlayProviderAuth(
+      scrubbed(),
+      { provider: "dashscope", apiKey: "sk-bailian-project" },
+      "anthropic",
+    );
+    // gateway credential → bearer token + catalog default base URL
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("sk-bailian-project");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://dashscope.aliyuncs.com/apps/anthropic");
+    // every other family member is gone — nothing for the SDK to prefer
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    // the openai family and system vars are untouched
+    expect(env.OPENAI_API_KEY).toBe("sk-openai-worker-env");
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("native anthropic credential uses ANTHROPIC_API_KEY with no base URL", () => {
+    const env = overlayProviderAuth(
+      scrubbed(),
+      { provider: "anthropic", apiKey: "sk-ant-project" },
+      "anthropic",
+    );
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-project");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+  });
+
+  it("row baseUrl overrides the catalog default (regional endpoint)", () => {
+    const env = overlayProviderAuth(
+      scrubbed(),
+      {
+        provider: "dashscope",
+        apiKey: "sk-bailian-intl",
+        baseUrl: "https://ws-1.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+      },
+      "anthropic",
+    );
+    expect(env.ANTHROPIC_BASE_URL).toBe(
+      "https://ws-1.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+    );
+  });
+
+  it("openai protocol clears CODEX_HOME so ambient codex auth cannot outrank", () => {
+    const env = overlayProviderAuth(
+      scrubbed(),
+      { provider: "openai", apiKey: "sk-openai-project", baseUrl: "https://proxy.example.com/v1" },
+      "openai",
+    );
+    expect(env.OPENAI_API_KEY).toBe("sk-openai-project");
+    expect(env.OPENAI_BASE_URL).toBe("https://proxy.example.com/v1");
+    expect(env.CODEX_HOME).toBeUndefined();
+    // the anthropic family is untouched
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-worker-env");
+  });
+
+  it("unknown provider gets the key with no base URL default", () => {
+    const env = overlayProviderAuth(
+      scrubbed(),
+      { provider: "some-gateway", apiKey: "sk-gateway" },
+      "openai",
+    );
+    expect(env.OPENAI_API_KEY).toBe("sk-gateway");
+    expect(env.OPENAI_BASE_URL).toBeUndefined();
+  });
+});
+
+describe("effectiveBaseUrl", () => {
+  it("prefers the row override, falls back to the catalog default", () => {
+    expect(effectiveBaseUrl({ provider: "dashscope", apiKey: "k" }, "anthropic")).toBe(
+      "https://dashscope.aliyuncs.com/apps/anthropic",
+    );
+    expect(
+      effectiveBaseUrl({ provider: "dashscope", apiKey: "k", baseUrl: "https://x" }, "anthropic"),
+    ).toBe("https://x");
+    expect(effectiveBaseUrl({ provider: "anthropic", apiKey: "k" }, "anthropic")).toBeUndefined();
+    expect(effectiveBaseUrl(undefined, "anthropic")).toBeUndefined();
+  });
+
+  it("never applies an override to a protocol the provider does not serve", () => {
+    // dashscope is anthropic-protocol only — even an explicit row override
+    // must not leak onto the openai family (one baseUrl, one protocol)
+    expect(effectiveBaseUrl({ provider: "dashscope", apiKey: "k" }, "openai")).toBeUndefined();
+    expect(
+      effectiveBaseUrl({ provider: "dashscope", apiKey: "k", baseUrl: "https://x" }, "openai"),
+    ).toBeUndefined();
+    // unknown providers carry no restriction
+    expect(
+      effectiveBaseUrl({ provider: "some-gateway", apiKey: "k", baseUrl: "https://x" }, "openai"),
+    ).toBe("https://x");
   });
 });
 

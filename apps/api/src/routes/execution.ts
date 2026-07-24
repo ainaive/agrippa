@@ -32,6 +32,7 @@ import {
 } from "@agrippa/db";
 import {
   appendRunEvent as allocateRunEvent,
+  assertResolutionCredentialed,
   authorizeResources,
   buildParamsValidator,
   decideCheckpoint,
@@ -438,6 +439,22 @@ export const executionRoutes = new Hono<AppEnv>()
     if (!latest) throw AppError.notFound("Run");
     if (!isTerminalRunStatus(latest.status)) {
       throw AppError.conflict("run_active", "The latest run has not finished");
+    }
+
+    // the frozen resolution is copied verbatim below, so re-assert that its
+    // project-only provider credentials still exist — a credential deleted
+    // since the last run must fail here, not as an auth error mid-run
+    try {
+      await assertResolutionCredentialed(
+        db,
+        task.projectId,
+        latest.modelResolution as Record<string, unknown>,
+        latest.agentBindings as Record<string, { executorId: string }> | null,
+        latest.executorId,
+      );
+    } catch (err) {
+      if (err instanceof SubmitError) throw new AppError(err.code, 400, err.message, err.details);
+      throw err;
     }
 
     const [run] = await db

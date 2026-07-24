@@ -5,6 +5,7 @@ import {
   decryptSecret,
   loadSecretKey,
   mcpServers,
+  providerCredentials,
   secrets,
   skills,
   skillVersions,
@@ -12,7 +13,8 @@ import {
 import { type ResolvedMcpServer, type ResolvedSkill, realContained } from "@agrippa/executor-core";
 import type { ResourceMaterializer } from "@agrippa/orchestration";
 import { skillSlugOfRef } from "@agrippa/orchestration";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { assertPublicHost } from "./net";
 
 const TEMPLATES_DIR =
   process.env.AGRIPPA_TEMPLATES_DIR ?? path.resolve(import.meta.dirname, "../../../../templates");
@@ -133,5 +135,48 @@ export class DbResourceMaterializer implements ResourceMaterializer {
       }
     }
     return { resolved, missing };
+  }
+
+  async providerCredential(
+    projectId: string,
+    provider: string,
+  ): Promise<{ apiKey: string; baseUrl?: string } | null> {
+    // scoped to the run's project — never looked up by raw credential id
+    const [row] = await this.db
+      .select()
+      .from(providerCredentials)
+      .where(
+        and(
+          eq(providerCredentials.projectId, projectId),
+          eq(providerCredentials.provider, provider),
+        ),
+      );
+    if (!row) return null;
+    if (row.baseUrl) {
+      // the key is about to be sent to this host — refuse names that resolve
+      // into private space (the API only rejects IP literals syntactically)
+      await assertPublicHost(new URL(row.baseUrl).hostname);
+    }
+    const [secret] = await this.db.select().from(secrets).where(eq(secrets.id, row.secretRef));
+    if (!secret) return null;
+    return {
+      apiKey: decryptSecret(secret.ciphertext, loadSecretKey()),
+      baseUrl: row.baseUrl ?? undefined,
+    };
+  }
+
+  async hasProviderCredential(projectId: string, provider: string): Promise<boolean> {
+    const [row] = await this.db
+      .select({ id: providerCredentials.id })
+      .from(providerCredentials)
+      .innerJoin(secrets, eq(secrets.id, providerCredentials.secretRef))
+      .where(
+        and(
+          eq(providerCredentials.projectId, projectId),
+          eq(providerCredentials.provider, provider),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
   }
 }

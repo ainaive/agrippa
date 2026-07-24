@@ -1,3 +1,4 @@
+import { PROVIDER_CATALOG } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
@@ -5,6 +6,7 @@ import {
   FolderCogIcon,
   GaugeIcon,
   GitBranchIcon,
+  KeyRoundIcon,
   type LucideIcon,
   ShieldCheckIcon,
   UsersIcon,
@@ -33,7 +35,16 @@ import { clearLastProjectId } from "../features/lastProject";
 import { api } from "../lib/api";
 import { lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
-import type { Faber, Grant, McpServerRow, Member, ModelRow, Quota, SkillRow } from "../lib/types";
+import type {
+  Faber,
+  Grant,
+  McpServerRow,
+  Member,
+  ModelRow,
+  ProviderCredentialRow,
+  Quota,
+  SkillRow,
+} from "../lib/types";
 import { cn } from "../lib/utils";
 
 function GeneralSection({ projectId }: { projectId: string }) {
@@ -447,6 +458,180 @@ function ReposSection({ projectId }: { projectId: string }) {
   );
 }
 
+const PROVIDER_IDS = Object.keys(PROVIDER_CATALOG);
+
+function providerLabel(id: string): string {
+  return id in PROVIDER_CATALOG ? PROVIDER_CATALOG[id as keyof typeof PROVIDER_CATALOG].label : id;
+}
+
+function ProvidersSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation("settings");
+  const queryClient = useQueryClient();
+  const credentials = useQuery({
+    queryKey: ["providerCredentials", projectId],
+    queryFn: () => api<ProviderCredentialRow[]>(`/projects/${projectId}/providers`),
+  });
+  const [provider, setProvider] = useState(PROVIDER_IDS[0] ?? "dashscope");
+  const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [rotating, setRotating] = useState<ProviderCredentialRow | null>(null);
+  const [rotateKey, setRotateKey] = useState("");
+  const [removing, setRemoving] = useState<ProviderCredentialRow | null>(null);
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["providerCredentials", projectId] });
+
+  const add = useMutation({
+    mutationFn: () =>
+      api(`/projects/${projectId}/providers`, {
+        method: "POST",
+        json: { provider, apiKey, baseUrl: baseUrl || undefined },
+      }),
+    onSuccess: () => {
+      setApiKey("");
+      setBaseUrl("");
+      void invalidate();
+    },
+    onError: toastApiError,
+  });
+  const rotate = useMutation({
+    mutationFn: (target: string) =>
+      api(`/projects/${projectId}/providers/${target}`, {
+        method: "PATCH",
+        json: { apiKey: rotateKey },
+      }),
+    onSuccess: () => {
+      setRotating(null);
+      setRotateKey("");
+      toast.success(t("providers.rotated"));
+      void invalidate();
+    },
+    onError: toastApiError,
+  });
+  const remove = useMutation({
+    mutationFn: (target: string) =>
+      api(`/projects/${projectId}/providers/${target}`, { method: "DELETE" }),
+    onSuccess: () => invalidate(),
+    onError: toastApiError,
+  });
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-2 sm:grid-cols-[180px_1fr_1fr_auto] sm:items-end">
+        <div className="space-y-1">
+          <Label>{t("providers.provider")}</Label>
+          <Select value={provider} onValueChange={setProvider}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PROVIDER_IDS.map((id) => (
+                <SelectItem key={id} value={id}>
+                  {providerLabel(id)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="provider-key">{t("providers.apiKey")}</Label>
+          <Input
+            id="provider-key"
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="provider-base-url">{t("providers.baseUrl")}</Label>
+          <Input
+            id="provider-base-url"
+            value={baseUrl}
+            placeholder={t("providers.baseUrlHint")}
+            onChange={(e) => setBaseUrl(e.target.value)}
+          />
+        </div>
+        <Button variant="outline" disabled={!apiKey || add.isPending} onClick={() => add.mutate()}>
+          {t("providers.add")}
+        </Button>
+      </div>
+      {credentials.data?.length === 0 ? (
+        <EmptyState icon={KeyRoundIcon} title={t("providers.empty")} />
+      ) : null}
+      <ul className="space-y-0.5">
+        {(credentials.data ?? []).map((row) => (
+          <li
+            key={row.id}
+            className="-mx-2 flex items-center justify-between gap-2 rounded-md px-2 py-2 text-sm transition-colors hover:bg-muted/40"
+          >
+            <div className="min-w-0">
+              <p className="font-medium">{providerLabel(row.provider)}</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {t("providers.keySet")} · {row.baseUrl ?? t("providers.defaultEndpoint")}
+              </p>
+            </div>
+            {rotating?.id === row.id ? (
+              <div className="flex items-center gap-2">
+                <Input
+                  type="password"
+                  autoFocus
+                  className="h-8 w-44"
+                  value={rotateKey}
+                  onChange={(e) => setRotateKey(e.target.value)}
+                />
+                <Button
+                  size="sm"
+                  disabled={!rotateKey || rotate.isPending}
+                  onClick={() => rotate.mutate(row.provider)}
+                >
+                  {t("providers.save")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setRotating(null);
+                    setRotateKey("");
+                  }}
+                >
+                  {t("providers.cancel")}
+                </Button>
+              </div>
+            ) : (
+              <div className="flex shrink-0 items-center gap-1">
+                <Button size="sm" variant="ghost" onClick={() => setRotating(row)}>
+                  {t("providers.rotate")}
+                </Button>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={t("providers.remove")}
+                  onClick={() => setRemoving(row)}
+                >
+                  <XIcon />
+                </Button>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      <ConfirmDialog
+        open={removing !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoving(null);
+        }}
+        title={t("providers.removeConfirm", { provider: providerLabel(removing?.provider ?? "") })}
+        confirmLabel={t("providers.remove")}
+        destructive
+        onConfirm={() => {
+          if (removing) remove.mutate(removing.provider);
+          setRemoving(null);
+        }}
+      />
+    </div>
+  );
+}
+
 function QuotaSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation(["settings", "common"]);
   const queryClient = useQueryClient();
@@ -515,6 +700,7 @@ const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
   { key: "members", icon: UsersIcon },
   { key: "grants", icon: ShieldCheckIcon },
   { key: "repos", icon: GitBranchIcon },
+  { key: "providers", icon: KeyRoundIcon },
   { key: "quota", icon: GaugeIcon },
 ];
 
@@ -551,6 +737,7 @@ export function SettingsPage() {
             {section === "members" && <MembersSection projectId={projectId} />}
             {section === "grants" && <GrantsSection projectId={projectId} />}
             {section === "repos" && <ReposSection projectId={projectId} />}
+            {section === "providers" && <ProvidersSection projectId={projectId} />}
             {section === "quota" && <QuotaSection projectId={projectId} />}
           </CardContent>
         </Card>

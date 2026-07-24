@@ -1,6 +1,8 @@
 import {
   type CheckpointStoredResponse,
+  isCredentialGatedExecutor,
   isTerminalRunStatus,
+  providerAuthPolicy,
   type Question,
   questionsArtifactSchema,
   type ReviewFinding,
@@ -32,6 +34,7 @@ import {
   type Executor,
   type ExecutorEvent,
   type PriorStepSummary,
+  type ProviderAuth,
   type ResolvedMcpServer,
   type ResolvedModel,
   type SecretRedactor,
@@ -51,7 +54,7 @@ import {
   type TemplatePhaseV2,
   type TemplateStepV2,
 } from "../template-schema";
-import type { EngineDeps, RunOutcome } from "./deps";
+import { type EngineDeps, ProviderCredentialError, type RunOutcome } from "./deps";
 import { appendRunEvent, finalizeRun, transitionRun } from "./run-lifecycle";
 
 type RunRow = typeof runs.$inferSelect;
@@ -104,10 +107,25 @@ class RunClaimLost extends Error {
  */
 export class ExecutorUnavailableError extends Error {
   readonly code = "executor_unavailable_on_worker";
-  constructor(readonly executorId: string) {
-    super(`executor '${executorId}' is not registered on this worker`);
+  constructor(
+    readonly executorId: string,
+    reason = "is not registered on this worker",
+  ) {
+    super(`executor '${executorId}' ${reason}`);
     this.name = "ExecutorUnavailableError";
   }
+}
+
+/** Normalize runs.model_resolution (flat legacy or slot-keyed) to one slot's entries. */
+function slotResolutionEntries(raw: Record<string, unknown>, slot: string): ModelResolutionEntry[] {
+  const values = Object.values(raw ?? {});
+  const flat = values.every(
+    (v) => v !== null && typeof v === "object" && "providerModelId" in (v as object),
+  );
+  if (flat) return values as ModelResolutionEntry[];
+  const bySlot = raw as Record<string, Record<string, ModelResolutionEntry>>;
+  const resolution = bySlot[slot] ?? Object.values(bySlot)[0] ?? {};
+  return Object.values(resolution);
 }
 
 /** The credential values a resolved MCP server injects, for secret redaction. */
@@ -174,6 +192,35 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
     const faber = fabersById.get(faberId);
     if (!faber) throw new Error(`run ${runId}: faber ${faberId} for slot '${slot}' missing`);
     bindings[slot] = { faberId, executorId, systemPrompt: faber.systemPrompt, executor };
+  }
+
+  // A registered executor may still lack usable auth for this run's providers
+  // (a keyless codex worker serving a project without its own credential).
+  // Same decline path as an unregistered executor: throw before any status
+  // transition so the worker defers and an authed worker picks the run up.
+  // ONLY in the pre-claim states the worker actually declines — a crashed
+  // `running` run has no re-enqueue path (execution lease, ADR-0009 future
+  // work), so it proceeds and the per-step gate in providerAuthFor fails it
+  // actionably instead of this throw burning pg-boss retries into `internal`.
+  if (run.status === "queued" || run.status === "waiting_approval") {
+    for (const [slot, binding] of Object.entries(bindings)) {
+      const envAuth = binding.executor.envAuthProviders;
+      if (envAuth === undefined) continue; // fake/demo/custom executors: no gating
+      for (const entry of slotResolutionEntries(run.modelResolution, slot)) {
+        if (providerAuthPolicy(entry.provider) !== "env") continue; // project-policy → per-step check
+        if (envAuth.includes(entry.provider)) continue;
+        const hasCredential = await deps.resources.hasProviderCredential(
+          run.projectId,
+          entry.provider,
+        );
+        if (!hasCredential) {
+          throw new ExecutorUnavailableError(
+            binding.executorId,
+            `has no usable auth for provider '${entry.provider}' on this worker (no project credential, no worker env auth)`,
+          );
+        }
+      }
+    }
   }
 
   const engine = new RunEngine(deps, run, template, bindings, {
@@ -1344,6 +1391,9 @@ class RunEngine {
       }),
     );
 
+    // slot resolution is single-provider, so the step model's provider also
+    // covers every subagent model in this request
+    const model = modelFor(step.model.role);
     return {
       runId: this.run.id,
       stepId: step.id,
@@ -1351,7 +1401,17 @@ class RunEngine {
       agentSlot: slot,
       instructions: interpolate(step.instructions, ctx),
       systemPrompt: binding.systemPrompt,
-      model: modelFor(step.model.role),
+      model,
+      providerAuth: await this.providerAuthFor(model.provider, {
+        // gate by the run's BOUND executor id (the resolution contract), not
+        // the instance id — fixtures register fakes under real executor ids
+        gated: isCredentialGatedExecutor(binding.executorId),
+        // whether THIS worker's executor could still authenticate from env
+        // if the project credential is gone (undefined advertisement = yes)
+        envFallback:
+          binding.executor.envAuthProviders === undefined ||
+          binding.executor.envAuthProviders.includes(model.provider),
+      }),
       subagents,
       skills,
       mcpServers,
@@ -1373,6 +1433,52 @@ class RunEngine {
         kind: this.template.spec.outputs.artifacts.find((a) => a.key === key)?.kind ?? "markdown",
       })),
     };
+  }
+
+  /**
+   * The project's credential for a provider, materialized fresh for every
+   * step so a rotated (or removed/added) key applies at the next step — the
+   * contract the API and manual document. The key is registered with the
+   * redactor the moment it is materialized — before any request can echo it
+   * into an event payload; superseded keys stay in the redactor's set.
+   *
+   * On a gated (real, cataloged) executor, a missing credential fails the
+   * run here — before executor invocation, with the same code the
+   * submit/retry gates use — whenever env auth cannot cover the gap: always
+   * for project-policy providers (their env fallback cannot exist), and for
+   * env-policy providers when this worker's executor advertises no env auth
+   * for them (a keyless worker that claimed the run because the credential
+   * existed must not invoke the executor keyless after it is deleted).
+   */
+  private async providerAuthFor(
+    provider: string,
+    opts: { gated: boolean; envFallback: boolean },
+  ): Promise<ProviderAuth | undefined> {
+    let cred: { apiKey: string; baseUrl?: string } | null;
+    try {
+      cred = await this.deps.resources.providerCredential(this.refs.project.id, provider);
+    } catch (err) {
+      // deterministic misconfiguration (base URL resolving to private address
+      // space) fails the run; anything else rethrows so pg-boss retries
+      if (err instanceof ProviderCredentialError) {
+        throw new RunFailure("base_url_invalid", err.message, "failed");
+      }
+      throw err;
+    }
+    if (!cred) {
+      const needsCredential = providerAuthPolicy(provider) === "project" || !opts.envFallback;
+      if (opts.gated && needsCredential) {
+        throw new RunFailure(
+          "provider_credential_required",
+          `provider '${provider}' requires a project credential that no longer exists` +
+            (providerAuthPolicy(provider) === "env" ? " (this worker has no env auth for it)" : ""),
+          "failed",
+        );
+      }
+      return undefined;
+    }
+    this.redactor.add([cred.apiKey]);
+    return { provider, apiKey: cred.apiKey, baseUrl: cred.baseUrl };
   }
 
   /** MCP refs the run is authorized to use (pinned at submit; see resolve.authorizeResources). */

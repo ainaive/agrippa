@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the orientation map for contributors. The authoritative design lives in `docs/design/` (10 documents) and `docs/adr/` (12 decision records); this file tells you what exists, where it lives, and which invariants hold it together.
+This document is the orientation map for contributors. The authoritative design lives in `docs/design/` (10 documents) and `docs/adr/` (13 decision records); this file tells you what exists, where it lives, and which invariants hold it together.
 
 ## Bird's-eye view
 
@@ -60,6 +60,7 @@ Dependency direction is enforced by `scripts/check-deps.ts` (runtime deps only).
 8. **The worker trusts only the pinned manifest**: repos are project-scoped and skills/MCP resolve solely from `runs.resource_manifest`, never the mutable global registry.
 9. **Lifecycle mutations are atomic**: run status transitions are compare-and-swap on the expected status and event `seq` is allocated by the database, so concurrent writers can't clobber a status or collide on a seq (`run-lifecycle.ts`).
 10. **Approved evidence is the published tree**: platform Git reads only its private gitdir/index, excludes runtime configuration from both evidence and publication, and refuses errors, empty snapshots, or any patch mismatch before push (ADR-0012).
+11. **A project provider credential outranks worker env, and slots resolve single-provider**: the executor overlay replaces the wire protocol's whole auth-var family (never merges), and submit-time resolution satisfies all of a slot's scoped roles from one provider — a step's base URL is process-wide, so a mixed slot could never execute (ADR-0013).
 
 ## Where to look
 

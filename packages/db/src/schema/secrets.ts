@@ -13,7 +13,9 @@ export const secrets = pgTable("secrets", {
   orgId: uuid("org_id")
     .notNull()
     .references(() => orgs.id),
-  kind: text("kind", { enum: ["mcp_auth", "git_credential", "generic"] }).notNull(),
+  kind: text("kind", {
+    enum: ["mcp_auth", "git_credential", "provider_api_key", "generic"],
+  }).notNull(),
   ciphertext: text("ciphertext").notNull(), // base64: iv ∥ authTag ∥ data
   createdBy: uuid("created_by").references(() => users.id),
   createdAt: createdAtCol(),

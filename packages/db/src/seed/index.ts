@@ -332,7 +332,7 @@ export async function seed(db: Db): Promise<void> {
     }
   }
 
-  // ── Models (Anthropic; prices are list USD per MTok) ──────────────────────
+  // ── Models (prices are list USD per MTok) ─────────────────────────────────
   const modelRows = [
     {
       provider: "anthropic",
@@ -381,6 +381,37 @@ export async function seed(db: Db): Promise<void> {
       contextWindow: 400_000,
       inputCostPerMtok: "0.25",
       outputCostPerMtok: "2.00",
+    },
+    // Qwen via Aliyun Bailian (DashScope); runs need a per-project dashscope
+    // credential (project settings → providers). Prices are entry-tier list
+    // USD per MTok — Bailian tiers rates by input length, so verify against
+    // the live Model Studio price list when rolling out.
+    {
+      provider: "dashscope",
+      providerModelId: "qwen3.7-max",
+      displayName: "Qwen3.7 Max",
+      tier: "strong" as const,
+      contextWindow: 1_000_000,
+      inputCostPerMtok: "2.50",
+      outputCostPerMtok: "7.50",
+    },
+    {
+      provider: "dashscope",
+      providerModelId: "qwen3.7-plus",
+      displayName: "Qwen3.7 Plus",
+      tier: "balanced" as const,
+      contextWindow: 1_000_000,
+      inputCostPerMtok: "0.32",
+      outputCostPerMtok: "1.28",
+    },
+    {
+      provider: "dashscope",
+      providerModelId: "qwen3.6-flash",
+      displayName: "Qwen3.6 Flash",
+      tier: "fast" as const,
+      contextWindow: 1_000_000,
+      inputCostPerMtok: "0.25",
+      outputCostPerMtok: "1.50",
     },
   ];
   for (const row of modelRows) {

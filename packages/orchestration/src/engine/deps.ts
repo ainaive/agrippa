@@ -34,6 +34,18 @@ export interface WorkspaceManager {
   cleanup(runId: string): Promise<void>;
 }
 
+/**
+ * Deterministic provider-credential misconfiguration (e.g. a base URL whose
+ * host resolves to private address space). The engine converts this into a
+ * run failure instead of letting pg-boss retry a config that cannot work.
+ */
+export class ProviderCredentialError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderCredentialError";
+  }
+}
+
 export interface ResourceMaterializer {
   /**
    * Remove executor project configuration left by a prior agent invocation.
@@ -47,6 +59,21 @@ export interface ResourceMaterializer {
   ): Promise<{ resolved: ResolvedSkill[]; missing: string[] }>;
   /** Resolve step MCP refs against the registry + secrets; missing = unregistered/disabled. */
   mcpServers(refs: string[]): Promise<{ resolved: ResolvedMcpServer[]; missing: string[] }>;
+  /**
+   * Whether the project has a usable stored credential row + secret for this
+   * provider. This presence-only probe must not resolve endpoints or decrypt
+   * the key; it is safe to call before a worker claims the run.
+   */
+  hasProviderCredential(projectId: string, provider: string): Promise<boolean>;
+  /**
+   * The project's decrypted credential for a model provider, or null when the
+   * project has none (worker env auth then applies). Materialized fresh per
+   * step and registered with the redactor before it reaches a request.
+   */
+  providerCredential(
+    projectId: string,
+    provider: string,
+  ): Promise<{ apiKey: string; baseUrl?: string } | null>;
 }
 
 export type StoredArtifact = {

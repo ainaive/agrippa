@@ -25,11 +25,14 @@ export type ExecutorCatalogEntry = {
 export const EXECUTOR_CATALOG = {
   "claude-agent-sdk": {
     label: "Claude Code",
-    providers: ["anthropic"],
+    providers: ["anthropic", "dashscope"],
     capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
   },
   "codex-cli": {
     label: "OpenAI Codex",
+    // dashscope is claude-only for now: Codex CLI ≥0.122 removed wire_api
+    // "chat", and Bailian's Responses API doesn't yet cover the seeded Qwen
+    // models (ADR-0013 amendment).
     providers: ["openai"],
     capabilities: { subagents: false, mcp: false, skills: false, resume: true, streaming: true },
   },
@@ -56,4 +59,14 @@ export const EXECUTOR_DEFAULT_SENTINEL = "__default__";
 /** True when the executor can serve models from the given provider. */
 export function executorSupportsProvider(entry: ExecutorCatalogEntry, provider: string): boolean {
   return entry.providers === "*" || entry.providers.includes(provider);
+}
+
+/**
+ * Whether provider-credential requirements apply to runs on this executor.
+ * The fake executor calls no provider API, and uncataloged custom executors
+ * resolved with no gating at submit — both stay exempt everywhere (submit,
+ * retry, and the engine's per-step check) so token-free demos keep working.
+ */
+export function isCredentialGatedExecutor(id: string): boolean {
+  return id !== "fake" && isExecutorId(id);
 }

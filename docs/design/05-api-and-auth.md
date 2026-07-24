@@ -22,7 +22,7 @@ Two layers, deliberately simple:
 | Org | `org_admin`, `org_member` | Resource layer writes (registries, template publish), org settings, user management |
 | Project | `admin`, `member`, `viewer` | Everything project-scoped |
 
-Project-role capabilities: **viewer** = read everything in the project (including run comments and the timeline); **member** = viewer + submit tasks (with agent-slot overrides), cancel own runs, respond to checkpoints (approve/reject, request changes — offered only on loop checkpoints, elsewhere the API answers `request_changes_unsupported` — answer questions, decide review findings), post run comments; **admin** = member + manage members, resource grants, quota, repos, project settings.
+Project-role capabilities: **viewer** = read everything in the project (including run comments and the timeline); **member** = viewer + submit tasks (with agent-slot overrides), cancel own runs, respond to checkpoints (approve/reject, request changes — offered only on loop checkpoints, elsewhere the API answers `request_changes_unsupported` — answer questions, decide review findings), post run comments; **admin** = member + manage members, resource grants, quota, repos, provider credentials, project settings.
 
 Enforcement: a single middleware `requireRole(scope, minRole)` — scope is `org` or a project id resolved from the route; it reads `project_members` (or `users.org_role`) and rejects with `403 {code: "forbidden"}`. Every mutating handler writes an `audit_logs` row (actor, action, resource, payload diff, IP) via a shared audit helper — auditing is not optional per-route.
 
@@ -55,6 +55,13 @@ GET    /projects/:id                      PATCH /projects/:id      DELETE /proje
 POST   /projects/:id/members              GET /projects/:id/members
 PATCH  /projects/:id/members/:userId      DELETE /projects/:id/members/:userId
 POST   /projects/:id/repos                GET /projects/:id/repos  DELETE .../repos/:repoId
+GET    /projects/:id/providers            POST /projects/:id/providers            # provider credentials (ADR-0013)
+PATCH  /projects/:id/providers/:provider  DELETE /projects/:id/providers/:provider
+   # key is write-only (encrypted into secrets, kind provider_api_key); reads expose hasCredential only.
+   # viewer reads the list; admin writes. PATCH rotates the key in place and/or sets baseUrl (null clears
+   # back to the catalog default); setting a NEW baseUrl requires re-entering apiKey in the same request —
+   # endpoint and key travel together, so an existing write-only key can never be redirected (ADR-0013 am. 2).
+   # DELETE removes row + secret in one tx. Duplicate provider → 409 provider_exists; bad endpoint → 400 base_url_invalid.
 GET    /projects/:id/grants               PUT /projects/:id/grants # bulk enable/disable resources
 GET    /projects/:id/quota                PUT /projects/:id/quota
 GET    /projects/:id/usage   # current-month totals + byModel + byTaskType + byDay (same window as the quota gate)

@@ -4,6 +4,7 @@
     "members": "Members",
     "grants": "Resources",
     "repos": "Repositories",
+    "providers": "Providers",
     "quota": "Quota"
   },
   "general": {
@@ -42,6 +43,22 @@
     "empty": "No repositories connected yet.",
     "private": "credentialed",
     "public": "public"
+  },
+  "providers": {
+    "provider": "Provider",
+    "apiKey": "API key",
+    "baseUrl": "Base URL (optional)",
+    "baseUrlHint": "Leave empty to use the provider's default endpoint",
+    "add": "Add",
+    "rotate": "Replace key",
+    "save": "Save",
+    "cancel": "Cancel",
+    "remove": "Remove",
+    "removeConfirm": "Remove the {{provider}} credential? Runs will fall back to the worker's own keys.",
+    "empty": "No provider credentials. Runs use the keys configured on the platform workers.",
+    "keySet": "key configured",
+    "rotated": "key replaced",
+    "defaultEndpoint": "default endpoint"
   },
   "quota": {
     "costLimit": "Monthly cost limit (USD)",

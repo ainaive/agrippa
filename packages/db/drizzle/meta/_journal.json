@@ -50,6 +50,13 @@
       "when": 1784771086602,
       "tag": "0006_executor-registrations",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784843355774,
+      "tag": "0007_provider-credentials",
+      "breakpoints": true
     }
   ]
 }

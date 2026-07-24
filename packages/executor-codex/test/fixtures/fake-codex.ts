@@ -84,6 +84,8 @@ switch (scenario) {
           secret: process.env.AGRIPPA_SECRET_KEY ?? null,
           nodeOptions: process.env.NODE_OPTIONS ?? null,
           openai: process.env.OPENAI_API_KEY ?? null,
+          openaiBaseUrl: process.env.OPENAI_BASE_URL ?? null,
+          codexHome: process.env.CODEX_HOME ?? null,
         }),
       },
     });

@@ -10,6 +10,7 @@ import {
   evaluateToolCall,
   isReadTool,
   isWriteTool,
+  overlayProviderAuth,
   pathArgOf,
   priorContextBlock,
   realContained,
@@ -73,8 +74,11 @@ export function buildQueryArgs(
     // OS-level command isolation when the host supports it (bubblewrap); degrade
     // gracefully elsewhere (e.g. macOS dev) rather than refusing to run
     sandbox: { enabled: true, failIfUnavailable: false },
-    // secrets (master key, datastore URLs) must not reach the agent subprocess
-    env: buildScrubbedEnv(),
+    // secrets (master key, datastore URLs) must not reach the agent subprocess;
+    // a project provider credential (Bailian…) then replaces the anthropic
+    // auth family — the slot resolves single-provider, so one base URL also
+    // serves every subagent model in this query
+    env: overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "anthropic"),
     maxTurns: req.limits.maxTurns,
     includePartialMessages: true,
     resume: req.resumeSessionId,
@@ -119,9 +123,17 @@ function textOf(content: Array<{ type: string; text?: string }>): string {
 }
 
 export function createClaudeExecutor(queryFn: QueryFn = sdkQuery as QueryFn): Executor {
+  const envAuth = Boolean(
+    process.env.ANTHROPIC_API_KEY ||
+      process.env.ANTHROPIC_AUTH_TOKEN ||
+      process.env.CLAUDE_CODE_OAUTH_TOKEN,
+  );
   return {
     id: "claude-agent-sdk",
     capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
+    // captured at construction: which env-policy providers this worker can
+    // serve without a project credential — the engine defers runs it can't
+    envAuthProviders: envAuth ? ["anthropic"] : [],
 
     async *executeStep(
       req: StepExecutionRequest,

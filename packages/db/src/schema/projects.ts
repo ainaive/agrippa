@@ -69,6 +69,28 @@ export const repoConnections = pgTable("repo_connections", {
   createdAt: createdAtCol(),
 });
 
+/**
+ * Per-project model-provider credential (ADR: provider credentials). One row
+ * per (project, provider); the key lives encrypted in `secrets`. Absence of a
+ * row means the worker's env auth applies — presence overrides it.
+ */
+export const providerCredentials = pgTable(
+  "provider_credentials",
+  {
+    id: idCol(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(), // catalog id; free text like models.provider
+    baseUrl: text("base_url"), // overrides the provider catalog's default endpoints
+    secretRef: uuid("secret_ref")
+      .notNull()
+      .references(() => secrets.id),
+    createdAt: createdAtCol(),
+  },
+  (t) => [uniqueIndex("provider_credentials_uq").on(t.projectId, t.provider)],
+);
+
 export const projectResourceGrants = pgTable(
   "project_resource_grants",
   {

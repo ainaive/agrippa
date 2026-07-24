@@ -28,7 +28,7 @@ import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
 import { InProcessEventBus } from "./bus";
-import type { EngineDeps } from "./deps";
+import { type EngineDeps, ProviderCredentialError } from "./deps";
 import { ExecutorUnavailableError, executeRun } from "./engine";
 import {
   FakeResourceMaterializer,
@@ -72,7 +72,17 @@ type Fixture = {
   };
 };
 
-type DepsOptions = { mcpServers?: string[]; skills?: string[] };
+type DepsOptions = {
+  mcpServers?: string[];
+  skills?: string[];
+  providerCredentials?: Record<string, { apiKey: string; baseUrl?: string }>;
+  /** Explicit providers reported present during the pre-claim auth probe. */
+  providerCredentialProviders?: string[];
+  /** Failure thrown only when the full credential is materialized per step. */
+  providerCredentialError?: Error;
+  /** Simulate a worker with limited env auth (undefined = no gating). */
+  envAuthProviders?: readonly string[];
+};
 
 type FixtureOptions = {
   params?: Record<string, unknown>;
@@ -191,7 +201,7 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const workspace = new FakeWorkspaceManager();
 
   const makeDeps: Fixture["makeDeps"] = (script, opts = {}) => {
-    const executor = new FakeExecutor(script);
+    const executor = new FakeExecutor(script, { envAuthProviders: opts.envAuthProviders });
     return {
       db,
       executors: { fake: executor },
@@ -201,6 +211,15 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
       resources: new FakeResourceMaterializer({
         mcpServers: opts.mcpServers ?? [],
         ...(opts.skills !== undefined ? { skills: opts.skills } : {}),
+        ...(opts.providerCredentials !== undefined
+          ? { providerCredentials: opts.providerCredentials }
+          : {}),
+        ...(opts.providerCredentialProviders !== undefined
+          ? { providerCredentialProviders: opts.providerCredentialProviders }
+          : {}),
+        ...(opts.providerCredentialError !== undefined
+          ? { providerCredentialError: opts.providerCredentialError }
+          : {}),
       }),
       artifacts: new InMemoryArtifactStore(),
       logger: silentLogger,
@@ -656,6 +675,138 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     const serialized = JSON.stringify(msg?.payload);
     expect(serialized).toContain("[REDACTED]");
     expect(serialized).not.toContain(secret);
+  });
+
+  it("materializes the project provider credential per step and redacts its key", async () => {
+    const fx = await setupFixture();
+    const apiKey = "sk-bailian-project-key-1234567890";
+    const script: Record<string, FakeStepBehavior> = {
+      ...HAPPY_SCRIPT,
+      "reproduce-bug": {
+        kind: "succeed",
+        events: [
+          { type: "message.completed", role: "assistant", text: `the key is ${apiKey} oops` },
+          { type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" },
+        ],
+        output: "done",
+      },
+    };
+    // same credential under every provider — the fixture resolution is
+    // mixed-provider ('*'), so the step's provider is data, not a constant
+    const cred = { apiKey };
+    const deps = fx.makeDeps(script, {
+      providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
+    });
+    await executeRun(deps, fx.runId);
+
+    // every request carries the credential matching its model's provider
+    expect(deps.executor.requests.length).toBeGreaterThan(0);
+    for (const req of deps.executor.requests) {
+      expect(req.providerAuth?.apiKey).toBe(apiKey);
+      expect(req.providerAuth?.provider).toBe(req.model.provider);
+    }
+
+    // materialized fresh for every step, so a rotated/removed/added key
+    // genuinely applies at the next step (the documented contract)
+    const materializer = deps.resources as FakeResourceMaterializer;
+    expect(materializer.providerCredentialCalls.length).toBe(deps.executor.requests.length);
+
+    // the key was registered with the redactor at materialization — an agent
+    // echoing it can never persist it
+    const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+    const serialized = JSON.stringify(events.map((e) => e.payload));
+    expect(serialized).not.toContain(apiKey);
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  it("omits providerAuth when the project has no provider credential", async () => {
+    const fx = await setupFixture();
+    const deps = fx.makeDeps(HAPPY_SCRIPT);
+    await executeRun(deps, fx.runId);
+    expect(deps.executor.requests.length).toBeGreaterThan(0);
+    for (const req of deps.executor.requests) expect(req.providerAuth).toBeUndefined();
+  });
+
+  it("a worker without usable auth declines the run instead of failing it", async () => {
+    const fx = await setupFixture();
+    // this worker's executor advertises NO env auth, and the project has no
+    // credentials either → same pre-claim decline as an unregistered executor
+    const keyless = fx.makeDeps(HAPPY_SCRIPT, { envAuthProviders: [] });
+    await expect(executeRun(keyless, fx.runId)).rejects.toThrow(ExecutorUnavailableError);
+    const [still] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(still?.status).toBe("queued"); // untouched — another worker can claim it
+    const keylessResources = keyless.resources as FakeResourceMaterializer;
+    expect(keylessResources.providerCredentialPresenceCalls.length).toBeGreaterThan(0);
+    expect(keylessResources.providerCredentialCalls).toHaveLength(0);
+
+    // a project credential covers the gap even on a keyless worker
+    const cred = { apiKey: "sk-project-key-1234567890" };
+    const covered = fx.makeDeps(HAPPY_SCRIPT, {
+      envAuthProviders: [],
+      providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
+    });
+    expect(await executeRun(covered, fx.runId)).not.toBe("failed");
+    expect(covered.executor.requests.length).toBeGreaterThan(0);
+  });
+
+  it("claims before materializing a present credential and fails bad endpoints actionably", async () => {
+    const fx = await setupFixture();
+    const deps = fx.makeDeps(HAPPY_SCRIPT, {
+      envAuthProviders: [],
+      providerCredentialProviders: ["anthropic", "openai", "dashscope"],
+      providerCredentialError: new ProviderCredentialError(
+        "provider base URL host 'internal.example' resolves to a non-public address (198.18.0.1)",
+      ),
+    });
+
+    expect(await executeRun(deps, fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(run?.status).toBe("failed");
+    expect((run?.error as { code: string } | null)?.code).toBe("base_url_invalid");
+    expect(deps.executor.requests).toHaveLength(0);
+
+    const resources = deps.resources as FakeResourceMaterializer;
+    expect(resources.providerCredentialPresenceCalls.length).toBeGreaterThan(0);
+    expect(resources.providerCredentialCalls.length).toBeGreaterThan(0);
+  });
+
+  it("keeps transient credential materialization failures retryable", async () => {
+    const fx = await setupFixture();
+    const transient = Object.assign(new Error("temporary DNS resolver failure"), {
+      code: "EAI_AGAIN",
+    });
+    const deps = fx.makeDeps(HAPPY_SCRIPT, {
+      envAuthProviders: [],
+      providerCredentialProviders: ["anthropic", "openai", "dashscope"],
+      providerCredentialError: transient,
+    });
+
+    let thrown: unknown;
+    try {
+      await executeRun(deps, fx.runId);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBe(transient);
+
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(run?.status).toBe("running");
+    expect(run?.error).toBeNull();
+    expect(deps.executor.requests).toHaveLength(0);
+  });
+
+  it("does not decline a crash-recovered running run — per-step gating applies instead", async () => {
+    const fx = await setupFixture();
+    // a crashed `running` run has no re-enqueue path (execution lease is
+    // ADR-0009 future work): the auth preflight only guards the pre-claim
+    // states the worker can decline, so a keyless worker picking this run up
+    // proceeds — and the per-step gate fails it actionably if auth is truly
+    // unusable, instead of burning pg-boss retries into a generic internal
+    expect(await transitionRun(fx.db, fx.runId, "queued", "running")).toBe(true);
+    const keyless = fx.makeDeps(HAPPY_SCRIPT, { envAuthProviders: [] });
+    const outcome = await executeRun(keyless, fx.runId);
+    expect(outcome).not.toBe("failed"); // fake-bound run is ungated per-step
+    expect(keyless.executor.requests.length).toBeGreaterThan(0);
   });
 });
 

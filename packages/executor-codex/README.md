@@ -58,7 +58,21 @@ no callback surface.
 
 ## Auth
 
-`OPENAI_API_KEY` (or `CODEX_API_KEY`) must be present in the worker
-environment; alternatively point `CODEX_HOME` at a directory holding a
-ChatGPT-login `auth.json`. The worker registers the executor only when the
-CLI probe succeeds (`probeCodexCli`).
+Two sources, either works (ADR-0013):
+
+- **Project provider credential** — arrives per step on the request
+  (`providerAuth`); the adapter replaces the openai env family with the
+  project key, points `CODEX_HOME` at a per-run directory (so an ambient
+  `auth.json` can never outrank the project key), and routes an explicit
+  base-URL override through a synthesized `model_providers` entry (`-c`
+  overrides survive `--ignore-user-config`; the CLI's `responses` wire-API
+  default applies, so chat-completions-only gateways can't run here).
+- **Worker env fallback** — `OPENAI_API_KEY` (or `CODEX_API_KEY`), or
+  `CODEX_HOME` pointing at a directory holding a ChatGPT-login `auth.json`.
+
+Registration requires only a successful CLI probe (`probeCodexCli`) — a
+keyless worker is a valid codex host. The executor advertises whether env
+auth exists (`envAuthProviders`), and the engine declines — before claiming —
+any run whose providers neither a project credential nor this worker's env
+can authenticate, so such runs defer to a capable worker instead of failing
+mid-run.

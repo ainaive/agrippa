@@ -59,6 +59,19 @@ export type PriorStepSummary = {
   artifactKeys: string[];
 };
 
+/**
+ * Project-scoped provider credential, resolved by the engine at step build.
+ * Absent = the worker's env auth applies. Executors map this onto their own
+ * auth variables via overlayProviderAuth (./isolation) — the request stays
+ * executor-agnostic.
+ */
+export type ProviderAuth = {
+  provider: string;
+  apiKey: string;
+  /** Explicit endpoint override; absent = the provider catalog default. */
+  baseUrl?: string;
+};
+
 export type StepExecutionRequest = {
   runId: string;
   stepId: string;
@@ -69,6 +82,8 @@ export type StepExecutionRequest = {
   instructions: string;
   systemPrompt: string;
   model: ResolvedModel;
+  /** Per-project provider credential; absent = worker env fallback. */
+  providerAuth?: ProviderAuth;
   subagents: SubagentSpec[];
   skills: ResolvedSkill[];
   mcpServers: ResolvedMcpServer[];
@@ -151,6 +166,15 @@ export type ExecutorCapabilities = {
 export interface Executor {
   readonly id: string;
   readonly capabilities: ExecutorCapabilities;
+  /**
+   * Providers this executor instance can authenticate from the worker's own
+   * env (captured at construction). When defined, the engine defers a run —
+   * before claiming it — whose resolution needs an env-policy provider that
+   * is neither listed here nor covered by a project credential, so a keyless
+   * worker never claims work it would fail mid-run. undefined = no gating
+   * (fake/demo/custom executors).
+   */
+  readonly envAuthProviders?: readonly string[];
   /** Must terminate with exactly one step.completed | step.failed. */
   executeStep(req: StepExecutionRequest, ctx: ExecutionContext): AsyncIterable<ExecutorEvent>;
 }

@@ -41,7 +41,9 @@ infra/docker-compose.yml
 | `WORKER_EGRESS_ALLOWLIST` | optional outbound-network restriction for agent Bash |
 | `APT_MIRROR` | optional **build-time** mirror for the worker image's apt packages (e.g. `https://mirrors.aliyun.com` from a host where `deb.debian.org` is slow/blocked); no-op when empty |
 
-Secrets policy: provider API keys and the master key live only in `api`/`worker` env (compose `env_file`), never in the DB; user-registered credentials (git tokens, MCP auth) live encrypted in the `secrets` table keyed by `AGRIPPA_SECRET_KEY`.
+Secrets policy: the master key and the deployment's **fallback** provider API keys live only in `api`/`worker` env (compose `env_file`), never in the DB; user-registered credentials (git tokens, MCP auth, and per-project provider API keys — ADR-0013) live encrypted in the `secrets` table keyed by `AGRIPPA_SECRET_KEY`. A project provider credential **overrides** the worker env for that provider; env auth remains the deployment-wide default for projects without one.
+
+**Aliyun Bailian (DashScope) / Qwen**: no worker env needed — an admin adds a `dashscope` credential in project settings and grants the seeded Qwen models. Runs through the **claude executor only** (Codex CLI ≥0.122 removed the chat wire API Bailian's compatible mode speaks — ADR-0013 amendment); the catalog defaults to the Beijing endpoint `https://dashscope.aliyuncs.com/apps/anthropic`, and international workspaces set the credential's base-URL override to their workspace-scoped `*.maas.aliyuncs.com` host (overrides are policy-checked: https, public DNS names, `.aliyuncs.com` for dashscope). Verify Qwen model rates against the live Model Studio price list — Bailian tiers pricing by input length and the seeds carry entry-tier rates.
 
 ## Operations
 
