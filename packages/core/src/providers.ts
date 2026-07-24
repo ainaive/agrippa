@@ -94,8 +94,9 @@ export function providerServesProtocol(id: string, protocol: WireProtocol): bool
  * (IP literals, localhost, and dotless internal names are rejected — WHATWG
  * URL parsing canonicalizes numeric IPv4 forms first), and, when the catalog
  * pins a host family (dashscope → .aliyuncs.com), the hostname must match.
- * DNS-rebinding/resolve-time checks are out of scope — deployments that need
- * an internal proxy configure it via worker env, which is operator-owned.
+ * The worker separately resolves the host before each step and requires every
+ * address to be global-unicast. Rebind-after-check remains possible; deployments
+ * that need an internal proxy configure it via worker env, which is operator-owned.
  * Returns null when valid, else a short reason.
  */
 export function validateProviderBaseUrl(provider: string, raw: string): string | null {

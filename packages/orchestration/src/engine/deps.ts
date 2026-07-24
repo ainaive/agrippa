@@ -60,9 +60,15 @@ export interface ResourceMaterializer {
   /** Resolve step MCP refs against the registry + secrets; missing = unregistered/disabled. */
   mcpServers(refs: string[]): Promise<{ resolved: ResolvedMcpServer[]; missing: string[] }>;
   /**
+   * Whether the project has a usable stored credential row + secret for this
+   * provider. This presence-only probe must not resolve endpoints or decrypt
+   * the key; it is safe to call before a worker claims the run.
+   */
+  hasProviderCredential(projectId: string, provider: string): Promise<boolean>;
+  /**
    * The project's decrypted credential for a model provider, or null when the
-   * project has none (worker env auth then applies). The engine memoizes per
-   * run and registers the key with the redactor before it reaches a request.
+   * project has none (worker env auth then applies). Materialized fresh per
+   * step and registered with the redactor before it reaches a request.
    */
   providerCredential(
     projectId: string,

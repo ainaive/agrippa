@@ -53,6 +53,7 @@ export class FakeWorkspaceManager implements WorkspaceManager {
 
 export class FakeResourceMaterializer implements ResourceMaterializer {
   readonly preparedWorkspaces: string[] = [];
+  readonly providerCredentialPresenceCalls: Array<{ projectId: string; provider: string }> = [];
   readonly providerCredentialCalls: Array<{ projectId: string; provider: string }> = [];
 
   constructor(
@@ -61,6 +62,10 @@ export class FakeResourceMaterializer implements ResourceMaterializer {
       mcpServers?: string[];
       /** provider → project credential returned by providerCredential. */
       providerCredentials?: Record<string, { apiKey: string; baseUrl?: string }>;
+      /** Explicit providers reported present; defaults to providerCredentials keys. */
+      providerCredentialProviders?: string[];
+      /** Optional materialization failure used by engine resilience tests. */
+      providerCredentialError?: Error;
     } = {},
   ) {}
 
@@ -104,11 +109,22 @@ export class FakeResourceMaterializer implements ResourceMaterializer {
     return { resolved, missing };
   }
 
+  async hasProviderCredential(projectId: string, provider: string): Promise<boolean> {
+    this.providerCredentialPresenceCalls.push({ projectId, provider });
+    const providers =
+      this.available.providerCredentialProviders ??
+      Object.keys(this.available.providerCredentials ?? {});
+    return providers.includes(provider);
+  }
+
   async providerCredential(
     projectId: string,
     provider: string,
   ): Promise<{ apiKey: string; baseUrl?: string } | null> {
     this.providerCredentialCalls.push({ projectId, provider });
+    if (this.available.providerCredentialError) {
+      throw this.available.providerCredentialError;
+    }
     return this.available.providerCredentials?.[provider] ?? null;
   }
 }

@@ -204,8 +204,11 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
     for (const entry of slotResolutionEntries(run.modelResolution, slot)) {
       if (providerAuthPolicy(entry.provider) !== "env") continue; // project-policy → per-step check
       if (envAuth.includes(entry.provider)) continue;
-      const cred = await deps.resources.providerCredential(run.projectId, entry.provider);
-      if (!cred) {
+      const hasCredential = await deps.resources.hasProviderCredential(
+        run.projectId,
+        entry.provider,
+      );
+      if (!hasCredential) {
         throw new ExecutorUnavailableError(
           binding.executorId,
           `has no usable auth for provider '${entry.provider}' on this worker (no project credential, no worker env auth)`,

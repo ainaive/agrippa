@@ -164,4 +164,19 @@ export class DbResourceMaterializer implements ResourceMaterializer {
       baseUrl: row.baseUrl ?? undefined,
     };
   }
+
+  async hasProviderCredential(projectId: string, provider: string): Promise<boolean> {
+    const [row] = await this.db
+      .select({ id: providerCredentials.id })
+      .from(providerCredentials)
+      .innerJoin(secrets, eq(secrets.id, providerCredentials.secretRef))
+      .where(
+        and(
+          eq(providerCredentials.projectId, projectId),
+          eq(providerCredentials.provider, provider),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  }
 }

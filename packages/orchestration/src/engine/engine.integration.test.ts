@@ -28,7 +28,7 @@ import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
 import { InProcessEventBus } from "./bus";
-import type { EngineDeps } from "./deps";
+import { type EngineDeps, ProviderCredentialError } from "./deps";
 import { ExecutorUnavailableError, executeRun } from "./engine";
 import {
   FakeResourceMaterializer,
@@ -76,6 +76,10 @@ type DepsOptions = {
   mcpServers?: string[];
   skills?: string[];
   providerCredentials?: Record<string, { apiKey: string; baseUrl?: string }>;
+  /** Explicit providers reported present during the pre-claim auth probe. */
+  providerCredentialProviders?: string[];
+  /** Failure thrown only when the full credential is materialized per step. */
+  providerCredentialError?: Error;
   /** Simulate a worker with limited env auth (undefined = no gating). */
   envAuthProviders?: readonly string[];
 };
@@ -209,6 +213,12 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
         ...(opts.skills !== undefined ? { skills: opts.skills } : {}),
         ...(opts.providerCredentials !== undefined
           ? { providerCredentials: opts.providerCredentials }
+          : {}),
+        ...(opts.providerCredentialProviders !== undefined
+          ? { providerCredentialProviders: opts.providerCredentialProviders }
+          : {}),
+        ...(opts.providerCredentialError !== undefined
+          ? { providerCredentialError: opts.providerCredentialError }
           : {}),
       }),
       artifacts: new InMemoryArtifactStore(),
@@ -725,6 +735,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     await expect(executeRun(keyless, fx.runId)).rejects.toThrow(ExecutorUnavailableError);
     const [still] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
     expect(still?.status).toBe("queued"); // untouched — another worker can claim it
+    const keylessResources = keyless.resources as FakeResourceMaterializer;
+    expect(keylessResources.providerCredentialPresenceCalls.length).toBeGreaterThan(0);
+    expect(keylessResources.providerCredentialCalls).toHaveLength(0);
 
     // a project credential covers the gap even on a keyless worker
     const cred = { apiKey: "sk-project-key-1234567890" };
@@ -734,6 +747,52 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     });
     expect(await executeRun(covered, fx.runId)).not.toBe("failed");
     expect(covered.executor.requests.length).toBeGreaterThan(0);
+  });
+
+  it("claims before materializing a present credential and fails bad endpoints actionably", async () => {
+    const fx = await setupFixture();
+    const deps = fx.makeDeps(HAPPY_SCRIPT, {
+      envAuthProviders: [],
+      providerCredentialProviders: ["anthropic", "openai", "dashscope"],
+      providerCredentialError: new ProviderCredentialError(
+        "provider base URL host 'internal.example' resolves to a non-public address (198.18.0.1)",
+      ),
+    });
+
+    expect(await executeRun(deps, fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(run?.status).toBe("failed");
+    expect((run?.error as { code: string } | null)?.code).toBe("base_url_invalid");
+    expect(deps.executor.requests).toHaveLength(0);
+
+    const resources = deps.resources as FakeResourceMaterializer;
+    expect(resources.providerCredentialPresenceCalls.length).toBeGreaterThan(0);
+    expect(resources.providerCredentialCalls.length).toBeGreaterThan(0);
+  });
+
+  it("keeps transient credential materialization failures retryable", async () => {
+    const fx = await setupFixture();
+    const transient = Object.assign(new Error("temporary DNS resolver failure"), {
+      code: "EAI_AGAIN",
+    });
+    const deps = fx.makeDeps(HAPPY_SCRIPT, {
+      envAuthProviders: [],
+      providerCredentialProviders: ["anthropic", "openai", "dashscope"],
+      providerCredentialError: transient,
+    });
+
+    let thrown: unknown;
+    try {
+      await executeRun(deps, fx.runId);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBe(transient);
+
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect(run?.status).toBe("running");
+    expect(run?.error).toBeNull();
+    expect(deps.executor.requests).toHaveLength(0);
   });
 });
 
