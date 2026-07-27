@@ -40,6 +40,11 @@ Auth flows, RBAC allow/deny matrix per role × endpoint class, transactional tas
 - Unit: mocked SDK `query()` asserting the full option-mapping table from [03](03-executor-abstraction.md) (subagents, skills materialization path, MCP config, resume); the isolation policy (`evaluateToolCall` — Bash and write containment, read-only enforcement, boundary-safe check) and env scrubbing; contract-scoped artifact collection (patch and uncontracted files skipped).
 - One live smoke test behind `ANTHROPIC_API_KEY`, excluded from CI, run manually before releases.
 
+### Codex executor
+
+- Unit, against a fake-CLI fixture replaying JSONL shapes pinned to codex-cli 0.145.0: stream→event mapping (one terminal, cache-split usage), argv/sandbox/resume construction, prompt assembly, read-only artifact synthesis, env scrubbing and project-credential overlay (`CODEX_HOME` redirect), and error semantics — a fatal `turn.failed`/`error` surfaces the unwrapped backend message, a non-fatal error item never fails a completed turn, and a silent CLI death still yields a non-empty message.
+- CLI registration is gated on `probeCodexCli` (version + config-isolation flags); no live smoke in CI.
+
 ### Worker adapters
 
 - `DiskArtifactStore` path containment: normal file stored, escaping symlink rejected, missing source is not a zero-byte artifact.

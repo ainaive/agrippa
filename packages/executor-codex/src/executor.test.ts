@@ -182,6 +182,34 @@ describe("codex executor", () => {
     expect(events.some((e) => e.type === "step.completed")).toBe(false);
   });
 
+  it("surfaces the backend failure, not the metadata warning that preceded it", async () => {
+    const events = await collect(makeReq(makeWorkspace("model-rejected")));
+    const terminal = events.at(-1);
+    expect(terminal?.type).toBe("step.failed");
+    if (terminal?.type === "step.failed") {
+      expect(terminal.error.code).toBe("model_error");
+      expect(terminal.error.message).toContain(
+        "not supported when using Codex with a ChatGPT account",
+      );
+      expect(terminal.error.message).not.toContain("Model metadata");
+      expect(terminal.error.message).not.toContain("invalid_request_error"); // prose, not the JSON blob
+    }
+  });
+
+  it("a non-fatal error item does not fail a step whose turn completed", async () => {
+    const events = await collect(makeReq(makeWorkspace("warning-then-success")));
+    const terminals = events.filter((e) => e.type === "step.completed" || e.type === "step.failed");
+    expect(terminals).toEqual([{ type: "step.completed", output: "All done" }]);
+  });
+
+  it("falls back to a non-empty message when the CLI dies silently", async () => {
+    const events = await collect(makeReq(makeWorkspace("die-silent")));
+    const terminal = events.at(-1);
+    expect(terminal?.type === "step.failed" && terminal.error.message).toBe(
+      "codex produced no output",
+    );
+  });
+
   it("kills the subprocess and reports aborted on cancellation", async () => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 150);

@@ -26,6 +26,16 @@ JSONL events observed (probe samples):
 {"type":"turn.completed","usage":{"input_tokens":30961,"cached_input_tokens":25088,"cache_write_input_tokens":0,"output_tokens":129,"reasoning_output_tokens":0}}
 ```
 
+Error stream (probed live: a model id the auth mode doesn't serve):
+
+```json
+{"type":"thread.started","thread_id":"…"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.1-codex` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.\"}}"}
+{"type":"turn.failed","error":{"message":"{…same JSON blob…}"}}
+```
+
 Notes:
 
 - `input_tokens` **includes** `cached_input_tokens`; the mapper splits them so
@@ -33,6 +43,11 @@ Notes:
 - `thread_id` is the resume handle (`codex exec resume <id>`), used only for
   retry/crash-resume of the same step per ADR-0005.
 - Unknown event/item kinds (reasoning, web_search, todo_list…) are ignored.
+- Error items carry their text in `message` (not `text`) and are **not always
+  fatal** — the CLI emits metadata warnings this way and then completes the
+  turn fine. Only `turn.failed` / top-level `error` (or a nonzero exit) fail
+  the step; the mapper keeps the two channels separate and unwraps JSON-blob
+  messages to the inner human sentence.
 
 ## Capabilities & isolation
 
