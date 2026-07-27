@@ -522,6 +522,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   });
 
   it("retry rejects a default faber that was disabled since submit", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
     const [latest] = await db
       .select({ faberId: runs.faberId })
       .from(runs)
@@ -542,6 +543,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   });
 
   it("retry rejects a required skill whose versions were all deprecated", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
     await db.update(skillVersions).set({ status: "deprecated" });
     const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
     expect(res.status).toBe(400);
