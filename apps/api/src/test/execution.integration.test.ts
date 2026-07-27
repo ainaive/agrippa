@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
-import { auditLogs, fabri, repoConnections, runs, skillVersions } from "@agrippa/db";
+import { auditLogs, fabri, mcpServers, repoConnections, runs, skillVersions } from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import {
   type EngineDeps,
@@ -568,5 +568,62 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(entry).toBeDefined();
     const payload = entry?.payload as { fromRunId?: string } | undefined;
     expect(payload?.fromRunId).toBeDefined();
+  });
+
+  it("retry drops an optional MCP server disabled since submit", async () => {
+    // bug-localize-fix references MCP 'github' as optional — register + grant it
+    const [mcp] = await db
+      .insert(mcpServers)
+      .values({
+        slug: "github",
+        nameI18n: { en: "GitHub", "zh-CN": "GitHub" },
+        transport: "http",
+        config: { url: "https://mcp.example.com" },
+      })
+      .returning();
+    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
+    const skillRows = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/skills"));
+    await admin.request(`/api/v1/projects/${projectId}/grants`, {
+      method: "PUT",
+      json: [
+        ...models.map((m) => ({ resourceType: "model", resourceId: m.id })),
+        ...skillRows.map((s) => ({ resourceType: "skill", resourceId: s.id })),
+        { resourceType: "mcp_server", resourceId: mcp?.id },
+      ],
+    });
+
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const withMcp = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(withMcp.status).toBe(202);
+    const { runId: withId } = await jsonOf<{ runId: string }>(withMcp);
+    const [runWith] = await db.select().from(runs).where(eq(runs.id, withId));
+    expect(runWith?.resourceManifest.mcpServers).toContain("github");
+
+    // disabled → treated as unregistered; the optional ref silently drops
+    await db
+      .update(mcpServers)
+      .set({ status: "disabled" })
+      .where(eq(mcpServers.id, mcp?.id as string));
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const withoutMcp = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(withoutMcp.status).toBe(202);
+    const { runId: withoutId } = await jsonOf<{ runId: string }>(withoutMcp);
+    const [runWithout] = await db.select().from(runs).where(eq(runs.id, withoutId));
+    expect(runWithout?.resourceManifest.mcpServers).not.toContain("github");
+  });
+
+  it("retry rejects params referencing a deleted repo connection", async () => {
+    const [conn] = await db
+      .select()
+      .from(repoConnections)
+      .where(eq(repoConnections.id, repoConnectionId));
+    await db.delete(repoConnections).where(eq(repoConnections.id, repoConnectionId));
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(res)).code).toBe("repo_not_in_project");
+
+    if (conn) await db.insert(repoConnections).values(conn);
   });
 });

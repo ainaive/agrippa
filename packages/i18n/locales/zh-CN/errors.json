@@ -32,6 +32,7 @@
   "skill_not_granted": "所需技能未授权给该项目",
   "mcp_unregistered": "所需 MCP 服务尚未注册",
   "mcp_not_granted": "所需 MCP 服务未授权给该项目",
+  "repo_not_in_project": "引用的代码仓库连接不属于该项目",
   "quota_exhausted": "项目配额已用尽",
   "run_active": "最近一次执行尚未结束",
   "already_terminal": "该执行已结束",
