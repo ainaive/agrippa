@@ -3,7 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChevronDownIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { ArtifactPreview, isPreviewable } from "@/components/artifacts/ArtifactPreview";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FaberAvatar } from "@/components/FaberAvatar";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
@@ -20,7 +22,7 @@ import { RunMetaCard } from "@/features/runs/RunMetaCard";
 import { RunTimeline } from "@/features/runs/RunTimeline";
 import { useMe } from "../features/me";
 import { useRunEvents } from "../features/useRunEvents";
-import { api } from "../lib/api";
+import { ApiError, api } from "../lib/api";
 import { formatCost, formatDuration, formatTime, lt } from "../lib/format";
 import type { Artifact, Run, RunStep } from "../lib/types";
 
@@ -100,6 +102,10 @@ export function RunDetailPage() {
         params: { projectId, runId: result.runId },
       });
     },
+    // re-resolution can reject like submit (grants, credentials, quota…)
+    onError: (error) => {
+      toast.error(error instanceof ApiError ? error.message : String(error));
+    },
   });
 
   if (run.isError) return <QueryErrorState onRetry={() => void run.refetch()} />;
@@ -146,16 +152,20 @@ export function RunDetailPage() {
           </>
         }
         actions={
-          isTerminalRunStatus(current.status) ? (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={retry.isPending}
-              onClick={() => retry.mutate()}
-            >
-              <RotateCcwIcon />
-              {t("actions.retry")}
-            </Button>
+          // both endpoints require the member role — hide them from viewers
+          !canRespond ? null : isTerminalRunStatus(current.status) ? (
+            <ConfirmDialog
+              trigger={
+                <Button size="sm" variant="outline" disabled={retry.isPending}>
+                  <RotateCcwIcon />
+                  {t("actions.retry")}
+                </Button>
+              }
+              title={t("actions.retryTitle")}
+              description={t("actions.retryWarning")}
+              confirmLabel={t("actions.retryConfirm")}
+              onConfirm={() => retry.mutate()}
+            />
           ) : (
             <Button
               size="sm"
