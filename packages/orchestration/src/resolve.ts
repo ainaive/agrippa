@@ -10,10 +10,12 @@ import {
 import {
   type Db,
   fabri,
+  mcpServers,
   models,
   projectResourceGrants,
   providerCredentials,
   repoConnections,
+  skills,
 } from "@agrippa/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
@@ -598,4 +600,183 @@ export async function verifyRepoRefs(
       );
     }
   }
+}
+
+// ── Preflight (submit-readiness) ──────────────────────────────────────────────
+
+export type PreflightCheckKey = "models" | "provider_credential" | "skills" | "mcp" | "repo";
+
+export type PreflightCheck = {
+  key: PreflightCheckKey;
+  ok: boolean;
+  /** human-readable, localized at the API layer from error codes where stable. */
+  detail: string;
+  /** settings tab to deep-link to when not ok; null when ok or not user-fixable. */
+  fixPath: "providers" | "grants" | "repos" | null;
+};
+
+export type PreflightResult = {
+  ready: boolean;
+  checks: PreflightCheck[];
+};
+
+/**
+ * Submit-readiness check: runs the same resolution + resource-authorization
+ * paths the real submit uses, but catches each dimension's SubmitError and
+ * reports it as a structured check instead of failing fast. A member sees all
+ * actionable gaps (missing tier, missing credential, missing skill, no repo)
+ * before the round-trip — fix one, re-check, fix the next.
+ *
+ * Stays in lockstep with submit because it calls the real `resolveAgentBindings`
+ * and `authorizeResources`; the only divergence is non-throwing aggregation.
+ */
+export async function preflightSubmit(
+  db: Db,
+  projectId: string,
+  compiled: CompiledTemplate,
+  defaults: { faberId: string; executorId: string },
+  opts: { registeredExecutors?: Set<string> } = {},
+): Promise<PreflightResult> {
+  const checks: PreflightCheck[] = [];
+
+  // ── models + provider credential + executor (the resolution path) ──────────
+  let modelOk = true;
+  let modelDetail = "";
+  let credentialOk = true;
+  let credentialDetail = "";
+  let credentialFix: PreflightCheck["fixPath"] = null;
+  try {
+    await resolveAgentBindings(db, projectId, compiled, defaults, {}, opts);
+    modelDetail = describeGrantedModels(await fetchGrantedModels(db, projectId), compiled);
+  } catch (err) {
+    if (err instanceof SubmitError) {
+      if (err.code === "provider_credential_required") {
+        // models resolved for some provider, but that provider needs a key
+        credentialOk = false;
+        credentialDetail = err.message;
+        credentialFix = "providers";
+        modelDetail = describeGrantedModels(await fetchGrantedModels(db, projectId), compiled);
+      } else if (err.code === "no_models_granted" || err.code === "model_unresolvable") {
+        modelOk = false;
+        modelDetail = err.message;
+      } else if (
+        err.code === "executor_unavailable" ||
+        err.code === "executor_capability" ||
+        err.code === "faber_unknown" ||
+        err.code === "slot_unknown" ||
+        err.code === "slot_not_overridable"
+      ) {
+        // deployment/template-level, not a settings-tab fix
+        modelOk = false;
+        modelDetail = err.message;
+      }
+    } else {
+      throw err;
+    }
+  }
+  checks.push({
+    key: "models",
+    ok: modelOk,
+    detail: modelDetail,
+    fixPath: !modelOk ? "grants" : null,
+  });
+  checks.push({
+    key: "provider_credential",
+    ok: credentialOk,
+    detail: credentialDetail || (credentialOk ? "ok" : ""),
+    fixPath: credentialFix,
+  });
+
+  // ── skills + mcp (resource authorization, dry-run) ─────────────────────────
+  // build slug→id registries the way submit does (execution.ts:311-318)
+  const skillSlugRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
+  const mcpSlugRows = await db
+    .select({ id: mcpServers.id, slug: mcpServers.slug })
+    .from(mcpServers);
+  const skillIdBySlug = new Map(skillSlugRows.map((s) => [s.slug, s.id]));
+  const mcpIdBySlug = new Map(mcpSlugRows.map((m) => [m.slug, m.id]));
+
+  const requiredSkills = compiled.spec.resources.skills.filter((s) => !s.optional);
+  const requiredMcp = compiled.spec.resources.mcpServers.filter((m) => !m.optional);
+  const grantRows = await db
+    .select()
+    .from(projectResourceGrants)
+    .where(eq(projectResourceGrants.projectId, projectId));
+  const grantedByType = new Map<string, Set<string>>();
+  for (const g of grantRows) {
+    const set = grantedByType.get(g.resourceType) ?? new Set();
+    set.add(g.resourceId);
+    grantedByType.set(g.resourceType, set);
+  }
+
+  const missingSkills: string[] = [];
+  for (const skill of requiredSkills) {
+    const slug = skill.ref.split("@")[0] as string;
+    const id = skillIdBySlug.get(slug);
+    if (!id || !grantedByType.get("skill")?.has(id)) missingSkills.push(slug);
+  }
+  checks.push({
+    key: "skills",
+    ok: missingSkills.length === 0,
+    detail:
+      missingSkills.length === 0
+        ? requiredSkills.map((s) => s.ref.split("@")[0]).join(", ") || "none required"
+        : `missing: ${missingSkills.join(", ")}`,
+    fixPath: missingSkills.length > 0 ? "grants" : null,
+  });
+
+  const missingMcp: string[] = [];
+  for (const server of requiredMcp) {
+    const id = mcpIdBySlug.get(server.ref);
+    if (!id || !grantedByType.get("mcp_server")?.has(id)) missingMcp.push(server.ref);
+  }
+  checks.push({
+    key: "mcp",
+    ok: missingMcp.length === 0,
+    detail:
+      missingMcp.length === 0
+        ? requiredMcp.map((m) => m.ref).join(", ") || "none required"
+        : `missing: ${missingMcp.join(", ")}`,
+    fixPath: missingMcp.length > 0 ? "grants" : null,
+  });
+
+  // ── repo (does the project have a connection when the template needs one?) ─
+  const needsRepo = compiled.spec.inputs.some((i) => i.type === "repoRef");
+  let repoOk = true;
+  let repoDetail = "none required";
+  let repoFix: PreflightCheck["fixPath"] = null;
+  if (needsRepo) {
+    const repos = await db
+      .select({ id: repoConnections.id })
+      .from(repoConnections)
+      .where(and(eq(repoConnections.projectId, projectId), eq(repoConnections.status, "active")));
+    repoOk = repos.length > 0;
+    repoDetail = repoOk
+      ? `${repos.length} connection${repos.length === 1 ? "" : "s"}`
+      : "no repository connected";
+    repoFix = repoOk ? null : "repos";
+  }
+  checks.push({ key: "repo", ok: repoOk, detail: repoDetail, fixPath: repoFix });
+
+  return { ready: checks.every((c) => c.ok), checks };
+}
+
+/** Short human-readable summary of the granted models that satisfy the template. */
+function describeGrantedModels(granted: GrantedModelRow[], compiled: CompiledTemplate): string {
+  const roles = Object.keys(compiled.spec.models.roles);
+  if (granted.length === 0) return "no models granted";
+  const byTier = new Map<string, string[]>();
+  for (const m of granted) {
+    const list = byTier.get(m.tier) ?? [];
+    list.push(m.providerModelId);
+    byTier.set(m.tier, list);
+  }
+  return roles
+    .map((role) => {
+      const spec = compiled.spec.models.roles[role];
+      const tiers: ModelTier[] = spec ? [spec.tier, ...spec.fallback] : [];
+      const hit = tiers.map((t) => byTier.get(t)?.[0]).find(Boolean);
+      return `${role}: ${hit ?? `unresolved (${tiers.join(" → ") || "?"})`}`;
+    })
+    .join("; ");
 }

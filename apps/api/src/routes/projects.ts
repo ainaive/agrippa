@@ -30,12 +30,16 @@ import {
   repoConnections,
   secrets,
   skills,
+  taskTypes,
+  templateVersions,
   users,
 } from "@agrippa/db";
+import { preflightSubmit, upgradeCompiledTemplate } from "@agrippa/orchestration";
 import { and, count, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
+import { liveExecutorIds } from "../lib/executors";
 import { projectUsage } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { requireProjectRole } from "../middleware/rbac";
@@ -587,6 +591,44 @@ export const projectRoutes = new Hono<AppEnv>()
       return c.json(rows);
     },
   )
+
+  // ── Preflight (submit-readiness) ───────────────────────────────────────────
+  // Read-only check that runs the same resolution + resource-authorization
+  // paths submit uses, but reports each dimension (models, provider credential,
+  // skills, mcp, repo) as a structured check instead of failing fast on the
+  // first. Lets the submit summary surface config gaps before the round-trip.
+  .get("/:projectId/task-types/:taskTypeId/preflight", requireProjectRole("viewer"), async (c) => {
+    const db = c.var.db;
+    const projectId = c.req.param("projectId");
+    const [taskType] = await db
+      .select()
+      .from(taskTypes)
+      .where(eq(taskTypes.id, c.req.param("taskTypeId")));
+    if (!taskType?.enabled) throw AppError.notFound("Task type");
+    const [template] = await db
+      .select()
+      .from(orchestrationTemplates)
+      .where(eq(orchestrationTemplates.id, taskType.templateId));
+    if (!template?.latestPublishedVersionId) {
+      throw new AppError("template_unpublished", 409, "Task type has no published template");
+    }
+    const [version] = await db
+      .select()
+      .from(templateVersions)
+      .where(eq(templateVersions.id, template.latestPublishedVersionId));
+    if (!version) throw AppError.notFound("Template version");
+    const compiled = upgradeCompiledTemplate(version.compiled);
+    // the deployment default executor — same as the catalog route and submit
+    const defaultExecutor = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
+    const result = await preflightSubmit(
+      db,
+      projectId,
+      compiled,
+      { faberId: taskType.defaultFaberId, executorId: defaultExecutor },
+      { registeredExecutors: await liveExecutorIds(db) },
+    );
+    return c.json(result);
+  })
 
   // ── Usage ──────────────────────────────────────────────────────────────────
   .get("/:projectId/usage", requireProjectRole("viewer"), async (c) => {
