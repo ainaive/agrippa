@@ -224,23 +224,38 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         if (!started) {
           // the CLI died before announcing a thread (bad auth, bad flags…)
           const stderr = (await stderrPromise).trim().slice(-2000);
+          ctx.logger.warn("codex died before starting a thread", { exitCode, stderr });
           yield {
             type: "step.failed",
             error: {
               code: "model_error",
-              message: collector.errorMessage ?? stderr ?? "codex produced no output",
+              message:
+                collector.fatalMessage ??
+                collector.itemErrorMessage ??
+                (stderr || "codex produced no output"),
             },
           };
           return;
         }
-        if (exitCode !== 0 || collector.errorMessage) {
+        // Item-level error items alone don't fail the step — the CLI also
+        // emits them as non-fatal warnings and then completes the turn fine.
+        if (exitCode !== 0 || collector.fatalMessage) {
           const stderr = (await stderrPromise).trim().slice(-2000);
-          const message = collector.errorMessage ?? stderr ?? `codex exited with ${exitCode}`;
+          const message =
+            collector.fatalMessage ??
+            collector.itemErrorMessage ??
+            (stderr || `codex exited with ${exitCode}`);
+          ctx.logger.warn("codex step failed", { exitCode, stderr });
           yield {
             type: "step.failed",
             error: { code: normalizedErrorCode(message), message: message.slice(0, 2000) },
           };
           return;
+        }
+        if (collector.itemErrorMessage) {
+          ctx.logger.warn("codex emitted a non-fatal error item", {
+            message: collector.itemErrorMessage,
+          });
         }
 
         yield* collectStepArtifacts(req, collector.lastAgentMessage);

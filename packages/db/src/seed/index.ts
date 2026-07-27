@@ -363,7 +363,9 @@ export async function seed(db: Db): Promise<void> {
     },
     // OpenAI models for the codex-cli executor (requirement-delivery reviewer
     // slot). Verify current ids/pricing against the OpenAI price list when
-    // rolling out — admins can adjust rows in the registry.
+    // rolling out — admins can adjust rows in the registry. Model ids are
+    // auth-mode-dependent: the gpt-*-codex ids serve API-key auth but 400
+    // under a ChatGPT-account login (CODEX_HOME), which gpt-5.6-sol serves.
     {
       provider: "openai",
       providerModelId: "gpt-5.1-codex",
@@ -381,6 +383,18 @@ export async function seed(db: Db): Promise<void> {
       contextWindow: 400_000,
       inputCostPerMtok: "0.25",
       outputCostPerMtok: "2.00",
+    },
+    {
+      // codex-cli 0.145's default model; verified working under ChatGPT-account
+      // auth (the gpt-*-codex ids above are rejected there). Context/pricing
+      // from OpenAI's model catalog (developers.openai.com/api/docs/models).
+      provider: "openai",
+      providerModelId: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      tier: "strong" as const,
+      contextWindow: 1_050_000,
+      inputCostPerMtok: "5.00",
+      outputCostPerMtok: "30.00",
     },
     // Qwen via Aliyun Bailian (DashScope); runs need a per-project dashscope
     // credential (project settings → providers). Prices are entry-tier list

@@ -19,6 +19,7 @@ export type CodexItem = {
   id?: string;
   type?: string;
   text?: string;
+  message?: string;
   command?: string;
   aggregated_output?: string;
   exit_code?: number | null;
@@ -35,13 +36,34 @@ export type CodexThreadEvent = {
 };
 
 /**
+ * The CLI forwards backend failures as a JSON blob in the message field
+ * (`{"type":"error","status":400,"error":{"message":"…"}}`) — pull the human
+ * sentence out so the step error reads as prose, not wire format.
+ */
+function humanMessage(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: string }; message?: string };
+    return parsed.error?.message ?? parsed.message ?? raw;
+  } catch {
+    return raw;
+  }
+}
+
+/**
  * Stateful JSONL → ExecutorEvent mapper for one step. Tracks the session id,
- * the final agent message (the step output), and the first error message.
+ * the final agent message (the step output), and two error channels: fatal
+ * stream errors (`turn.failed`, top-level `error`) that must fail the step,
+ * and item-level error items, which the CLI also uses for non-fatal warnings
+ * ("Model metadata … not found. Defaulting to fallback") before carrying on —
+ * those only color the message of a failure the exit code already signals.
  */
 export class CodexEventCollector {
   sessionId: string | null = null;
   lastAgentMessage = "";
-  errorMessage: string | null = null;
+  /** First fatal error (`turn.failed` / `error`) — usually the same failure twice. */
+  fatalMessage: string | null = null;
+  /** Last item-level error text — the item nearest the death is the most specific. */
+  itemErrorMessage: string | null = null;
 
   constructor(private readonly providerModelId: string) {}
 
@@ -95,7 +117,9 @@ export class CodexEventCollector {
           ];
         }
         if (item.type === "error") {
-          this.errorMessage ??= item.text ?? "codex reported an error";
+          // codex-cli 0.145 puts the text in `message` (older shapes used `text`)
+          const text = item.message ?? item.text;
+          if (text !== undefined) this.itemErrorMessage = text;
         }
         return [];
       }
@@ -117,11 +141,11 @@ export class CodexEventCollector {
         ];
       }
       case "turn.failed": {
-        this.errorMessage ??= event.error?.message ?? "codex turn failed";
+        this.fatalMessage ??= humanMessage(event.error?.message ?? "codex turn failed");
         return [];
       }
       case "error": {
-        this.errorMessage ??= event.message ?? "codex error";
+        this.fatalMessage ??= humanMessage(event.message ?? "codex error");
         return [];
       }
       default:
