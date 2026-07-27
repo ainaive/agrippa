@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the orientation map for contributors. The authoritative design lives in `docs/design/` (10 documents) and `docs/adr/` (13 decision records); this file tells you what exists, where it lives, and which invariants hold it together.
+This document is the orientation map for contributors. The authoritative design lives in `docs/design/` (10 documents) and `docs/adr/` (14 decision records); this file tells you what exists, where it lives, and which invariants hold it together.
 
 ## Bird's-eye view
 

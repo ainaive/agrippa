@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
-import { repoConnections, runs } from "@agrippa/db";
+import { auditLogs, fabri, repoConnections, runs, skillVersions } from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import {
   type EngineDeps,
@@ -519,5 +519,54 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       method: "PUT",
       json: { tokenLimit: null, hardStop: true },
     });
+  });
+
+  it("retry rejects a default faber that was disabled since submit", async () => {
+    const [latest] = await db
+      .select({ faberId: runs.faberId })
+      .from(runs)
+      .where(eq(runs.taskId, taskId))
+      .orderBy(desc(runs.number))
+      .limit(1);
+    await db
+      .update(fabri)
+      .set({ status: "disabled" })
+      .where(eq(fabri.id, latest?.faberId as string));
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(res)).code).toBe("faber_unknown");
+    await db
+      .update(fabri)
+      .set({ status: "active" })
+      .where(eq(fabri.id, latest?.faberId as string));
+  });
+
+  it("retry rejects a required skill whose versions were all deprecated", async () => {
+    await db.update(skillVersions).set({ status: "deprecated" });
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(res)).code).toBe("skill_version_unavailable");
+    await db.update(skillVersions).set({ status: "active" });
+  });
+
+  it("concurrent retries serialize: one 202, one run_active conflict, audited", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const [first, second] = await Promise.all([
+      admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" }),
+      admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" }),
+    ]);
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual([202, 409]);
+    const winner = first.status === 202 ? first : second;
+    const loser = first.status === 202 ? second : first;
+    expect((await jsonOf<{ code: string }>(loser)).code).toBe("run_active");
+
+    // the audit row commits with the retry (every mutation is audited)
+    const { runId: newRunId } = await jsonOf<{ runId: string }>(winner);
+    const rows = await db.select().from(auditLogs).where(eq(auditLogs.resourceId, newRunId));
+    const entry = rows.find((r) => r.action === "task.retry");
+    expect(entry).toBeDefined();
+    const payload = entry?.payload as { fromRunId?: string } | undefined;
+    expect(payload?.fromRunId).toBeDefined();
   });
 });

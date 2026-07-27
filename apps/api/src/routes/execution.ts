@@ -69,7 +69,13 @@ async function resolveRunPlan(
   overrides: Record<string, { executorId?: string; faberId?: string }>,
 ) {
   const skillRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
-  const mcpRows = await db.select({ id: mcpServers.id, slug: mcpServers.slug }).from(mcpServers);
+  // a disabled server is not "registered" — pinning it would only defer the
+  // failure to worker materialization (skill versions are checked downstream
+  // in authorizeResources; the skills head table has no status column)
+  const mcpRows = await db
+    .select({ id: mcpServers.id, slug: mcpServers.slug })
+    .from(mcpServers)
+    .where(eq(mcpServers.status, "active"));
   // required grants enforced; optional resources pinned only when granted
   const resourceManifest = await authorizeResources(db, projectId, compiled, {
     skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
@@ -388,16 +394,22 @@ export const executionRoutes = new Hono<AppEnv>()
             .returning();
           if (!run) throw new Error("run insert failed");
           await tx.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
+          // in the tx: a committed mutation without its audit row would break
+          // the every-mutation-is-audited invariant (ADR-0013 amendment 1)
+          await audit(
+            c,
+            {
+              action: "task.submit",
+              resourceType: "task",
+              resourceId: task.id,
+              projectId,
+              payload: { taskTypeId: taskType.id, runId: run.id },
+            },
+            tx,
+          );
           return { task, run };
         });
 
-        await audit(c, {
-          action: "task.submit",
-          resourceType: "task",
-          resourceId: task.id,
-          projectId,
-          payload: { taskTypeId: taskType.id, runId: run.id },
-        });
         // post-commit send; singleton key + worker sweeper make this loss-proof
         await c.var.queue?.enqueueRun(run.id);
         return c.json({ taskId: task.id, runId: run.id }, 202);
@@ -497,12 +509,28 @@ export const executionRoutes = new Hono<AppEnv>()
       );
 
       const run = await db.transaction(async (tx) => {
+        // serialize concurrent retries on the task row: two racers would both
+        // compute number N+1 and the loser would die on runs_task_number_uq
+        // as a 500 — locked, the second sees the first's queued run instead
+        // and gets the run_active conflict. The pre-tx read above only sourced
+        // the pinned snapshot/version, identical across all runs of a task.
+        await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, task.id)).for("update");
+        const [head] = await tx
+          .select({ id: runs.id, number: runs.number, status: runs.status })
+          .from(runs)
+          .where(eq(runs.taskId, task.id))
+          .orderBy(desc(runs.number))
+          .limit(1);
+        if (!head) throw AppError.notFound("Run");
+        if (!isTerminalRunStatus(head.status)) {
+          throw AppError.conflict("run_active", "The latest run has not finished");
+        }
         const [run] = await tx
           .insert(runs)
           .values({
             taskId: task.id,
             projectId: task.projectId,
-            number: latest.number + 1,
+            number: head.number + 1,
             templateVersionId: latest.templateVersionId,
             faberId: agentResolution.primary.faberId,
             executorId: agentResolution.primary.executorId,
@@ -516,14 +544,19 @@ export const executionRoutes = new Hono<AppEnv>()
           .returning();
         if (!run) throw new Error("run insert failed");
         await tx.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
+        // in the tx: the every-mutation-is-audited invariant (ADR-0013 am. 1)
+        await audit(
+          c,
+          {
+            action: "task.retry",
+            resourceType: "run",
+            resourceId: run.id,
+            projectId: task.projectId,
+            payload: { fromRunId: head.id, taskId: task.id },
+          },
+          tx,
+        );
         return run;
-      });
-      await audit(c, {
-        action: "task.retry",
-        resourceType: "run",
-        resourceId: run.id,
-        projectId: task.projectId,
-        payload: { fromRunId: latest.id, taskId: task.id },
       });
       await c.var.queue?.enqueueRun(run.id);
       return c.json({ runId: run.id, number: run.number }, 202);

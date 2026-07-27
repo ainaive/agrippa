@@ -28,6 +28,7 @@
   "provider_exists": "该服务商已有凭证，请轮换或先删除",
   "base_url_invalid": "接入地址不是可接受的服务商端点",
   "skill_unregistered": "所需技能尚未注册",
+  "skill_version_unavailable": "所需技能没有满足版本范围的可用版本",
   "skill_not_granted": "所需技能未授权给该项目",
   "mcp_unregistered": "所需 MCP 服务尚未注册",
   "mcp_not_granted": "所需 MCP 服务未授权给该项目",

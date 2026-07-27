@@ -28,6 +28,7 @@
   "provider_exists": "This provider already has a credential — rotate or remove it",
   "base_url_invalid": "The base URL is not an acceptable provider endpoint",
   "skill_unregistered": "A required skill is not registered",
+  "skill_version_unavailable": "A required skill has no active version satisfying its range",
   "skill_not_granted": "A required skill is not granted to this project",
   "mcp_unregistered": "A required MCP server is not registered",
   "mcp_not_granted": "A required MCP server is not granted to this project",

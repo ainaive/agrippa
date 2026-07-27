@@ -2,7 +2,6 @@ import {
   EXECUTOR_CATALOG,
   EXECUTOR_DEFAULT_SENTINEL,
   type ExecutorCatalogEntry,
-  isCredentialGatedExecutor,
   isExecutorId,
   type ModelTier,
   providerAuthPolicy,
@@ -14,6 +13,7 @@ import {
   projectResourceGrants,
   providerCredentials,
   repoConnections,
+  skillVersions,
 } from "@agrippa/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
@@ -398,6 +398,16 @@ export async function resolveAgentBindings(
       }
     }
 
+    // one authoritative check for every path — the v1-sentinel and demo-mode
+    // branches accept defaults.faberId (the task type's default) unchecked,
+    // so a Faber disabled after the task type was seeded slipped through
+    if (!byId.has(faberId)) {
+      throw new SubmitError(
+        "faber_unknown",
+        `Faber for slot '${slotId}' is not registered or not active`,
+      );
+    }
+
     // an executor outside the catalog (custom AGRIPPA_EXECUTOR) skips the
     // capability/provider checks — it predates the catalog and stays unfiltered
     const entry: ExecutorCatalogEntry | null = isExecutorId(executorId)
@@ -458,6 +468,25 @@ export async function resolveAgentBindings(
 export type ResourceManifest = { mcpServers: string[]; skills: string[] };
 
 /**
+ * The one version-matching rule for skill refs, shared by submit-time
+ * authorization and the worker's materializer so the two cannot drift:
+ * highest active version satisfying the ref's semver range.
+ */
+export function pickActiveSkillVersion<T extends { version: string; status: string }>(
+  versions: T[],
+  range: string,
+): T | undefined {
+  return versions
+    .filter((v) => v.status === "active" && Bun.semver.satisfies(v.version, range))
+    .sort((a, b) => Bun.semver.order(b.version, a.version))[0];
+}
+
+/** `builtin/git-workflow@^1` → the range after `@`, or `*` when unpinned. */
+export function skillRefRange(ref: string): string {
+  return ref.includes("@") ? (ref.split("@")[1] as string) : "*";
+}
+
+/**
  * Verify required skill/MCP grants and pin the authorized set.
  *
  * Required resources must be granted (else the submit fails). Optional
@@ -490,10 +519,34 @@ export async function authorizeResources(
 
   const manifest: ResourceManifest = { mcpServers: [], skills: [] };
 
+  // one query for every referenced skill's versions — the ref's semver range
+  // must match an ACTIVE version now, or the worker's materializer would fail
+  // the run later; fail-fast means status is part of "current configuration"
+  const referencedSkillIds = compiled.spec.resources.skills
+    .map((skill) => registry.skillIdBySlug.get(skill.ref.split("@")[0] as string))
+    .filter((id): id is string => id !== undefined);
+  const versionRows =
+    referencedSkillIds.length > 0
+      ? await db
+          .select()
+          .from(skillVersions)
+          .where(inArray(skillVersions.skillId, referencedSkillIds))
+      : [];
+  const versionsBySkillId = new Map<string, typeof versionRows>();
+  for (const row of versionRows) {
+    const list = versionsBySkillId.get(row.skillId) ?? [];
+    list.push(row);
+    versionsBySkillId.set(row.skillId, list);
+  }
+
   for (const skill of compiled.spec.resources.skills) {
     const slug = skill.ref.split("@")[0] as string;
     const id = registry.skillIdBySlug.get(slug);
     const granted = id !== undefined && (grantedByType.get("skill")?.has(id) ?? false);
+    const materializable =
+      id !== undefined &&
+      pickActiveSkillVersion(versionsBySkillId.get(id) ?? [], skillRefRange(skill.ref)) !==
+        undefined;
     if (!skill.optional) {
       if (!id) throw new SubmitError("skill_unregistered", `Skill '${slug}' is not registered`);
       if (!granted) {
@@ -502,8 +555,15 @@ export async function authorizeResources(
           `Skill '${slug}' is not granted to this project`,
         );
       }
+      if (!materializable) {
+        throw new SubmitError(
+          "skill_version_unavailable",
+          `Skill '${skill.ref}' has no active version satisfying its range`,
+        );
+      }
     }
-    if (granted) manifest.skills.push(slug);
+    // optional skills follow the same silent-drop semantics as ungranted ones
+    if (granted && materializable) manifest.skills.push(slug);
   }
   for (const server of compiled.spec.resources.mcpServers) {
     const id = registry.mcpIdBySlug.get(server.ref);
