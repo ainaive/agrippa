@@ -32,9 +32,9 @@ import {
 } from "@agrippa/db";
 import {
   appendRunEvent as allocateRunEvent,
-  assertResolutionCredentialed,
   authorizeResources,
   buildParamsValidator,
+  type CompiledTemplate,
   decideCheckpoint,
   flattenPhases,
   resolveAgentBindings,
@@ -53,6 +53,45 @@ import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
 
 const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
+
+/**
+ * Everything a new run derives from CURRENT project configuration: the
+ * resource manifest, per-slot agent bindings and model resolution, and the
+ * budget off the pinned compiled spec. Shared by submit and retry so the two
+ * paths cannot drift — a retry is a re-submission of the pinned task
+ * (ADR-0014); only the template version and params snapshot stay pinned.
+ */
+async function resolveRunPlan(
+  db: AppEnv["Variables"]["db"],
+  projectId: string,
+  taskType: { defaultFaberId: string },
+  compiled: CompiledTemplate,
+  overrides: Record<string, { executorId?: string; faberId?: string }>,
+) {
+  const skillRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
+  const mcpRows = await db.select({ id: mcpServers.id, slug: mcpServers.slug }).from(mcpServers);
+  // required grants enforced; optional resources pinned only when granted
+  const resourceManifest = await authorizeResources(db, projectId, compiled, {
+    skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
+    mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
+  });
+  // every agent slot resolves to a concrete faber + executor (per-slot
+  // provider-filtered models, checked against the executors the deployment's
+  // workers actually registered) and freezes onto the run
+  const agentResolution = await resolveAgentBindings(
+    db,
+    projectId,
+    compiled,
+    { faberId: taskType.defaultFaberId, executorId: DEFAULT_EXECUTOR },
+    overrides,
+    { registeredExecutors: await liveExecutorIds(db) },
+  );
+  return {
+    resourceManifest,
+    agentResolution,
+    budget: compiled.spec.budgets as unknown as Record<string, unknown>,
+  };
+}
 
 async function loadRunScoped(
   c: { var: AppEnv["Variables"] },
@@ -308,25 +347,12 @@ export const executionRoutes = new Hono<AppEnv>()
         // every repoRef must reference a connection owned by this project
         await verifyRepoRefs(db, projectId, compiled.spec.inputs, parsed.data);
 
-        const skillRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
-        const mcpRows = await db
-          .select({ id: mcpServers.id, slug: mcpServers.slug })
-          .from(mcpServers);
-        // required grants enforced; optional resources pinned only when granted
-        const resourceManifest = await authorizeResources(db, projectId, compiled, {
-          skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
-          mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
-        });
-        // every agent slot resolves to a concrete faber + executor here (with
-        // per-slot provider-filtered models and a check against the executors
-        // the deployment's workers actually registered) and freezes onto the run
-        const agentResolution = await resolveAgentBindings(
+        const { resourceManifest, agentResolution, budget } = await resolveRunPlan(
           db,
           projectId,
+          taskType,
           compiled,
-          { faberId: taskType.defaultFaberId, executorId: DEFAULT_EXECUTOR },
           input.agents ?? {},
-          { registeredExecutors: await liveExecutorIds(db) },
         );
 
         const { task, run } = await db.transaction(async (tx) => {
@@ -356,7 +382,7 @@ export const executionRoutes = new Hono<AppEnv>()
               paramsSnapshot: parsed.data,
               modelResolution: agentResolution.modelResolution,
               resourceManifest,
-              budget: compiled.spec.budgets as unknown as Record<string, unknown>,
+              budget,
               createdBy: user.id,
             })
             .returning();
@@ -442,49 +468,69 @@ export const executionRoutes = new Hono<AppEnv>()
       throw AppError.conflict("run_active", "The latest run has not finished");
     }
 
-    // the frozen resolution is copied verbatim below, so re-assert that its
-    // project-only provider credentials still exist — a credential deleted
-    // since the last run must fail here, not as an auth error mid-run
+    // deliberately no taskType.enabled check: disabling blocks new catalog
+    // submissions, not retries of a task that already exists (ADR-0014)
+    const [taskType] = await db.select().from(taskTypes).where(eq(taskTypes.id, task.taskTypeId));
+    if (!taskType) throw AppError.notFound("Task type");
+    const [version] = await db
+      .select()
+      .from(templateVersions)
+      .where(eq(templateVersions.id, latest.templateVersionId));
+    if (!version) throw AppError.notFound("Template version");
+    const compiled = upgradeCompiledTemplate(version.compiled);
+
+    // a retry burns budget like any run — same hard-stop as submit
+    await assertQuotaHeadroom(db, task.projectId);
+
     try {
-      await assertResolutionCredentialed(
+      // ADR-0014: the template version and params snapshot stay pinned;
+      // everything derived from project configuration re-resolves, so a
+      // config fix (grants, registry, credentials) heals the task here
+      // instead of re-billing a full run into the same failure
+      await verifyRepoRefs(db, task.projectId, compiled.spec.inputs, latest.paramsSnapshot);
+      const { resourceManifest, agentResolution, budget } = await resolveRunPlan(
         db,
         task.projectId,
-        latest.modelResolution as Record<string, unknown>,
-        latest.agentBindings as Record<string, { executorId: string }> | null,
-        latest.executorId,
+        taskType,
+        compiled,
+        task.agentOverrides ?? {},
       );
+
+      const run = await db.transaction(async (tx) => {
+        const [run] = await tx
+          .insert(runs)
+          .values({
+            taskId: task.id,
+            projectId: task.projectId,
+            number: latest.number + 1,
+            templateVersionId: latest.templateVersionId,
+            faberId: agentResolution.primary.faberId,
+            executorId: agentResolution.primary.executorId,
+            agentBindings: agentResolution.bindings,
+            paramsSnapshot: latest.paramsSnapshot,
+            modelResolution: agentResolution.modelResolution,
+            resourceManifest,
+            budget,
+            createdBy: c.var.user.id,
+          })
+          .returning();
+        if (!run) throw new Error("run insert failed");
+        await tx.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
+        return run;
+      });
+      await audit(c, {
+        action: "task.retry",
+        resourceType: "run",
+        resourceId: run.id,
+        projectId: task.projectId,
+        payload: { fromRunId: latest.id, taskId: task.id },
+      });
+      await c.var.queue?.enqueueRun(run.id);
+      return c.json({ runId: run.id, number: run.number }, 202);
     } catch (err) {
       if (err instanceof SubmitError) throw new AppError(err.code, 400, err.message, err.details);
       throw err;
     }
-
-    const [run] = await db
-      .insert(runs)
-      .values({
-        taskId: task.id,
-        projectId: task.projectId,
-        number: latest.number + 1,
-        templateVersionId: latest.templateVersionId, // pinned — retries never re-resolve
-        faberId: latest.faberId,
-        executorId: latest.executorId,
-        agentBindings: latest.agentBindings,
-        paramsSnapshot: latest.paramsSnapshot,
-        modelResolution: latest.modelResolution,
-        resourceManifest: latest.resourceManifest,
-        budget: latest.budget,
-        createdBy: c.var.user.id,
-      })
-      .returning();
-    if (!run) throw new Error("run insert failed");
-    await db.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
-    await audit(c, {
-      action: "task.retry",
-      resourceType: "run",
-      resourceId: run.id,
-      projectId: task.projectId,
-    });
-    await c.var.queue?.enqueueRun(run.id);
-    return c.json({ runId: run.id, number: run.number }, 202);
   })
 
   // ── Runs ────────────────────────────────────────────────────────────────────

@@ -79,6 +79,10 @@ enforce output contract (required artifacts present? latest iteration wins)
 finalize: usage_totals, workspace cleanup, terminal event
 ```
 
+### Run-level retry (re-submission)
+
+Task retry (`POST /tasks/:id/retry`) creates run #N+1 as a **re-submission of the pinned task** (ADR-0014): the template version and params snapshot are copied, while everything derived from project configuration — agent bindings, per-slot model resolution, the resource manifest, the budget, quota headroom, repo-ref ownership — re-resolves through the same helper submit uses, applying the task's persisted submit-time agent overrides. Unchanged configuration reproduces the previous bindings deterministically; changed configuration is picked up, so a config fix heals a failed task instead of re-billing a doomed run. Configuration that still cannot satisfy a slot fails at the endpoint with submit's error codes, never mid-run. This is distinct from the *step-level* retry below, which resumes inside one run.
+
 ### Resumability (step-granular)
 
 Steps are the idempotency unit. On retry/resume, the engine loads `run_steps`, **skips succeeded steps**, and re-executes the first non-terminal step:

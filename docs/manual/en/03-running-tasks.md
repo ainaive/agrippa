@@ -42,5 +42,5 @@ For delivery workflows, the final branch contains one platform-created snapshot 
 ## Cancel, retry, and failures
 
 - **Cancel** (members+) stops a run — immediately for queued/paused runs, at the next safe point for executing ones.
-- **Retry** appears on finished runs: it creates a fresh run (#2, #3…) with the same parameters, pinned to the same template version.
+- **Retry** appears on finished runs: it creates a fresh run (#2, #3…) with the same parameters, pinned to the same template version, but binding agents and models against **today's** project configuration (grants, credentials, engines) — fix the configuration and retry to heal a run that failed on it. The run re-executes from checkout, so earlier answers and approvals are asked again.
 - **Failures** always carry a reason: `budget_exceeded` (run budget or project quota), `approval_rejected`, `contract_violation` (a required artifact was never produced), `timed_out`, or a step error. Partial progress — steps, outputs, artifacts produced before the failure — remains visible and downloadable.

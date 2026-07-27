@@ -11,7 +11,7 @@ import {
   InProcessEventBus,
   silentLogger,
 } from "@agrippa/orchestration";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
 import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
@@ -421,5 +421,103 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       await admin.request(`/api/v1/tasks/${taskId}`),
     );
     expect(task.runs.map((r) => r.number)).toEqual([2, 1]);
+  });
+
+  it("retry re-resolves against current configuration (ADR-0014)", async () => {
+    // no worker in this fixture — mark queued runs terminal so retry is legal
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const [prev] = await db
+      .select()
+      .from(runs)
+      .where(eq(runs.taskId, taskId))
+      .orderBy(desc(runs.number))
+      .limit(1);
+    const flatten = (resolution: Record<string, unknown> | null | undefined) =>
+      Object.values(resolution ?? {}).flatMap((slot) =>
+        Object.values(slot as Record<string, { provider: string }>),
+      );
+    // every run so far resolved anthropic — no dashscope credential existed
+    expect(flatten(prev?.modelResolution).some((e) => e.provider === "anthropic")).toBe(true);
+
+    // adding a credential makes dashscope the ranked provider (ADR-0013's
+    // credentialed-first consequence) — a retry must pick that up
+    await admin.request(`/api/v1/projects/${projectId}/providers`, {
+      method: "POST",
+      json: { provider: "dashscope", apiKey: "sk-bailian-retry-test" },
+    });
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(202);
+    const { runId: rerunId } = await jsonOf<{ runId: string }>(res);
+    const [rerun] = await db.select().from(runs).where(eq(runs.id, rerunId));
+
+    // pinned: template version and params snapshot; re-derived: the resolution
+    expect(rerun?.templateVersionId).toBe(prev?.templateVersionId as string);
+    expect(rerun?.paramsSnapshot).toEqual(prev?.paramsSnapshot ?? {});
+    const entries = flatten(rerun?.modelResolution);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) expect(entry.provider).toBe("dashscope");
+
+    await admin.request(`/api/v1/projects/${projectId}/providers/dashscope`, {
+      method: "DELETE",
+    });
+  });
+
+  it("retry preserves the user's submit-time agent overrides", async () => {
+    const types = await jsonOf<Array<{ id: string; slug: string }>>(
+      await admin.request("/api/v1/scenarios/software-development/task-types"),
+    );
+    const rdTypeId = types.find((t) => t.slug === "requirement-delivery")?.id as string;
+    const submitted = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId: rdTypeId,
+        title: "Override survives retry",
+        params: { requirement: "Do the thing", repo: { repoConnectionId } },
+        // the template pins codex-cli for the reviewer; the user chose otherwise
+        agents: { reviewer: { executorId: "claude-agent-sdk" } },
+      },
+    });
+    expect(submitted.status).toBe(202);
+    const { taskId: rdTaskId } = await jsonOf<{ taskId: string }>(submitted);
+
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, rdTaskId));
+    const retried = await admin.request(`/api/v1/tasks/${rdTaskId}/retry`, { method: "POST" });
+    expect(retried.status).toBe(202);
+    const { runId: rerunId } = await jsonOf<{ runId: string }>(retried);
+    const [rerun] = await db.select().from(runs).where(eq(runs.id, rerunId));
+    expect(rerun?.agentBindings.reviewer?.executorId).toBe("claude-agent-sdk");
+  });
+
+  it("retry fails fast when current configuration cannot satisfy the template", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+
+    // strip every grant — the manifest re-check fires before model resolution
+    await admin.request(`/api/v1/projects/${projectId}/grants`, { method: "PUT", json: [] });
+    const ungranted = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(ungranted.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(ungranted)).code).toBe("skill_not_granted");
+
+    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
+    const skillRows = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/skills"));
+    await admin.request(`/api/v1/projects/${projectId}/grants`, {
+      method: "PUT",
+      json: [
+        ...models.map((m) => ({ resourceType: "model", resourceId: m.id })),
+        ...skillRows.map((s) => ({ resourceType: "skill", resourceId: s.id })),
+      ],
+    });
+
+    // a retry burns budget like any run — the quota hard-stop applies
+    await admin.request(`/api/v1/projects/${projectId}/quota`, {
+      method: "PUT",
+      json: { tokenLimit: 1, hardStop: true },
+    });
+    const blocked = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(blocked.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(blocked)).code).toBe("quota_exhausted");
+    await admin.request(`/api/v1/projects/${projectId}/quota`, {
+      method: "PUT",
+      json: { tokenLimit: null, hardStop: true },
+    });
   });
 });

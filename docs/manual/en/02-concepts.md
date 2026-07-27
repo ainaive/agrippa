@@ -4,7 +4,7 @@
 
 **Scenario & task type** — the catalog is organized by work scenario (project management, software development, test & verification). A *task type* is one concrete thing you can ask for — "Bug Localization & Fix", "Test Plan" — and binds a scenario to an orchestration template and a default Faber.
 
-**Task & run** — a *task* is your submission: a task type, a title, and parameters. Executing it produces a *run*; retrying a finished task produces run #2, #3… Each run is pinned to the exact template version that was current at submission, so later template changes never affect it.
+**Task & run** — a *task* is your submission: a task type, a title, and parameters. Executing it produces a *run*; retrying a finished task produces run #2, #3… Each run is pinned to the exact template version that was current at submission, so later template changes never affect it; agents and models, by contrast, bind to the project configuration current at each run.
 
 **Step** — the atomic unit inside a run: one agent invocation (or one system action such as checking out the repository). Steps are what you see on the run timeline, and they're the platform's unit of retry and crash recovery.
 

@@ -291,56 +291,10 @@ export async function resolveModelRoles(
   });
 }
 
-/**
- * Re-assert that every provider a frozen model resolution depends on still
- * has its required project credential. Retries copy the resolution verbatim,
- * so a credential deleted between runs would otherwise surface only as an
- * auth failure mid-run instead of an actionable submit error. Handles both
- * resolution shapes (legacy flat role → entry and slot-keyed) and skips
- * slots bound to the fake or an uncataloged executor — those resolved with
- * no credential gating in the first place.
- */
-export async function assertResolutionCredentialed(
-  db: Db,
-  projectId: string,
-  modelResolution: Record<string, unknown>,
-  agentBindings: Record<string, { executorId: string }> | null,
-  executorId: string,
-): Promise<void> {
-  const required = new Set<string>();
-  const collect = (entries: ModelResolutionEntry[]): void => {
-    for (const entry of entries) {
-      if (providerAuthPolicy(entry.provider) === "project") required.add(entry.provider);
-    }
-  };
-  const values = Object.values(modelResolution ?? {});
-  const flat = values.every(
-    (v) => v !== null && typeof v === "object" && "providerModelId" in (v as object),
-  );
-  if (flat) {
-    if (isCredentialGatedExecutor(executorId)) collect(values as ModelResolutionEntry[]);
-  } else {
-    for (const [slot, resolution] of Object.entries(modelResolution ?? {})) {
-      const execId = agentBindings?.[slot]?.executorId ?? executorId;
-      if (!isCredentialGatedExecutor(execId)) continue;
-      collect(Object.values(resolution as Record<string, ModelResolutionEntry>));
-    }
-  }
-  if (required.size === 0) return;
-  const rows = await db
-    .select({ provider: providerCredentials.provider })
-    .from(providerCredentials)
-    .where(eq(providerCredentials.projectId, projectId));
-  const have = new Set(rows.map((r) => r.provider));
-  const missing = [...required].filter((p) => !have.has(p));
-  if (missing.length > 0) {
-    throw new SubmitError(
-      "provider_credential_required",
-      `Provider ${missing.join(" and ")} requires a project credential (project settings → providers)`,
-      { providers: missing },
-    );
-  }
-}
+// assertResolutionCredentialed used to live here: the retry endpoint's narrow
+// re-check that a frozen resolution's project credentials still existed.
+// ADR-0014 made retry re-resolve in full, so resolveAgentBindings now enforces
+// that gate (and every stronger one) on the retry path too.
 
 export type AgentBindingResolution = {
   /** slot → concrete binding, frozen into runs.agent_bindings. */
