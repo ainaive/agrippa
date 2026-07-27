@@ -16,6 +16,7 @@ import {
   auditLogs,
   encryptSecret,
   fabri,
+  grantBuiltinResources,
   loadSecretKey,
   mcpServers,
   models,
@@ -88,6 +89,11 @@ export const projectRoutes = new Hono<AppEnv>()
       await tx
         .insert(projectMembers)
         .values({ projectId: created.id, userId: user.id, role: "admin" });
+      // Convention over Configuration: a new project starts authorized to use
+      // every built-in resource (active models, published skills, active fabri)
+      // so onboarding doesn't require hand-toggling each grant. Org-scoped
+      // resources stay opt-in. See docs/superpowers/specs/2026-07-27-…-slice1.
+      const grants = await grantBuiltinResources(tx, created.id, user.id);
       await tx.insert(auditLogs).values({
         orgId: user.orgId,
         projectId: created.id,
@@ -95,7 +101,7 @@ export const projectRoutes = new Hono<AppEnv>()
         action: "project.create",
         resourceType: "project",
         resourceId: created.id,
-        payload: { slug: input.slug, name: input.name },
+        payload: { slug: input.slug, name: input.name, defaultGrants: grants },
       });
       return created;
     });

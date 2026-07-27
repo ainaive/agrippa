@@ -10,6 +10,9 @@ import {
   skillVersions,
   taskTypes,
 } from "../schema";
+import { seedDefaultGrants } from "./grants";
+
+export * from "./grants";
 
 /**
  * Idempotent seed of builtin resources: the default org, the three scenarios,
@@ -417,4 +420,9 @@ export async function seed(db: Db): Promise<void> {
   for (const row of modelRows) {
     await db.insert(models).values(row).onConflictDoNothing();
   }
+
+  // ── Default grants for existing projects ────────────────────────────────────
+  // New projects auto-grant built-ins at creation (apps/api POST /projects);
+  // this backfill brings pre-existing default-org projects to parity on boot.
+  await seedDefaultGrants(db, org.id);
 }

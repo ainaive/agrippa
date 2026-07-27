@@ -110,7 +110,30 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     },
   });
 
-  it("rejects submission until required resources are granted", async () => {
+  it("rejects submission when a required skill is ungranted", async () => {
+    // new projects auto-grant built-ins (including both required skills); to
+    // exercise the skill_not_granted path, revoke one required skill first.
+    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
+    const skills = await jsonOf<Array<{ id: string; slug: string }>>(
+      await admin.request("/api/v1/skills"),
+    );
+    const testRunner = skills.find((s) => s.slug === "builtin/test-runner") as {
+      id: string;
+      slug: string;
+    };
+    // grants: all models + every skill EXCEPT test-runner
+    const revoked = [
+      ...models.map((m) => ({ resourceType: "model", resourceId: m.id })),
+      ...skills
+        .filter((s) => s.id !== testRunner.id)
+        .map((s) => ({ resourceType: "skill", resourceId: s.id })),
+    ];
+    const removePut = await admin.request(`/api/v1/projects/${projectId}/grants`, {
+      method: "PUT",
+      json: revoked,
+    });
+    expect(removePut.status).toBe(200);
+
     const res = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST",
       json: submitBody(),
@@ -118,11 +141,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(res.status).toBe(400);
     expect((await jsonOf<{ code: string }>(res)).code).toBe("skill_not_granted");
 
-    // grant all models + both builtin skills via the grants API
-    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
-    const skills = await jsonOf<Array<{ id: string; slug: string }>>(
-      await admin.request("/api/v1/skills"),
-    );
+    // restore: all models + all skills so later tests can submit
     const grants = [
       ...models.map((m) => ({ resourceType: "model", resourceId: m.id })),
       ...skills.map((s) => ({ resourceType: "skill", resourceId: s.id })),
