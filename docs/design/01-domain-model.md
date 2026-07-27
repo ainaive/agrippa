@@ -157,6 +157,7 @@ models    (id pk, org_id fk, provider text,                   -- 'anthropic' | .
 ```sql
 tasks     (id pk, org_id fk, project_id fk, task_type_id fk,
            title, params jsonb,                               -- validated against template inputs
+           agent_overrides jsonb,                             -- raw submit-time slot overrides (ADR-0014)
            latest_run_id fk null, created_by fk, created_at)
 
 runs      (id pk, task_id fk,

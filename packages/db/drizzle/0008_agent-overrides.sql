@@ -1,0 +1,1 @@
+ALTER TABLE "tasks" ADD COLUMN "agent_overrides" jsonb DEFAULT '{}'::jsonb NOT NULL;

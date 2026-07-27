@@ -338,6 +338,7 @@ export const executionRoutes = new Hono<AppEnv>()
               taskTypeId: taskType.id,
               title: input.title,
               params: parsed.data,
+              agentOverrides: input.agents ?? {},
               createdBy: user.id,
             })
             .returning();
