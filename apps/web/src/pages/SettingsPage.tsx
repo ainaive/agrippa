@@ -1,6 +1,6 @@
 import { PROVIDER_CATALOG } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   FolderCogIcon,
@@ -12,7 +12,7 @@ import {
   UsersIcon,
   XIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -707,7 +707,13 @@ const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
 export function SettingsPage() {
   const { t } = useTranslation(["settings", "common"]);
   const { projectId } = useParams({ strict: false }) as { projectId: string };
-  const [section, setSection] = useState("general");
+  const { tab } = useSearch({ strict: false }) as { tab?: string };
+  const validTabs = SECTIONS.map((s) => s.key);
+  const [section, setSection] = useState(tab && validTabs.includes(tab) ? tab : "general");
+  // a preflight "go configure" link may change ?tab while this page is mounted
+  useEffect(() => {
+    if (tab && validTabs.includes(tab) && tab !== section) setSection(tab);
+  }, [tab, validTabs, section]);
 
   return (
     <div className="space-y-6">

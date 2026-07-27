@@ -180,6 +180,11 @@ const settingsRoute = createRoute({
   path: "/settings",
   component: lazyRouteComponent(() => import("./pages/SettingsPage"), "SettingsPage"),
   staticData: { crumb: "nav.settings" },
+  // ?tab= deep-links to a settings section (used by the submit preflight's
+  // "go configure" links); undefined falls back to "general".
+  validateSearch: (input: Record<string, unknown>) => ({
+    tab: typeof input.tab === "string" ? input.tab : undefined,
+  }),
 });
 
 const routeTree = rootRoute.addChildren([

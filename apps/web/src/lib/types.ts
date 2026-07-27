@@ -89,6 +89,21 @@ export type TaskTypeDetail = {
   fabriOptions: FaberOption[];
 };
 
+export type PreflightCheckKey = "models" | "provider_credential" | "skills" | "mcp" | "repo";
+
+export type PreflightCheck = {
+  key: PreflightCheckKey;
+  ok: boolean;
+  detail: string;
+  /** settings tab to deep-link to when not ok */
+  fixPath: "providers" | "grants" | "repos" | null;
+};
+
+export type Preflight = {
+  ready: boolean;
+  checks: PreflightCheck[];
+};
+
 export type TaskRow = {
   id: string;
   title: string;

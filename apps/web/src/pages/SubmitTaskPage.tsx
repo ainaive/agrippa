@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
+import { AlertCircleIcon, CheckCircle2Icon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FaberAvatar } from "@/components/FaberAvatar";
@@ -20,7 +21,7 @@ import {
 import { api } from "../lib/api";
 import { formatCost, lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
-import type { TaskTypeDetail } from "../lib/types";
+import type { Preflight, PreflightCheck, TaskTypeDetail } from "../lib/types";
 
 export function SubmitTaskPage() {
   const { t } = useTranslation("catalog");
@@ -33,6 +34,22 @@ export function SubmitTaskPage() {
   const taskType = useQuery({
     queryKey: ["task-type", taskTypeId],
     queryFn: () => api<TaskTypeDetail>(`/task-types/${taskTypeId}`),
+  });
+
+  // best-effort readiness check — surfaces config gaps (missing tier, missing
+  // credential, missing skill, no repo) before the submit round-trip. Only
+  // meaningful once the template is published; a 409 means it isn't.
+  const preflight = useQuery({
+    queryKey: ["preflight", projectId, taskTypeId],
+    queryFn: async (): Promise<Preflight | null> => {
+      const res = await api<Preflight | null>(
+        `/projects/${projectId}/task-types/${taskTypeId}/preflight`,
+        { method: "GET" },
+      );
+      return res;
+    },
+    enabled: !!taskType.data?.templateVersion,
+    retry: false,
   });
 
   const [title, setTitle] = useState("");
@@ -145,6 +162,10 @@ export function SubmitTaskPage() {
             </div>
           </div>
           <Separator />
+          {preflight.data ? (
+            <PreflightChecklist projectId={projectId} data={preflight.data} />
+          ) : null}
+          <Separator />
           <Button
             className="w-full"
             disabled={!title || missing.length > 0 || submit.isPending || !detail.templateVersion}
@@ -160,5 +181,61 @@ export function SubmitTaskPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function PreflightChecklist({ projectId, data }: { projectId: string; data: Preflight }) {
+  const { t } = useTranslation("catalog");
+  const navigate = useNavigate();
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">
+        {data.ready ? t("preflight.ready") : t("preflight.notReady")}
+      </p>
+      <ul className="space-y-1">
+        {data.checks.map((check) => (
+          <PreflightRow
+            key={check.key}
+            check={check}
+            onFix={
+              check.fixPath
+                ? () =>
+                    navigate({
+                      to: "/projects/$projectId/settings",
+                      params: { projectId },
+                      search: { tab: check.fixPath as string },
+                    })
+                : undefined
+            }
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function PreflightRow({ check, onFix }: { check: PreflightCheck; onFix?: () => void }) {
+  const { t } = useTranslation("catalog");
+  return (
+    <li className="flex items-start justify-between gap-2">
+      <div className="flex min-w-0 items-start gap-1.5">
+        {check.ok ? (
+          <CheckCircle2Icon className="mt-0.5 size-3.5 shrink-0 text-emerald-500" />
+        ) : (
+          <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
+        )}
+        <div className="min-w-0">
+          <span className="font-medium">{t(`preflight.${check.key}`)}</span>
+          <p className="truncate text-xs text-muted-foreground" title={check.detail}>
+            {check.detail}
+          </p>
+        </div>
+      </div>
+      {!check.ok && onFix ? (
+        <Button size="sm" variant="link" className="h-auto shrink-0 px-0" onClick={onFix}>
+          {t("preflight.configure")}
+        </Button>
+      ) : null}
+    </li>
   );
 }
