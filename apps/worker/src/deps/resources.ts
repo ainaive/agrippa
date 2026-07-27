@@ -12,7 +12,7 @@ import {
 } from "@agrippa/db";
 import { type ResolvedMcpServer, type ResolvedSkill, realContained } from "@agrippa/executor-core";
 import type { ResourceMaterializer } from "@agrippa/orchestration";
-import { skillSlugOfRef } from "@agrippa/orchestration";
+import { pickActiveSkillVersion, skillRefRange, skillSlugOfRef } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
 import { assertPublicHost } from "./net";
 
@@ -52,7 +52,6 @@ export class DbResourceMaterializer implements ResourceMaterializer {
     const missing: string[] = [];
     for (const ref of refs) {
       const slug = skillSlugOfRef(ref);
-      const range = ref.includes("@") ? (ref.split("@")[1] as string) : "*";
       const [head] = await this.db.select().from(skills).where(eq(skills.slug, slug));
       if (!head) {
         // unregistered or no active matching version → unavailable, not an error;
@@ -64,9 +63,8 @@ export class DbResourceMaterializer implements ResourceMaterializer {
         .select()
         .from(skillVersions)
         .where(eq(skillVersions.skillId, head.id));
-      const version = versions
-        .filter((v) => v.status === "active" && Bun.semver.satisfies(v.version, range))
-        .sort((a, b) => Bun.semver.order(b.version, a.version))[0];
+      // same rule authorizeResources enforced at submit/retry time
+      const version = pickActiveSkillVersion(versions, skillRefRange(ref));
       if (!version) {
         missing.push(ref);
         continue;

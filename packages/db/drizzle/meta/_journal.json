@@ -57,6 +57,13 @@
       "when": 1784843355774,
       "tag": "0007_provider-credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785158387829,
+      "tag": "0008_agent-overrides",
+      "breakpoints": true
     }
   ]
 }

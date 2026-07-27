@@ -41,6 +41,9 @@
   "actions": {
     "cancel": "取消执行",
     "retry": "重试",
+    "retryTitle": "重试该任务？",
+    "retryWarning": "新的执行将从检出重新开始，并按项目当前配置绑定智能体与模型。已回答的问题与已批准的计划会再次询问。",
+    "retryConfirm": "重试",
     "download": "下载"
   },
   "approval": {

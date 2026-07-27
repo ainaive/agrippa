@@ -41,6 +41,9 @@
   "actions": {
     "cancel": "Cancel run",
     "retry": "Retry",
+    "retryTitle": "Retry this task?",
+    "retryWarning": "A new run starts over from checkout, binding agents and models to the project's current configuration. Questions already answered and plans already approved will be asked again.",
+    "retryConfirm": "Retry",
     "download": "Download"
   },
   "approval": {

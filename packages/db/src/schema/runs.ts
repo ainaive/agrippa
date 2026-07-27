@@ -36,6 +36,12 @@ export const tasks = pgTable("tasks", {
     .references(() => taskTypes.id),
   title: text("title").notNull(),
   params: jsonb("params").$type<Record<string, unknown>>().notNull(),
+  // raw submit-time per-slot agent overrides, kept so a retry can re-resolve
+  // without losing the user's deliberate slot choices (ADR-0014); {} = none
+  agentOverrides: jsonb("agent_overrides")
+    .$type<Record<string, { faberId?: string; executorId?: string }>>()
+    .notNull()
+    .default({}),
   latestRunId: uuid("latest_run_id").references((): AnyPgColumn => runs.id),
   createdBy: uuid("created_by")
     .notNull()

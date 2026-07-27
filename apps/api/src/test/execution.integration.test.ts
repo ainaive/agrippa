@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
-import { repoConnections, runs } from "@agrippa/db";
+import { auditLogs, fabri, mcpServers, repoConnections, runs, skillVersions } from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import {
   type EngineDeps,
@@ -11,7 +11,7 @@ import {
   InProcessEventBus,
   silentLogger,
 } from "@agrippa/orchestration";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
 import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
@@ -421,5 +421,211 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       await admin.request(`/api/v1/tasks/${taskId}`),
     );
     expect(task.runs.map((r) => r.number)).toEqual([2, 1]);
+  });
+
+  it("retry re-resolves against current configuration (ADR-0014)", async () => {
+    // no worker in this fixture — mark queued runs terminal so retry is legal
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const [prev] = await db
+      .select()
+      .from(runs)
+      .where(eq(runs.taskId, taskId))
+      .orderBy(desc(runs.number))
+      .limit(1);
+    const flatten = (resolution: Record<string, unknown> | null | undefined) =>
+      Object.values(resolution ?? {}).flatMap((slot) =>
+        Object.values(slot as Record<string, { provider: string }>),
+      );
+    // every run so far resolved anthropic — no dashscope credential existed
+    expect(flatten(prev?.modelResolution).some((e) => e.provider === "anthropic")).toBe(true);
+
+    // adding a credential makes dashscope the ranked provider (ADR-0013's
+    // credentialed-first consequence) — a retry must pick that up
+    await admin.request(`/api/v1/projects/${projectId}/providers`, {
+      method: "POST",
+      json: { provider: "dashscope", apiKey: "sk-bailian-retry-test" },
+    });
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(202);
+    const { runId: rerunId } = await jsonOf<{ runId: string }>(res);
+    const [rerun] = await db.select().from(runs).where(eq(runs.id, rerunId));
+
+    // pinned: template version and params snapshot; re-derived: the resolution
+    expect(rerun?.templateVersionId).toBe(prev?.templateVersionId as string);
+    expect(rerun?.paramsSnapshot).toEqual(prev?.paramsSnapshot ?? {});
+    const entries = flatten(rerun?.modelResolution);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) expect(entry.provider).toBe("dashscope");
+
+    await admin.request(`/api/v1/projects/${projectId}/providers/dashscope`, {
+      method: "DELETE",
+    });
+  });
+
+  it("retry preserves the user's submit-time agent overrides", async () => {
+    const types = await jsonOf<Array<{ id: string; slug: string }>>(
+      await admin.request("/api/v1/scenarios/software-development/task-types"),
+    );
+    const rdTypeId = types.find((t) => t.slug === "requirement-delivery")?.id as string;
+    const submitted = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId: rdTypeId,
+        title: "Override survives retry",
+        params: { requirement: "Do the thing", repo: { repoConnectionId } },
+        // the template pins codex-cli for the reviewer; the user chose otherwise
+        agents: { reviewer: { executorId: "claude-agent-sdk" } },
+      },
+    });
+    expect(submitted.status).toBe(202);
+    const { taskId: rdTaskId } = await jsonOf<{ taskId: string }>(submitted);
+
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, rdTaskId));
+    const retried = await admin.request(`/api/v1/tasks/${rdTaskId}/retry`, { method: "POST" });
+    expect(retried.status).toBe(202);
+    const { runId: rerunId } = await jsonOf<{ runId: string }>(retried);
+    const [rerun] = await db.select().from(runs).where(eq(runs.id, rerunId));
+    expect(rerun?.agentBindings.reviewer?.executorId).toBe("claude-agent-sdk");
+  });
+
+  it("retry fails fast when current configuration cannot satisfy the template", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+
+    // strip every grant — the manifest re-check fires before model resolution
+    await admin.request(`/api/v1/projects/${projectId}/grants`, { method: "PUT", json: [] });
+    const ungranted = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(ungranted.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(ungranted)).code).toBe("skill_not_granted");
+
+    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
+    const skillRows = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/skills"));
+    await admin.request(`/api/v1/projects/${projectId}/grants`, {
+      method: "PUT",
+      json: [
+        ...models.map((m) => ({ resourceType: "model", resourceId: m.id })),
+        ...skillRows.map((s) => ({ resourceType: "skill", resourceId: s.id })),
+      ],
+    });
+
+    // a retry burns budget like any run — the quota hard-stop applies
+    await admin.request(`/api/v1/projects/${projectId}/quota`, {
+      method: "PUT",
+      json: { tokenLimit: 1, hardStop: true },
+    });
+    const blocked = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(blocked.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(blocked)).code).toBe("quota_exhausted");
+    await admin.request(`/api/v1/projects/${projectId}/quota`, {
+      method: "PUT",
+      json: { tokenLimit: null, hardStop: true },
+    });
+  });
+
+  it("retry rejects a default faber that was disabled since submit", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const [latest] = await db
+      .select({ faberId: runs.faberId })
+      .from(runs)
+      .where(eq(runs.taskId, taskId))
+      .orderBy(desc(runs.number))
+      .limit(1);
+    await db
+      .update(fabri)
+      .set({ status: "disabled" })
+      .where(eq(fabri.id, latest?.faberId as string));
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(res)).code).toBe("faber_unknown");
+    await db
+      .update(fabri)
+      .set({ status: "active" })
+      .where(eq(fabri.id, latest?.faberId as string));
+  });
+
+  it("retry rejects a required skill whose versions were all deprecated", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    await db.update(skillVersions).set({ status: "deprecated" });
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(res)).code).toBe("skill_version_unavailable");
+    await db.update(skillVersions).set({ status: "active" });
+  });
+
+  it("concurrent retries serialize: one 202, one run_active conflict, audited", async () => {
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const [first, second] = await Promise.all([
+      admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" }),
+      admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" }),
+    ]);
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual([202, 409]);
+    const winner = first.status === 202 ? first : second;
+    const loser = first.status === 202 ? second : first;
+    expect((await jsonOf<{ code: string }>(loser)).code).toBe("run_active");
+
+    // the audit row commits with the retry (every mutation is audited)
+    const { runId: newRunId } = await jsonOf<{ runId: string }>(winner);
+    const rows = await db.select().from(auditLogs).where(eq(auditLogs.resourceId, newRunId));
+    const entry = rows.find((r) => r.action === "task.retry");
+    expect(entry).toBeDefined();
+    const payload = entry?.payload as { fromRunId?: string } | undefined;
+    expect(payload?.fromRunId).toBeDefined();
+  });
+
+  it("retry drops an optional MCP server disabled since submit", async () => {
+    // bug-localize-fix references MCP 'github' as optional — register + grant it
+    const [mcp] = await db
+      .insert(mcpServers)
+      .values({
+        slug: "github",
+        nameI18n: { en: "GitHub", "zh-CN": "GitHub" },
+        transport: "http",
+        config: { url: "https://mcp.example.com" },
+      })
+      .returning();
+    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
+    const skillRows = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/skills"));
+    await admin.request(`/api/v1/projects/${projectId}/grants`, {
+      method: "PUT",
+      json: [
+        ...models.map((m) => ({ resourceType: "model", resourceId: m.id })),
+        ...skillRows.map((s) => ({ resourceType: "skill", resourceId: s.id })),
+        { resourceType: "mcp_server", resourceId: mcp?.id },
+      ],
+    });
+
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const withMcp = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(withMcp.status).toBe(202);
+    const { runId: withId } = await jsonOf<{ runId: string }>(withMcp);
+    const [runWith] = await db.select().from(runs).where(eq(runs.id, withId));
+    expect(runWith?.resourceManifest.mcpServers).toContain("github");
+
+    // disabled → treated as unregistered; the optional ref silently drops
+    await db
+      .update(mcpServers)
+      .set({ status: "disabled" })
+      .where(eq(mcpServers.id, mcp?.id as string));
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+    const withoutMcp = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(withoutMcp.status).toBe(202);
+    const { runId: withoutId } = await jsonOf<{ runId: string }>(withoutMcp);
+    const [runWithout] = await db.select().from(runs).where(eq(runs.id, withoutId));
+    expect(runWithout?.resourceManifest.mcpServers).not.toContain("github");
+  });
+
+  it("retry rejects params referencing a deleted repo connection", async () => {
+    const [conn] = await db
+      .select()
+      .from(repoConnections)
+      .where(eq(repoConnections.id, repoConnectionId));
+    await db.delete(repoConnections).where(eq(repoConnections.id, repoConnectionId));
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, taskId));
+
+    const res = await admin.request(`/api/v1/tasks/${taskId}/retry`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(res)).code).toBe("repo_not_in_project");
+
+    if (conn) await db.insert(repoConnections).values(conn);
   });
 });
