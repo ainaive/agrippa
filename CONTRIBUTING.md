@@ -51,6 +51,12 @@ bun run build                # SPA build
 3. Add the template head + task type rows to `packages/db/src/seed/index.ts` (slug, i18n names, default Faber, scenario).
 4. Boot the api (or `bun run db:seed && bun run templates:seed`) — the template publishes automatically; the submission form appears with zero frontend work.
 
+### Add a builtin model
+
+1. Append a row to `modelRows` in `packages/db/src/seed/index.ts` (provider, provider model id, tier, list pricing). Verify the id against the live provider first — ids can be auth-mode-dependent (e.g. the `gpt-*-codex` ids 400 under a ChatGPT-account Codex login).
+2. `bun run db:seed` (or boot the api) — inserts are idempotent by provider model id.
+3. Grant it to projects that should use it (Settings → Resources). Org-specific one-offs can skip the seed entirely: admins add rows at `/admin/models`.
+
 ### Add a builtin skill
 
 1. Create `templates/_shared/skills/<name>/SKILL.md` (frontmatter: `name`, `description`).
