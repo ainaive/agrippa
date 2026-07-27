@@ -17,6 +17,7 @@ import {
   encryptSecret,
   fabri,
   grantBuiltinResources,
+  grantProviderBuiltinModels,
   loadSecretKey,
   mcpServers,
   models,
@@ -396,6 +397,17 @@ export const projectRoutes = new Hono<AppEnv>()
           .insert(providerCredentials)
           .values({ projectId, provider, baseUrl: baseUrl ?? null, secretRef: secret.id })
           .returning();
+        // Convention over Configuration: a credential is what makes a
+        // provider's models *usable*, so granting them at the same time
+        // couples the two previously-decoupled steps (settings → providers vs
+        // settings → grants). Org-scoped models stay an explicit opt-in.
+        // Idempotent via the grants unique index.
+        const autoGrantedModels = await grantProviderBuiltinModels(
+          tx,
+          projectId,
+          provider,
+          c.var.user.id,
+        );
         await audit(
           c,
           {
@@ -403,14 +415,21 @@ export const projectRoutes = new Hono<AppEnv>()
             resourceType: "provider_credential",
             resourceId: row?.id,
             projectId,
-            payload: { provider },
+            payload: { provider, autoGrantedModels },
           },
           tx,
         );
-        return row;
+        return { row, autoGrantedModels };
       });
       return c.json(
-        created ? { ...created, secretRef: undefined, hasCredential: true } : null,
+        created.row
+          ? {
+              ...created.row,
+              secretRef: undefined,
+              hasCredential: true,
+              autoGrantedModels: created.autoGrantedModels,
+            }
+          : null,
         201,
       );
     },

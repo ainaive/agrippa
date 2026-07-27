@@ -188,6 +188,61 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
   let gatedProjectId: string;
   let gatedTaskId: string;
 
+  it("adding a provider credential auto-grants that provider's built-in models", async () => {
+    // fresh project; revoke its auto-granted dashscope models so the credential's
+    // auto-grant is observable
+    const project = (
+      await jsonOf<{ id: string }>(
+        await admin.request("/api/v1/projects", {
+          method: "POST",
+          json: { slug: "auto-grant-prov", name: "Auto Grant Provider" },
+        }),
+      )
+    ).id;
+    const modelRows = await jsonOf<Array<{ id: string; provider: string }>>(
+      await admin.request("/api/v1/models"),
+    );
+    const skillRows = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/skills"));
+    const dashscopeModelIds = modelRows.filter((m) => m.provider === "dashscope").map((m) => m.id);
+    expect(dashscopeModelIds.length).toBeGreaterThan(0);
+    // grant everything EXCEPT dashscope models
+    await admin.request(`/api/v1/projects/${project}/grants`, {
+      method: "PUT",
+      json: [
+        ...modelRows
+          .filter((m) => m.provider !== "dashscope")
+          .map((m) => ({ resourceType: "model", resourceId: m.id })),
+        ...skillRows.map((s) => ({ resourceType: "skill", resourceId: s.id })),
+      ],
+    });
+
+    const res = await admin.request(`/api/v1/projects/${project}/providers`, {
+      method: "POST",
+      json: { provider: "dashscope", apiKey: "sk-auto-grant" },
+    });
+    expect(res.status).toBe(201);
+    const body = await jsonOf<{ autoGrantedModels: number }>(res);
+    expect(body.autoGrantedModels).toBe(dashscopeModelIds.length);
+
+    const grants = await jsonOf<Array<{ resourceType: string; resourceId: string }>>(
+      await admin.request(`/api/v1/projects/${project}/grants`),
+    );
+    const grantedIds = new Set(
+      grants.filter((g) => g.resourceType === "model").map((g) => g.resourceId),
+    );
+    for (const id of dashscopeModelIds) expect(grantedIds.has(id)).toBe(true);
+
+    // re-adding (delete + add) is idempotent: 0 newly inserted
+    await admin.request(`/api/v1/projects/${project}/providers/dashscope`, {
+      method: "DELETE",
+    });
+    const again = await admin.request(`/api/v1/projects/${project}/providers`, {
+      method: "POST",
+      json: { provider: "dashscope", apiKey: "sk-auto-grant-2" },
+    });
+    expect((await jsonOf<{ autoGrantedModels: number }>(again)).autoGrantedModels).toBe(0);
+  });
+
   it("gates submission: dashscope-only grants fail actionably until a credential exists", async () => {
     // fresh project so the credential created above doesn't leak in
     const gatedProject = (
