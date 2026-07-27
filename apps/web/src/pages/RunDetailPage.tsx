@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChevronDownIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
 import { ArtifactPreview, isPreviewable } from "@/components/artifacts/ArtifactPreview";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FaberAvatar } from "@/components/FaberAvatar";
@@ -22,8 +21,9 @@ import { RunMetaCard } from "@/features/runs/RunMetaCard";
 import { RunTimeline } from "@/features/runs/RunTimeline";
 import { useMe } from "../features/me";
 import { useRunEvents } from "../features/useRunEvents";
-import { ApiError, api } from "../lib/api";
+import { api } from "../lib/api";
 import { formatCost, formatDuration, formatTime, lt } from "../lib/format";
+import { toastApiError } from "../lib/toast";
 import type { Artifact, Run, RunStep } from "../lib/types";
 
 function ArtifactRow({ artifact }: { artifact: Artifact }) {
@@ -103,9 +103,7 @@ export function RunDetailPage() {
       });
     },
     // re-resolution can reject like submit (grants, credentials, quota…)
-    onError: (error) => {
-      toast.error(error instanceof ApiError ? error.message : String(error));
-    },
+    onError: toastApiError,
   });
 
   if (run.isError) return <QueryErrorState onRetry={() => void run.refetch()} />;
