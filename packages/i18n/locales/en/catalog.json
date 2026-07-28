@@ -7,7 +7,7 @@
     "parameters": "Parameters",
     "title": "Task title",
     "summary": "Summary",
-    "budget": "Budget",
+    "tokenLimit": "Token limit",
     "duration": "Time limit",
     "minutes": "min",
     "submit": "Submit task",

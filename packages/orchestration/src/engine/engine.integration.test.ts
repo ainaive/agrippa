@@ -191,7 +191,7 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
         mcpServers: template.spec.resources.mcpServers.map((m) => m.ref),
         skills: template.spec.resources.skills.map((s) => s.ref.split("@")[0] as string),
       },
-      budget: template.spec.budgets as unknown as Record<string, unknown>,
+      budget: template.spec.limits as unknown as Record<string, unknown>,
       createdBy: user.id,
     })
     .returning();
@@ -307,7 +307,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
 
     const [run2] = await db.select().from(runs).where(eq(runs.id, runId));
     expect(run2?.status).toBe("succeeded");
-    expect(Number((run2?.usageTotals as { costUsd: number } | null)?.costUsd)).toBeGreaterThan(0);
+    expect(Number((run2?.usageTotals as { tokens: number } | null)?.tokens)).toBeGreaterThan(0);
 
     // succeeded steps were NOT re-executed on resume
     expect(deps2.executor.attempts.get("reproduce-bug")).toBeUndefined();
@@ -396,9 +396,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(approval?.status).toBe("pending");
   });
 
-  it("aborts the run when the template budget is exceeded", async () => {
+  it("aborts the run when the template token limit is exceeded", async () => {
     const { db, runId, makeDeps } = await setupFixture();
-    // strong-tier output at $25/MTok: 2M output tokens ≈ $50 > $8 budget
+    // 2.01M tokens on one step blows past the template's 1.6M run limit
     const script: Record<string, FakeStepBehavior> = {
       ...HAPPY_SCRIPT,
       "find-root-cause": {

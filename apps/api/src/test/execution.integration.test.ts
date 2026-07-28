@@ -215,7 +215,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
         slug: string;
         version: number;
         phases: Array<Record<string, unknown>>;
-        budgets: Record<string, unknown>;
+        limits: Record<string, unknown>;
         modelRoles: Record<string, unknown>;
       };
     }>(await viewer.request(`/api/v1/runs/${runId}`));
@@ -296,12 +296,12 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
   it("exposes steps and downloadable artifacts", async () => {
     const steps = await jsonOf<
-      Array<{ stepId: string; status: string; usage: { costUsd?: number; tokens?: number } }>
+      Array<{ stepId: string; status: string; usage: { tokens?: number } }>
     >(await viewer.request(`/api/v1/runs/${runId}/steps`));
     const rootCause = steps.find((s) => s.stepId === "find-root-cause");
     expect(rootCause?.status).toBe("succeeded");
-    // per-step spend is aggregated from token_usage into the response
-    expect(typeof rootCause?.usage.costUsd).toBe("number");
+    // per-step consumption is aggregated from token_usage into the response
+    expect(typeof rootCause?.usage.tokens).toBe("number");
 
     const artifacts = await jsonOf<Array<{ id: string; artifactKey: string }>>(
       await viewer.request(`/api/v1/runs/${runId}/artifacts`),

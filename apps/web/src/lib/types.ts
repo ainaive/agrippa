@@ -80,7 +80,7 @@ export type TaskTypeDetail = {
   templateVersion: { id: string; version: number } | null;
   faber: { id: string; slug: string; nameI18n: LocalizedText; avatar: string | null } | null;
   inputs: TemplateInputSpec[];
-  budgets: { maxCostUsd?: number; maxDurationMinutes?: number } | null;
+  limits: { maxTokens?: number; maxDurationMinutes?: number } | null;
   /** Agent slots of the pinned template (null before any published version). */
   agents: Record<string, AgentSlotMeta> | null;
   /** Live executor ids from worker heartbeats; null = none advertised yet. */
@@ -122,10 +122,10 @@ export type ModelResolutionEntry = {
   providerModelId: string;
 };
 
-export type RunBudgets = {
-  maxCostUsd?: number;
+export type RunLimits = {
+  maxTokens?: number;
   maxDurationMinutes?: number;
-  perPhase?: Record<string, { maxCostUsd: number }>;
+  perPhase?: Record<string, { maxTokens: number }>;
 };
 
 export type RunTemplate = {
@@ -145,7 +145,7 @@ export type RunTemplate = {
     }>;
     approval: { checkpoint: string; title: LocalizedText; present: string[] } | null;
   }>;
-  budgets: RunBudgets;
+  limits: RunLimits;
   modelRoles: Record<string, { tier: string; fallback: string[] }>;
 };
 
@@ -169,8 +169,7 @@ export type Run = {
   executorId: string;
   paramsSnapshot: Record<string, unknown>;
   modelResolution: Record<string, ModelResolutionEntry | Record<string, ModelResolutionEntry>>;
-  budget: RunBudgets;
-  usageTotals: { costUsd?: number; tokens?: number };
+  usageTotals: { tokens?: number; perPhaseTokens?: Record<string, number> };
   workspaceRef: string | null;
   workBranch: string | null;
   error: { code: string; message: string } | null;
@@ -193,7 +192,7 @@ export type RunStep = {
   status: StepStatus;
   agentRef: string | null;
   output: string | null;
-  usage: { costUsd?: number; tokens?: number };
+  usage: { tokens?: number };
   startedAt: string | null;
   finishedAt: string | null;
 };

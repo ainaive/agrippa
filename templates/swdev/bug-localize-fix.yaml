@@ -145,11 +145,11 @@ spec:
           instructions: "Push the branch and open a PR; include the fix report as the body."
           produces: [pr-link]
 
-  budgets:
-    maxCostUsd: 8
+  limits:
+    maxTokens: 1600000
     maxDurationMinutes: 45
     perPhase:
-      fix: { maxCostUsd: 4 }
+      fix: { maxTokens: 800000 }
 
   outputs:
     artifacts:

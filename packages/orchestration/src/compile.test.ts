@@ -70,6 +70,31 @@ describe("template compiler", () => {
     expect(upgradeCompiledTemplate(compiled)).toBe(compiled);
   });
 
+  it("normalizes pre-token compiled rows that still carry spec.budgets", () => {
+    const { compiled } = compileTemplate(bugFixSource, { resolveFile });
+    // what a version published before limits were denominated in tokens looks
+    // like on disk: USD caps under `budgets`, no `limits` key at all
+    const { limits: _dropped, ...legacySpec } = compiled.spec;
+    const legacy = {
+      ...compiled,
+      spec: {
+        ...legacySpec,
+        budgets: { maxCostUsd: 8, maxDurationMinutes: 45, perPhase: { fix: { maxCostUsd: 4 } } },
+      },
+    };
+
+    const upgraded = upgradeCompiledTemplate(legacy);
+    // the duration cap survives; the cost caps cannot be converted without a
+    // price, so the run falls back to the project quota alone
+    expect(upgraded.spec.limits).toEqual({ maxDurationMinutes: 45, perPhase: {} });
+    expect(Object.entries(upgraded.spec.limits.perPhase)).toEqual([]);
+  });
+
+  it("rejects a draft still written against spec.budgets", () => {
+    const source = bugFixSource.replace(/^  limits:$/m, "  budgets:");
+    expect(issuesOf(source).join()).toContain("spec.budgets was renamed to spec.limits");
+  });
+
   it("checksum is stable and source-sensitive", () => {
     const a = compileTemplate(bugFixSource, { resolveFile }).checksum;
     const b = compileTemplate(bugFixSource, { resolveFile }).checksum;
@@ -157,7 +182,7 @@ describe("template compiler", () => {
     expect(issuesOf(source).join()).toContain("promptFile '_shared/prompts/missing.md' not found");
   });
 
-  it("rejects select inputs without options and unknown perPhase budgets", () => {
+  it("rejects select inputs without options and unknown perPhase limits", () => {
     const noOptions = mutate((doc) => {
       doc.spec.inputs.push({
         key: "flavor",
@@ -168,7 +193,7 @@ describe("template compiler", () => {
     expect(issuesOf(noOptions).join()).toContain("select inputs must define options");
 
     const badPhase = mutate((doc) => {
-      doc.spec.budgets.perPhase = { "no-such-phase": { maxCostUsd: 1 } };
+      doc.spec.limits.perPhase = { "no-such-phase": { maxTokens: 1000 } };
     });
     expect(issuesOf(badPhase).join()).toContain("unknown phase 'no-such-phase'");
   });

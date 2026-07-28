@@ -57,7 +57,7 @@ const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
 /**
  * Everything a new run derives from CURRENT project configuration: the
  * resource manifest, per-slot agent bindings and model resolution, and the
- * budget off the pinned compiled spec. Shared by submit and retry so the two
+ * usage limits off the pinned compiled spec. Shared by submit and retry so the two
  * paths cannot drift — a retry is a re-submission of the pinned task
  * (ADR-0014); only the template version and params snapshot stay pinned.
  */
@@ -95,7 +95,7 @@ async function resolveRunPlan(
   return {
     resourceManifest,
     agentResolution,
-    budget: compiled.spec.budgets as unknown as Record<string, unknown>,
+    budget: compiled.spec.limits as unknown as Record<string, unknown>,
   };
 }
 
@@ -656,7 +656,7 @@ export const executionRoutes = new Hono<AppEnv>()
                 : null,
             };
           }),
-          budgets: spec.budgets,
+          limits: spec.limits,
           modelRoles: spec.models.roles,
         };
       }

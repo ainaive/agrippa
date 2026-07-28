@@ -70,8 +70,8 @@ spec:
             Write it bilingual-friendly: clear, plain language.
           produces: [status-report]
 
-  budgets:
-    maxCostUsd: 3
+  limits:
+    maxTokens: 600000
     maxDurationMinutes: 20
 
   outputs:

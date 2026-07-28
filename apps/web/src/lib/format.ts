@@ -5,9 +5,18 @@ export function lt(text: Parameters<typeof pickLocale>[0]): string {
   return pickLocale(text, i18next.language);
 }
 
-export function formatCost(costUsd: number | undefined | null): string {
-  if (costUsd == null) return "—";
-  return `$${Number(costUsd).toFixed(costUsd < 0.1 ? 4 : 2)}`;
+export function formatTokens(tokens: number | undefined | null): string {
+  if (tokens == null) return "—";
+  return Number(tokens).toLocaleString(i18next.language);
+}
+
+/** Compact form for per-step lines, per-phase caps, and bar labels. */
+export function formatTokensCompact(tokens: number | undefined | null): string {
+  if (tokens == null) return "—";
+  return new Intl.NumberFormat(i18next.language, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(Number(tokens));
 }
 
 export function formatTime(value: string | null | undefined): string {

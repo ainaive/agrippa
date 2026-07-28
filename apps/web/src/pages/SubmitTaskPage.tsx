@@ -19,7 +19,7 @@ import {
   TaskParamsForm,
 } from "../components/TaskParamsForm";
 import { api } from "../lib/api";
-import { formatCost, lt } from "../lib/format";
+import { formatTokensCompact, lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
 import type { Preflight, PreflightCheck, TaskTypeDetail } from "../lib/types";
 
@@ -149,15 +149,15 @@ export function SubmitTaskPage() {
           <Separator />
           <div className="space-y-1.5">
             <div className="flex justify-between">
-              <span className="text-muted-foreground">{t("form.budget")}</span>
+              <span className="text-muted-foreground">{t("form.tokenLimit")}</span>
               <span className="font-medium tabular-nums">
-                {formatCost(detail.budgets?.maxCostUsd)}
+                {formatTokensCompact(detail.limits?.maxTokens)}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">{t("form.duration")}</span>
               <span className="font-medium tabular-nums">
-                {detail.budgets?.maxDurationMinutes ?? "—"} {t("form.minutes")}
+                {detail.limits?.maxDurationMinutes ?? "—"} {t("form.minutes")}
               </span>
             </div>
           </div>

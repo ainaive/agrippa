@@ -3,8 +3,8 @@ import { Link, useParams } from "@tanstack/react-router";
 import {
   ActivityIcon,
   ArrowRightIcon,
-  CircleDollarSignIcon,
   CirclePauseIcon,
+  CoinsIcon,
   InboxIcon,
   ListChecksIcon,
   PlusIcon,
@@ -28,7 +28,7 @@ import {
 import { usePendingCheckpoints } from "@/features/usePendingCheckpoints";
 import { RunStatusBadge } from "../components/RunStatusBadge";
 import { api } from "../lib/api";
-import { formatCost, formatTime } from "../lib/format";
+import { formatTime, formatTokens } from "../lib/format";
 import type { Quota, TaskRow } from "../lib/types";
 
 const TERMINAL = ["succeeded", "failed", "cancelled", "timed_out"];
@@ -49,9 +49,8 @@ export function DashboardPage() {
     queryKey: ["usage", projectId],
     queryFn: () =>
       api<{
-        costUsd: number;
         tokens: number;
-        byModel: Array<{ model: string; costUsd: number; tokens: number }>;
+        byModel: Array<{ model: string; tokens: number }>;
       }>(`/projects/${projectId}/usage`),
   });
 
@@ -60,9 +59,9 @@ export function DashboardPage() {
   const waiting = (usePendingCheckpoints().data ?? []).filter((a) => a.projectId === projectId);
   const recent = all.slice(0, 8);
 
-  const costLimit = quota.data?.costLimitUsd ? Number(quota.data.costLimitUsd) : null;
-  const spent = usage.data?.costUsd ?? 0;
-  const quotaPct = costLimit ? Math.min(100, (spent / costLimit) * 100) : null;
+  const tokenLimit = quota.data?.tokenLimit ?? null;
+  const used = usage.data?.tokens ?? 0;
+  const quotaPct = tokenLimit ? Math.min(100, (used / tokenLimit) * 100) : null;
 
   return (
     <div className="space-y-6">
@@ -98,26 +97,20 @@ export function DashboardPage() {
         </StatCard>
 
         <StatCard
-          title={t("runs:dashboard.spend")}
-          icon={CircleDollarSignIcon}
+          title={t("runs:dashboard.tokens")}
+          icon={CoinsIcon}
           value={
             <>
-              {formatCost(spent)}
-              {costLimit ? (
+              {formatTokens(used)}
+              {tokenLimit ? (
                 <span className="ml-1 text-sm font-normal text-muted-foreground">
-                  / {formatCost(costLimit)}
+                  / {formatTokens(tokenLimit)}
                 </span>
               ) : null}
             </>
           }
         >
           {quotaPct !== null ? <Progress value={quotaPct} className="h-1.5" /> : null}
-          <p className="text-xs text-muted-foreground tabular-nums">
-            {t("runs:dashboard.tokensCount", {
-              count: usage.data?.tokens ?? 0,
-              formattedCount: (usage.data?.tokens ?? 0).toLocaleString(),
-            })}
-          </p>
         </StatCard>
 
         <StatCard title={t("runs:dashboard.total")} icon={ListChecksIcon} value={all.length} />
@@ -197,12 +190,12 @@ export function DashboardPage() {
           </CardHeader>
           <CardContent className="space-y-2">
             {(usage.data?.byModel ?? []).length === 0 ? (
-              <p className="text-sm text-muted-foreground">{t("runs:dashboard.noSpend")}</p>
+              <p className="text-sm text-muted-foreground">{t("runs:dashboard.noUsage")}</p>
             ) : (
               (usage.data?.byModel ?? []).map((row) => (
                 <div key={row.model} className="flex items-center justify-between gap-2 text-sm">
                   <span className="truncate text-muted-foreground">{row.model}</span>
-                  <span className="font-medium tabular-nums">{formatCost(row.costUsd)}</span>
+                  <span className="font-medium tabular-nums">{formatTokens(row.tokens)}</span>
                 </div>
               ))
             )}
