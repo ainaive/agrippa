@@ -64,6 +64,14 @@ PATCH  /projects/:id/providers/:provider  DELETE /projects/:id/providers/:provid
    # DELETE removes row + secret in one tx. Duplicate provider → 409 provider_exists; bad endpoint → 400 base_url_invalid.
    # POST also grants that provider's active built-in models (autoGrantedModels in the response) — convention
    # over configuration: a credential is what makes a provider's models usable, so the two are coupled.
+   # POST/PATCH validate the provider is an active provider_catalog entry (400 provider_not_in_catalog) and
+   # the baseUrl host against that entry's host allowlist.
+GET    /provider-catalog              POST /provider-catalog                # org_admin-managed provider catalog
+PATCH  /provider-catalog/:providerId  DELETE /provider-catalog/:providerId
+   # the resolvable provider set (label, per-wire-protocol default endpoints, auth policy, host pins).
+   # builtins (anthropic/openai/dashscope) are seeded org_id NULL and immutable/non-deletable; customs are
+   # org-scoped. Resolution derives claude (anthropic) / codex (openai) candidates by protocol from this
+   # catalog, so a custom Anthropic-compatible provider is resolvable by the claude executor.
 GET    /projects/:id/grants               PUT /projects/:id/grants # bulk enable/disable resources
    # a NEW project is auto-granted every active built-in resource (models/skills/fabri) inside its create
    # transaction, so it never starts in a zero-grants state; a seed backfill brings existing projects to parity.
