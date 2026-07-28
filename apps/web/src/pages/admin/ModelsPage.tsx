@@ -55,8 +55,7 @@ function ModelDialog({
   const [providerModelId, setProviderModelId] = useState("");
   const [displayName, setDisplayName] = useState(model?.displayName ?? "");
   const [tier, setTier] = useState(model?.tier ?? "balanced");
-  const [inputCost, setInputCost] = useState(model?.inputCostPerMtok ?? "");
-  const [outputCost, setOutputCost] = useState(model?.outputCostPerMtok ?? "");
+  const [rank, setRank] = useState(model ? String(model.rank) : "");
   const [status, setStatus] = useState(model?.status ?? "active");
 
   const save = useMutation({
@@ -67,8 +66,7 @@ function ModelDialog({
             json: {
               displayName,
               tier,
-              inputCostPerMtok: inputCost === "" ? null : Number(inputCost),
-              outputCostPerMtok: outputCost === "" ? null : Number(outputCost),
+              rank: rank === "" ? undefined : Number(rank),
               status,
             },
           })
@@ -79,8 +77,7 @@ function ModelDialog({
               providerModelId,
               displayName,
               tier,
-              inputCostPerMtok: inputCost === "" ? undefined : Number(inputCost),
-              outputCostPerMtok: outputCost === "" ? undefined : Number(outputCost),
+              rank: rank === "" ? undefined : Number(rank),
             },
           }),
     onSuccess: () => {
@@ -153,29 +150,17 @@ function ModelDialog({
           </SelectContent>
         </Select>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-2">
-          <Label htmlFor="model-in">{t("admin:crud.inputCost")}</Label>
-          <Input
-            id="model-in"
-            type="number"
-            step="0.01"
-            min="0"
-            value={inputCost ?? ""}
-            onChange={(e) => setInputCost(e.target.value)}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="model-out">{t("admin:crud.outputCost")}</Label>
-          <Input
-            id="model-out"
-            type="number"
-            step="0.01"
-            min="0"
-            value={outputCost ?? ""}
-            onChange={(e) => setOutputCost(e.target.value)}
-          />
-        </div>
+      <div className="space-y-2">
+        <Label htmlFor="model-rank">{t("admin:crud.rank")}</Label>
+        <Input
+          id="model-rank"
+          type="number"
+          step="1"
+          min="0"
+          className="w-40"
+          value={rank}
+          onChange={(e) => setRank(e.target.value)}
+        />
       </div>
       {model ? (
         <div className="space-y-2">
@@ -228,7 +213,7 @@ export function ModelsPage() {
               <TableRow>
                 <TableHead>{t("admin:columns.name")}</TableHead>
                 <TableHead>{t("admin:columns.tier")}</TableHead>
-                <TableHead>{t("admin:columns.pricing")}</TableHead>
+                <TableHead>{t("admin:columns.rank")}</TableHead>
                 <TableHead>{t("admin:columns.status")}</TableHead>
                 <TableHead className="w-10" />
               </TableRow>
@@ -247,8 +232,8 @@ export function ModelsPage() {
                   <TableCell>
                     <Badge variant="outline">{model.tier}</Badge>
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    ${model.inputCostPerMtok}/M in · ${model.outputCostPerMtok}/M out
+                  <TableCell className="text-xs text-muted-foreground tabular-nums">
+                    {model.rank}
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={model.status} />

@@ -168,6 +168,12 @@ export const models = pgTable("models", {
   tier: text("tier", { enum: MODEL_TIERS }).notNull(),
   capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
   contextWindow: integer("context_window"),
+  /**
+   * Selection preference within a tier, lower first (ties break by
+   * provider_model_id). Replaces the price columns that used to order
+   * resolution — the registry no longer stores money (ADR-0015).
+   */
+  rank: integer("rank").notNull().default(100),
   inputCostPerMtok: numeric("input_cost_per_mtok", { precision: 12, scale: 4 }),
   outputCostPerMtok: numeric("output_cost_per_mtok", { precision: 12, scale: 4 }),
   status: text("status", { enum: ["active", "disabled"] })

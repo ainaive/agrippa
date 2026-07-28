@@ -8,26 +8,27 @@ import {
 } from "./resolve";
 import type { CompiledTemplate } from "./template-schema";
 
+// ranks mirror the real seed (packages/db/src/seed) so the fixture and the
+// deployment agree on which model each role resolves to
 const model = (
   provider: string,
   providerModelId: string,
   tier: GrantedModelRow["tier"],
-  inputCost: string,
+  rank: number,
 ): GrantedModelRow => ({
   id: `id-${providerModelId}`,
   provider,
   providerModelId,
   tier,
-  inputCostPerMtok: inputCost,
-  outputCostPerMtok: "0",
+  rank,
 });
 
 const GRANTED: GrantedModelRow[] = [
-  model("anthropic", "claude-opus-4-8", "strong", "5.00"),
-  model("anthropic", "claude-haiku-4-5", "fast", "1.00"),
-  model("dashscope", "qwen3.7-max", "strong", "2.50"),
-  model("dashscope", "qwen3.6-flash", "fast", "0.25"),
-  model("openai", "gpt-5.1-codex", "strong", "1.25"),
+  model("anthropic", "claude-opus-4-8", "strong", 80),
+  model("anthropic", "claude-haiku-4-5", "fast", 40),
+  model("dashscope", "qwen3.7-max", "strong", 60),
+  model("dashscope", "qwen3.6-flash", "fast", 10),
+  model("openai", "gpt-5.1-codex", "strong", 50),
 ];
 
 const ROLE_SPECS = {
@@ -67,7 +68,7 @@ describe("resolveSlotModels — single-provider coherence", () => {
     expect(Object.keys(resolution).sort()).toEqual(["coding", "triage"]);
   });
 
-  it("ranks a credentialed provider above a cheaper env-fallback one", () => {
+  it("ranks a credentialed provider above a more-preferred env-fallback one", () => {
     // without a credential, dashscope (auth: project) is excluded → anthropic
     expect(resolve().coding?.provider).toBe("anthropic");
     // with a project credential, dashscope wins the credentialed-first rank
@@ -77,15 +78,15 @@ describe("resolveSlotModels — single-provider coherence", () => {
     expect(withCred.triage?.providerModelId).toBe("qwen3.6-flash");
   });
 
-  it("breaks credential ties by total input cost over the resolved roles", () => {
-    // both credentialed → dashscope total (2.50+0.25) beats anthropic (5.00+1.00)
+  it("breaks credential ties by total rank over the resolved roles", () => {
+    // both credentialed → dashscope total (60+10) beats anthropic (80+40)
     const both = resolve({ credentialed: new Set(["anthropic", "dashscope"]) });
     expect(both.coding?.provider).toBe("dashscope");
   });
 
   it("drops a provider that cannot satisfy ALL the slot's roles", () => {
     // openai has no fast-tier model → cannot serve triage even though its
-    // strong model is the cheapest for coding
+    // strong model is the most preferred for coding
     const resolution = resolve({
       providers: ["openai", "anthropic"],
       credentialed: new Set(["openai"]),
@@ -93,15 +94,29 @@ describe("resolveSlotModels — single-provider coherence", () => {
     expect(resolution.coding?.provider).toBe("anthropic");
   });
 
-  it("resolves within a provider by tier fallback, cheapest in tier", () => {
+  it("resolves within a provider by tier fallback, most preferred in tier", () => {
     const resolution = resolve({
       roles: new Set(["review"]),
       providers: ["openai"],
-      granted: [model("openai", "gpt-5.1-codex-mini", "fast", "0.25")],
+      granted: [model("openai", "gpt-5.1-codex-mini", "fast", 20)],
     });
     // strong unavailable → falls back to fast
     expect(resolution.review?.providerModelId).toBe("gpt-5.1-codex-mini");
     expect(resolution.review?.tier).toBe("fast");
+  });
+
+  it("breaks equal ranks within a tier deterministically by model id", () => {
+    // every admin-created model defaults to rank 100 — without the model-id
+    // tiebreak these would resolve by unspecified row order
+    const granted = [
+      model("openai", "zeta-custom", "strong", 100),
+      model("openai", "alpha-custom", "strong", 100),
+    ];
+    const pick = () =>
+      resolve({ roles: new Set(["coding"]), providers: ["openai"], granted }).coding
+        ?.providerModelId;
+    expect(pick()).toBe("alpha-custom");
+    expect(pick()).toBe(pick());
   });
 });
 
@@ -116,7 +131,7 @@ describe("resolveSlotModels — errors", () => {
     try {
       resolve({
         providers: ["openai", "dashscope"],
-        granted: [model("openai", "gpt-5.1-codex", "strong", "1.25")],
+        granted: [model("openai", "gpt-5.1-codex", "strong", 50)],
         credentialed: new Set(["dashscope"]),
       });
       throw new Error("expected a SubmitError");

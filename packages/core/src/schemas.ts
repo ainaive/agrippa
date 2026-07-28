@@ -88,8 +88,8 @@ export const modelCreateSchema = z.object({
   displayName: z.string().min(1),
   tier: z.enum(MODEL_TIERS),
   contextWindow: z.number().int().positive().optional(),
-  inputCostPerMtok: z.number().nonnegative().optional(),
-  outputCostPerMtok: z.number().nonnegative().optional(),
+  /** Selection preference within the tier — lower wins. */
+  rank: z.number().int().nonnegative().optional(),
 });
 
 /** Per-wire-protocol default endpoints; absent = the executor's native endpoint. */
@@ -118,8 +118,7 @@ export const modelUpdateSchema = z.object({
   displayName: z.string().min(1).optional(),
   tier: z.enum(MODEL_TIERS).optional(),
   contextWindow: z.number().int().positive().nullable().optional(),
-  inputCostPerMtok: z.number().nonnegative().nullable().optional(),
-  outputCostPerMtok: z.number().nonnegative().nullable().optional(),
+  rank: z.number().int().nonnegative().optional(),
   status: z.enum(["active", "disabled"]).optional(),
 });
 

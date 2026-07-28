@@ -336,11 +336,16 @@ export async function seed(db: Db): Promise<void> {
     }
   }
 
-  // ── Models (prices are list USD per MTok) ─────────────────────────────────
+  // ── Models ────────────────────────────────────────────────────────────────
+  // `rank` is the selection preference within a tier (lower wins, ties break by
+  // provider model id). Spaced by 10 so new models can slot between builtins.
+  // Prices are list USD per MTok — registry metadata only; nothing reads them
+  // for resolution or accounting any more (ADR-0015).
   const modelRows = [
     {
       provider: "anthropic",
       providerModelId: "claude-opus-4-8",
+      rank: 80,
       displayName: "Claude Opus 4.8",
       tier: "strong" as const,
       contextWindow: 1_000_000,
@@ -350,6 +355,7 @@ export async function seed(db: Db): Promise<void> {
     {
       provider: "anthropic",
       providerModelId: "claude-sonnet-5",
+      rank: 70,
       displayName: "Claude Sonnet 5",
       tier: "balanced" as const,
       contextWindow: 1_000_000,
@@ -359,6 +365,7 @@ export async function seed(db: Db): Promise<void> {
     {
       provider: "anthropic",
       providerModelId: "claude-haiku-4-5",
+      rank: 40,
       displayName: "Claude Haiku 4.5",
       tier: "fast" as const,
       contextWindow: 200_000,
@@ -373,6 +380,7 @@ export async function seed(db: Db): Promise<void> {
     {
       provider: "openai",
       providerModelId: "gpt-5.1-codex",
+      rank: 50,
       displayName: "GPT-5.1 Codex",
       tier: "strong" as const,
       contextWindow: 400_000,
@@ -382,6 +390,7 @@ export async function seed(db: Db): Promise<void> {
     {
       provider: "openai",
       providerModelId: "gpt-5.1-codex-mini",
+      rank: 20,
       displayName: "GPT-5.1 Codex Mini",
       tier: "fast" as const,
       contextWindow: 400_000,
@@ -394,6 +403,7 @@ export async function seed(db: Db): Promise<void> {
       // from OpenAI's model catalog (developers.openai.com/api/docs/models).
       provider: "openai",
       providerModelId: "gpt-5.6-sol",
+      rank: 90,
       displayName: "GPT-5.6 Sol",
       tier: "strong" as const,
       contextWindow: 1_050_000,
@@ -407,6 +417,7 @@ export async function seed(db: Db): Promise<void> {
     {
       provider: "dashscope",
       providerModelId: "qwen3.7-max",
+      rank: 60,
       displayName: "Qwen3.7 Max",
       tier: "strong" as const,
       contextWindow: 1_000_000,
@@ -416,6 +427,7 @@ export async function seed(db: Db): Promise<void> {
     {
       provider: "dashscope",
       providerModelId: "qwen3.7-plus",
+      rank: 30,
       displayName: "Qwen3.7 Plus",
       tier: "balanced" as const,
       contextWindow: 1_000_000,
@@ -425,6 +437,7 @@ export async function seed(db: Db): Promise<void> {
     {
       provider: "dashscope",
       providerModelId: "qwen3.6-flash",
+      rank: 10,
       displayName: "Qwen3.6 Flash",
       tier: "fast" as const,
       contextWindow: 1_000_000,

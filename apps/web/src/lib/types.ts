@@ -266,8 +266,7 @@ export type ModelRow = {
   providerModelId: string;
   displayName: string;
   tier: string;
-  inputCostPerMtok: string | null;
-  outputCostPerMtok: string | null;
+  rank: number;
   status: string;
 };
 

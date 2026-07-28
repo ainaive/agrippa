@@ -84,12 +84,7 @@ export const registryRoutes = new Hono<AppEnv>()
     if (existing) throw AppError.conflict("model_exists", "Model already registered");
     const [created] = await c.var.db
       .insert(models)
-      .values({
-        ...input,
-        orgId: c.var.user.orgId,
-        inputCostPerMtok: input.inputCostPerMtok?.toString(),
-        outputCostPerMtok: input.outputCostPerMtok?.toString(),
-      })
+      .values({ ...input, orgId: c.var.user.orgId })
       .returning();
     await audit(c, { action: "model.create", resourceType: "model", resourceId: created?.id });
     return c.json(created, 201);
@@ -98,13 +93,7 @@ export const registryRoutes = new Hono<AppEnv>()
     const input = c.req.valid("json");
     const [updated] = await c.var.db
       .update(models)
-      .set({
-        ...input,
-        inputCostPerMtok:
-          input.inputCostPerMtok === undefined ? undefined : String(input.inputCostPerMtok),
-        outputCostPerMtok:
-          input.outputCostPerMtok === undefined ? undefined : String(input.outputCostPerMtok),
-      })
+      .set(input)
       .where(eq(models.id, c.req.param("id")))
       .returning();
     if (!updated) throw AppError.notFound("Model");
