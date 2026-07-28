@@ -20,7 +20,7 @@ What the platform does today:
 - **Secrets at rest**: user-registered credentials (git tokens, MCP auth) are encrypted with AES-256-GCM under `AGRIPPA_SECRET_KEY` and are **write-only** through the API — responses expose only `hasAuth`/`hasCredential` booleans. Provider keys (`ANTHROPIC_API_KEY`) live only in process env, never in the database.
 - **Authorization**: two-layer RBAC — org roles gate the resource layer, project roles (admin ⊃ member ⊃ viewer) gate everything project-scoped; org admins get **no** implicit project access. Every mutation writes an audit row (actor, action, resource, payload, IP).
 - **Execution hygiene**: git credentials are injected only into the clone URL and scrubbed from the remote before any agent code runs; run workspaces are per-run throwaway directories; the Claude executor's tool policy denies file writes outside the run workspace; MCP secrets resolve lazily at spawn.
-- **Quota/budget containment**: template budgets and hard-stop project quotas bound runaway spend at submit time, at every step boundary, and mid-step via usage events.
+- **Usage containment**: template token limits and hard-stop project quotas bound a runaway run at submit time, at every step boundary, and mid-step via usage events.
 
 Known limitations — **assume a trusted single organization** (per `docs/design/03-executor-abstraction.md`):
 

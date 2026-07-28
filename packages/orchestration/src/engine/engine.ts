@@ -515,7 +515,7 @@ class RunEngine {
 
   /**
    * Remaining project quota headroom for *this* run, refreshed at each step
-   * boundary so concurrent runs see each other's spend. Counts the current
+   * boundary so concurrent runs see each other's consumption. Counts the current
    * month (matching the submit-time gate in apps/api usage.ts) and excludes
    * this run's own persisted usage — the meter already carries that, so
    * including it here would double-count on resume.
@@ -648,7 +648,7 @@ class RunEngine {
       }
       await this.checkInterrupts();
       // re-read project quota each step so concurrent runs can't collectively
-      // overspend by each checking only a stale start-of-run snapshot
+      // exceed it by each checking only a stale start-of-run snapshot
       const quota = await this.quotaHeadroom();
       this.meter.refreshQuota(quota.tokens);
       this.meter.check();

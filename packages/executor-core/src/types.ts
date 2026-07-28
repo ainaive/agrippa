@@ -152,7 +152,7 @@ export type ExecutionContext = {
 
 /** The slice of UsageMeter executors see. */
 export type UsageRecorder = {
-  record(usage: UsageDelta & { costUsd: number }): void;
+  record(usage: UsageDelta): void;
 };
 
 export type ExecutorCapabilities = {

@@ -417,9 +417,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
   });
 
-  it("resume does not double-count the run's own spend against the quota", async () => {
+  it("resume does not double-count the run's own consumption against the quota", async () => {
     const { runId, makeDeps } = await setupFixture({ quota: { tokenLimit: 3000 } });
-    // cheap pre-approval steps: reproduce-bug spends 1600, find-root-cause 200
+    // small pre-approval steps: reproduce-bug consumes 1600, find-root-cause 200
     const cheap: Record<string, FakeStepBehavior> = {
       ...HAPPY_SCRIPT,
       "reproduce-bug": {
@@ -437,7 +437,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
         output: "rc",
       },
     };
-    // spend 1600, then crash before the approval gate
+    // consume 1600, then crash before the approval gate
     await expect(
       executeRun(makeDeps({ ...cheap, "find-root-cause": { kind: "crash" } }), runId),
     ).rejects.toThrow("simulated worker crash");

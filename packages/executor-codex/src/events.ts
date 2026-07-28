@@ -131,8 +131,8 @@ export class CodexEventCollector {
             type: "usage",
             model: this.providerModelId,
             // codex reports input_tokens INCLUSIVE of the cached portion;
-            // split it so pricing charges cache reads separately (as zero
-            // unless the model row prices them)
+            // split it so cache reads are not counted twice in the token total
+            // (the usage meter sums input + output only)
             inputTokens: Math.max(0, (usage.input_tokens ?? 0) - cached),
             outputTokens: usage.output_tokens ?? 0,
             cacheReadTokens: cached,

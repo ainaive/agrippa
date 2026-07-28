@@ -124,4 +124,35 @@ describe.skipIf(!dbUp)("provider catalog CRUD + ref validation", () => {
     expect(badCred.status).toBe(400);
     expect((await jsonOf<{ code: string }>(badCred)).code).toBe("provider_not_in_catalog");
   });
+
+  it("rejects a model rank the rank column cannot hold", async () => {
+    // models.rank is a 32-bit integer; without the schema bound this reached
+    // Postgres and surfaced as a 500 instead of a validation error
+    const tooLarge = await admin.request("/api/v1/models", {
+      method: "POST",
+      json: {
+        provider: "anthropic",
+        providerModelId: "rank-overflow",
+        displayName: "Rank Overflow",
+        tier: "balanced",
+        rank: 2_147_483_648,
+      },
+    });
+    expect(tooLarge.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(tooLarge)).code).toBe("validation_failed");
+
+    // the boundary value itself is storable, so it must be accepted
+    const atLimit = await admin.request("/api/v1/models", {
+      method: "POST",
+      json: {
+        provider: "anthropic",
+        providerModelId: "rank-at-limit",
+        displayName: "Rank At Limit",
+        tier: "balanced",
+        rank: 2_147_483_647,
+      },
+    });
+    expect(atLimit.status).toBe(201);
+    expect((await jsonOf<{ rank: number }>(atLimit)).rank).toBe(2_147_483_647);
+  });
 });
