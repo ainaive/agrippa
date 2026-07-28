@@ -2,9 +2,8 @@
   "tabs": {
     "general": "General",
     "members": "Members",
-    "grants": "Resources",
+    "resources": "Resources",
     "repos": "Repositories",
-    "providers": "Providers",
     "quota": "Quota"
   },
   "general": {
@@ -50,6 +49,8 @@
     "baseUrl": "Base URL (optional)",
     "baseUrlHint": "Leave empty to use the provider's default endpoint",
     "add": "Add",
+    "addKey": "Add key",
+    "added": "Provider {{provider}} configured and its models granted",
     "rotate": "Replace key",
     "save": "Save",
     "cancel": "Cancel",
@@ -57,8 +58,15 @@
     "removeConfirm": "Remove the {{provider}} credential? Runs will fall back to the worker's own keys.",
     "empty": "No provider credentials. Runs use the keys configured on the platform workers.",
     "keySet": "key configured",
+    "keyNeeded": "no key (required)",
+    "envAuth": "worker env fallback",
     "rotated": "key replaced",
     "defaultEndpoint": "default endpoint"
+  },
+  "resources": {
+    "providersTitle": "Models & providers",
+    "providersHint": "Each provider groups its key and model grants in one place. Add a custom provider under Admin → Models & Providers first.",
+    "noModels": "No models registered for this provider."
   },
   "quota": {
     "costLimit": "Monthly cost limit (USD)",

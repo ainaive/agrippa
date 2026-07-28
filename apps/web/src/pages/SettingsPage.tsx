@@ -1,18 +1,17 @@
 import { PROVIDER_CATALOG } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   FolderCogIcon,
   GaugeIcon,
   GitBranchIcon,
-  KeyRoundIcon,
   type LucideIcon,
   ShieldCheckIcon,
   UsersIcon,
   XIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -41,6 +40,7 @@ import type {
   McpServerRow,
   Member,
   ModelRow,
+  ProviderCatalogRow,
   ProviderCredentialRow,
   Quota,
   SkillRow,
@@ -254,7 +254,7 @@ function MembersSection({ projectId }: { projectId: string }) {
   );
 }
 
-function GrantsSection({ projectId }: { projectId: string }) {
+function ResourcesSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation("settings");
   const queryClient = useQueryClient();
   const grants = useQuery({
@@ -268,8 +268,18 @@ function GrantsSection({ projectId }: { projectId: string }) {
     queryFn: () => api<McpServerRow[]>("/mcp-servers"),
   });
   const faberRows = useQuery({ queryKey: ["fabri"], queryFn: () => api<Faber[]>("/fabri") });
+  const credentials = useQuery({
+    queryKey: ["providerCredentials", projectId],
+    queryFn: () => api<ProviderCredentialRow[]>(`/projects/${projectId}/providers`),
+  });
+  const catalog = useQuery({
+    queryKey: ["provider-catalog"],
+    queryFn: () => api<ProviderCatalogRow[]>("/provider-catalog"),
+  });
 
   const granted = new Set((grants.data ?? []).map((g) => `${g.resourceType}:${g.resourceId}`));
+  const credByProvider = new Map((credentials.data ?? []).map((c) => [c.provider, c]));
+  const catalogByProvider = new Map((catalog.data ?? []).map((c) => [c.providerId, c]));
 
   const put = useMutation({
     mutationFn: (next: Array<{ resourceType: string; resourceId: string }>) =>
@@ -286,6 +296,67 @@ function GrantsSection({ projectId }: { projectId: string }) {
     if (!granted.has(key)) next.push({ resourceType, resourceId });
     put.mutate(next);
   };
+
+  const invalidateCreds = () =>
+    queryClient.invalidateQueries({ queryKey: ["providerCredentials", projectId] });
+  const [apiKey, setApiKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [addingProvider, setAddingProvider] = useState<string | null>(null);
+  const [rotating, setRotating] = useState<ProviderCredentialRow | null>(null);
+  const [rotateKey, setRotateKey] = useState("");
+  const [removing, setRemoving] = useState<ProviderCredentialRow | null>(null);
+
+  const addCred = useMutation({
+    mutationFn: (provider: string) =>
+      api(`/projects/${projectId}/providers`, {
+        method: "POST",
+        json: { provider, apiKey, baseUrl: baseUrl || undefined },
+      }),
+    onSuccess: (_data, provider) => {
+      toast.success(t("providers.added", { provider: providerLabel(provider) }));
+      setApiKey("");
+      setBaseUrl("");
+      setAddingProvider(null);
+      void invalidateCreds();
+    },
+    onError: toastApiError,
+  });
+  const rotate = useMutation({
+    mutationFn: (target: string) =>
+      api(`/projects/${projectId}/providers/${target}`, {
+        method: "PATCH",
+        json: { apiKey: rotateKey },
+      }),
+    onSuccess: () => {
+      setRotating(null);
+      setRotateKey("");
+      toast.success(t("providers.rotated"));
+      void invalidateCreds();
+    },
+    onError: toastApiError,
+  });
+  const removeCred = useMutation({
+    mutationFn: (target: string) =>
+      api(`/projects/${projectId}/providers/${target}`, { method: "DELETE" }),
+    onSuccess: () => invalidateCreds(),
+    onError: toastApiError,
+  });
+
+  // providers seen via models, credentials, or the catalog (active) — the union
+  // a project could configure. Each renders its credential state + model toggles.
+  const modelsByProvider = new Map<string, ModelRow[]>();
+  for (const m of modelRows.data ?? []) {
+    const list = modelsByProvider.get(m.provider) ?? [];
+    list.push(m);
+    modelsByProvider.set(m.provider, list);
+  }
+  const providerIds = [
+    ...new Set<string>([
+      ...(modelRows.data ?? []).map((m) => m.provider),
+      ...(credentials.data ?? []).map((c) => c.provider),
+      ...(catalog.data ?? []).filter((c) => c.status === "active").map((c) => c.providerId),
+    ]),
+  ].sort();
 
   const section = (
     title: string,
@@ -318,31 +389,185 @@ function GrantsSection({ projectId }: { projectId: string }) {
   );
 
   return (
-    <div className="grid gap-6 sm:grid-cols-2">
-      {section(
-        t("grants.models"),
-        "model",
-        (modelRows.data ?? []).map((m) => ({ id: m.id, label: m.displayName, detail: m.tier })),
-      )}
-      {section(
-        t("grants.skills"),
-        "skill",
-        (skillRows.data ?? []).map((s) => ({ id: s.id, label: lt(s.nameI18n), detail: s.slug })),
-      )}
-      {section(
-        t("grants.mcp"),
-        "mcp_server",
-        (mcpRows.data ?? []).map((m) => ({ id: m.id, label: lt(m.nameI18n), detail: m.transport })),
-      )}
-      {section(
-        t("grants.fabri"),
-        "faber",
-        (faberRows.data ?? []).map((f) => ({
-          id: f.id,
-          label: `${f.avatar ?? ""} ${lt(f.nameI18n)}`.trim(),
-          detail: f.slug,
-        })),
-      )}
+    <div className="space-y-6">
+      <div>
+        <h3 className="mb-2 text-sm font-semibold">{t("resources.providersTitle")}</h3>
+        <p className="mb-3 text-xs text-muted-foreground">{t("resources.providersHint")}</p>
+        <div className="space-y-3">
+          {providerIds.map((providerId) => {
+            const cat = catalogByProvider.get(providerId);
+            const cred = credByProvider.get(providerId);
+            const models = modelsByProvider.get(providerId) ?? [];
+            const authPolicy = cat?.auth ?? "env";
+            const needsKey = authPolicy === "project";
+            return (
+              <div key={providerId} className="rounded-lg border p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="font-medium">{cat?.label ?? providerId}</span>
+                    <span className="ml-2 font-mono text-xs text-muted-foreground">
+                      {providerId}
+                    </span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {cred
+                        ? t("providers.keySet")
+                        : needsKey
+                          ? t("providers.keyNeeded")
+                          : t("providers.envAuth")}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {rotating?.provider === providerId ? (
+                      <>
+                        <Input
+                          type="password"
+                          autoFocus
+                          className="h-8 w-40"
+                          value={rotateKey}
+                          onChange={(e) => setRotateKey(e.target.value)}
+                        />
+                        <Button
+                          size="sm"
+                          disabled={!rotateKey || rotate.isPending}
+                          onClick={() => rotate.mutate(providerId)}
+                        >
+                          {t("providers.save")}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            setRotating(null);
+                            setRotateKey("");
+                          }}
+                        >
+                          {t("providers.cancel")}
+                        </Button>
+                      </>
+                    ) : addingProvider === providerId ? (
+                      <>
+                        <Input
+                          type="password"
+                          autoFocus
+                          className="h-8 w-40"
+                          placeholder={t("providers.apiKey")}
+                          value={apiKey}
+                          onChange={(e) => setApiKey(e.target.value)}
+                        />
+                        <Input
+                          className="h-8 w-48"
+                          placeholder={t("providers.baseUrlHint")}
+                          value={baseUrl}
+                          onChange={(e) => setBaseUrl(e.target.value)}
+                        />
+                        <Button
+                          size="sm"
+                          disabled={!apiKey || addCred.isPending}
+                          onClick={() => addCred.mutate(providerId)}
+                        >
+                          {t("providers.save")}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            setAddingProvider(null);
+                            setApiKey("");
+                            setBaseUrl("");
+                          }}
+                        >
+                          {t("providers.cancel")}
+                        </Button>
+                      </>
+                    ) : cred ? (
+                      <>
+                        <Button size="sm" variant="ghost" onClick={() => setRotating(cred)}>
+                          {t("providers.rotate")}
+                        </Button>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label={t("providers.remove")}
+                          onClick={() => setRemoving(cred)}
+                        >
+                          <XIcon />
+                        </Button>
+                      </>
+                    ) : needsKey ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setAddingProvider(providerId)}
+                      >
+                        {t("providers.addKey")}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+                {models.length > 0 ? (
+                  <ul className="mt-2 space-y-1">
+                    {models.map((m) => (
+                      <li
+                        key={m.id}
+                        className="flex items-center justify-between rounded-md border px-3 py-1.5 text-sm"
+                      >
+                        <div>
+                          <span className="font-medium">{m.displayName}</span>
+                          <span className="ml-2 text-xs text-muted-foreground">{m.tier}</span>
+                        </div>
+                        <Switch
+                          checked={granted.has(`model:${m.id}`)}
+                          onCheckedChange={() => toggle("model", m.id)}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-xs text-muted-foreground">{t("resources.noModels")}</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="grid gap-6 sm:grid-cols-2">
+        {section(
+          t("grants.skills"),
+          "skill",
+          (skillRows.data ?? []).map((s) => ({ id: s.id, label: lt(s.nameI18n), detail: s.slug })),
+        )}
+        {section(
+          t("grants.mcp"),
+          "mcp_server",
+          (mcpRows.data ?? []).map((m) => ({
+            id: m.id,
+            label: lt(m.nameI18n),
+            detail: m.transport,
+          })),
+        )}
+        {section(
+          t("grants.fabri"),
+          "faber",
+          (faberRows.data ?? []).map((f) => ({
+            id: f.id,
+            label: `${f.avatar ?? ""} ${lt(f.nameI18n)}`.trim(),
+            detail: f.slug,
+          })),
+        )}
+      </div>
+      <ConfirmDialog
+        open={removing !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoving(null);
+        }}
+        title={t("providers.removeConfirm", { provider: providerLabel(removing?.provider ?? "") })}
+        confirmLabel={t("providers.remove")}
+        destructive
+        onConfirm={() => {
+          if (removing) removeCred.mutate(removing.provider);
+          setRemoving(null);
+        }}
+      />
     </div>
   );
 }
@@ -458,178 +683,8 @@ function ReposSection({ projectId }: { projectId: string }) {
   );
 }
 
-const PROVIDER_IDS = Object.keys(PROVIDER_CATALOG);
-
 function providerLabel(id: string): string {
   return id in PROVIDER_CATALOG ? PROVIDER_CATALOG[id as keyof typeof PROVIDER_CATALOG].label : id;
-}
-
-function ProvidersSection({ projectId }: { projectId: string }) {
-  const { t } = useTranslation("settings");
-  const queryClient = useQueryClient();
-  const credentials = useQuery({
-    queryKey: ["providerCredentials", projectId],
-    queryFn: () => api<ProviderCredentialRow[]>(`/projects/${projectId}/providers`),
-  });
-  const [provider, setProvider] = useState(PROVIDER_IDS[0] ?? "dashscope");
-  const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [rotating, setRotating] = useState<ProviderCredentialRow | null>(null);
-  const [rotateKey, setRotateKey] = useState("");
-  const [removing, setRemoving] = useState<ProviderCredentialRow | null>(null);
-
-  const invalidate = () =>
-    queryClient.invalidateQueries({ queryKey: ["providerCredentials", projectId] });
-
-  const add = useMutation({
-    mutationFn: () =>
-      api(`/projects/${projectId}/providers`, {
-        method: "POST",
-        json: { provider, apiKey, baseUrl: baseUrl || undefined },
-      }),
-    onSuccess: () => {
-      setApiKey("");
-      setBaseUrl("");
-      void invalidate();
-    },
-    onError: toastApiError,
-  });
-  const rotate = useMutation({
-    mutationFn: (target: string) =>
-      api(`/projects/${projectId}/providers/${target}`, {
-        method: "PATCH",
-        json: { apiKey: rotateKey },
-      }),
-    onSuccess: () => {
-      setRotating(null);
-      setRotateKey("");
-      toast.success(t("providers.rotated"));
-      void invalidate();
-    },
-    onError: toastApiError,
-  });
-  const remove = useMutation({
-    mutationFn: (target: string) =>
-      api(`/projects/${projectId}/providers/${target}`, { method: "DELETE" }),
-    onSuccess: () => invalidate(),
-    onError: toastApiError,
-  });
-
-  return (
-    <div className="space-y-4">
-      <div className="grid gap-2 sm:grid-cols-[180px_1fr_1fr_auto] sm:items-end">
-        <div className="space-y-1">
-          <Label>{t("providers.provider")}</Label>
-          <Select value={provider} onValueChange={setProvider}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {PROVIDER_IDS.map((id) => (
-                <SelectItem key={id} value={id}>
-                  {providerLabel(id)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="provider-key">{t("providers.apiKey")}</Label>
-          <Input
-            id="provider-key"
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="provider-base-url">{t("providers.baseUrl")}</Label>
-          <Input
-            id="provider-base-url"
-            value={baseUrl}
-            placeholder={t("providers.baseUrlHint")}
-            onChange={(e) => setBaseUrl(e.target.value)}
-          />
-        </div>
-        <Button variant="outline" disabled={!apiKey || add.isPending} onClick={() => add.mutate()}>
-          {t("providers.add")}
-        </Button>
-      </div>
-      {credentials.data?.length === 0 ? (
-        <EmptyState icon={KeyRoundIcon} title={t("providers.empty")} />
-      ) : null}
-      <ul className="space-y-0.5">
-        {(credentials.data ?? []).map((row) => (
-          <li
-            key={row.id}
-            className="-mx-2 flex items-center justify-between gap-2 rounded-md px-2 py-2 text-sm transition-colors hover:bg-muted/40"
-          >
-            <div className="min-w-0">
-              <p className="font-medium">{providerLabel(row.provider)}</p>
-              <p className="truncate text-xs text-muted-foreground">
-                {t("providers.keySet")} · {row.baseUrl ?? t("providers.defaultEndpoint")}
-              </p>
-            </div>
-            {rotating?.id === row.id ? (
-              <div className="flex items-center gap-2">
-                <Input
-                  type="password"
-                  autoFocus
-                  className="h-8 w-44"
-                  value={rotateKey}
-                  onChange={(e) => setRotateKey(e.target.value)}
-                />
-                <Button
-                  size="sm"
-                  disabled={!rotateKey || rotate.isPending}
-                  onClick={() => rotate.mutate(row.provider)}
-                >
-                  {t("providers.save")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    setRotating(null);
-                    setRotateKey("");
-                  }}
-                >
-                  {t("providers.cancel")}
-                </Button>
-              </div>
-            ) : (
-              <div className="flex shrink-0 items-center gap-1">
-                <Button size="sm" variant="ghost" onClick={() => setRotating(row)}>
-                  {t("providers.rotate")}
-                </Button>
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={t("providers.remove")}
-                  onClick={() => setRemoving(row)}
-                >
-                  <XIcon />
-                </Button>
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
-      <ConfirmDialog
-        open={removing !== null}
-        onOpenChange={(open) => {
-          if (!open) setRemoving(null);
-        }}
-        title={t("providers.removeConfirm", { provider: providerLabel(removing?.provider ?? "") })}
-        confirmLabel={t("providers.remove")}
-        destructive
-        onConfirm={() => {
-          if (removing) remove.mutate(removing.provider);
-          setRemoving(null);
-        }}
-      />
-    </div>
-  );
 }
 
 function QuotaSection({ projectId }: { projectId: string }) {
@@ -698,16 +753,21 @@ function QuotaSection({ projectId }: { projectId: string }) {
 const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
   { key: "general", icon: FolderCogIcon },
   { key: "members", icon: UsersIcon },
-  { key: "grants", icon: ShieldCheckIcon },
+  { key: "resources", icon: ShieldCheckIcon },
   { key: "repos", icon: GitBranchIcon },
-  { key: "providers", icon: KeyRoundIcon },
   { key: "quota", icon: GaugeIcon },
 ];
 
 export function SettingsPage() {
   const { t } = useTranslation(["settings", "common"]);
   const { projectId } = useParams({ strict: false }) as { projectId: string };
-  const [section, setSection] = useState("general");
+  const { tab } = useSearch({ strict: false }) as { tab?: string };
+  const validTabs = SECTIONS.map((s) => s.key);
+  const [section, setSection] = useState(tab && validTabs.includes(tab) ? tab : "general");
+  // a preflight "go configure" link may change ?tab while this page is mounted
+  useEffect(() => {
+    if (tab && validTabs.includes(tab) && tab !== section) setSection(tab);
+  }, [tab, validTabs, section]);
 
   return (
     <div className="space-y-6">
@@ -735,9 +795,8 @@ export function SettingsPage() {
           <CardContent>
             {section === "general" && <GeneralSection projectId={projectId} />}
             {section === "members" && <MembersSection projectId={projectId} />}
-            {section === "grants" && <GrantsSection projectId={projectId} />}
+            {section === "resources" && <ResourcesSection projectId={projectId} />}
             {section === "repos" && <ReposSection projectId={projectId} />}
-            {section === "providers" && <ProvidersSection projectId={projectId} />}
             {section === "quota" && <QuotaSection projectId={projectId} />}
           </CardContent>
         </Card>

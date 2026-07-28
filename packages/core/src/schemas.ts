@@ -92,6 +92,28 @@ export const modelCreateSchema = z.object({
   outputCostPerMtok: z.number().nonnegative().optional(),
 });
 
+/** Per-wire-protocol default endpoints; absent = the executor's native endpoint. */
+export const providerBaseUrlsSchema = z
+  .object({ anthropic: z.url().optional(), openai: z.url().optional() })
+  .default({});
+
+export const providerCatalogCreateSchema = z.object({
+  providerId: z.string().regex(/^[a-z][a-z0-9-]*$/, "lowercase letters, digits, hyphens"),
+  label: z.string().min(1),
+  baseUrls: providerBaseUrlsSchema,
+  auth: z.enum(["project", "env"]).default("env"),
+  /** Host allowlist pins (".example.com" suffix or exact host); null = any https host. */
+  baseUrlHosts: z.array(z.string().min(1)).nullable().optional(),
+});
+
+export const providerCatalogUpdateSchema = z.object({
+  label: z.string().min(1).optional(),
+  baseUrls: providerBaseUrlsSchema.optional(),
+  auth: z.enum(["project", "env"]).optional(),
+  baseUrlHosts: z.array(z.string().min(1)).nullable().optional(),
+  status: z.enum(["active", "disabled"]).optional(),
+});
+
 export const modelUpdateSchema = z.object({
   displayName: z.string().min(1).optional(),
   tier: z.enum(MODEL_TIERS).optional(),

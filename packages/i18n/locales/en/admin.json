@@ -49,7 +49,29 @@
     "authTokenHint": "Write-only: stored encrypted and never shown again. Leave empty to keep the current token.",
     "clearAuth": "Remove the stored token",
     "active": "Active",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "newProvider": "New provider",
+    "editProvider": "Edit provider",
+    "providerId": "Provider id",
+    "providerIdHint": "lowercase letters, digits, hyphens (e.g. deepseek)",
+    "label": "Label",
+    "authPolicy": "Auth policy",
+    "authProject": "Project key (required)",
+    "authEnv": "Worker env (fallback)",
+    "baseUrls": "Default endpoints",
+    "baseUrlAnthropic": "Anthropic-compatible endpoint",
+    "baseUrlOpenai": "OpenAI-compatible endpoint",
+    "baseUrlHosts": "Host allowlist",
+    "baseUrlHostsHint": "one host per line; leading dot = suffix match (e.g. .aliyuncs.com)",
+    "builtin": "builtin",
+    "custom": "custom"
+  },
+  "providers": {
+    "title": "Providers",
+    "hint": "Register custom model providers (DeepSeek, self-hosted gateways) so they can be configured per-project. Builtins are immutable.",
+    "empty": "No custom providers registered.",
+    "endpoints": "endpoints",
+    "none": "native"
   },
   "mcp": {
     "empty": "No MCP servers registered.",

@@ -20,5 +20,16 @@
     "agentFaber": "Persona",
     "agentExecutor": "Engine",
     "agentUnavailable": "not available in this deployment"
+  },
+  "preflight": {
+    "title": "Readiness",
+    "ready": "Ready to submit",
+    "notReady": "Not ready — fix the items below",
+    "models": "Models",
+    "provider_credential": "Provider key",
+    "skills": "Skills",
+    "mcp": "MCP servers",
+    "repo": "Repository",
+    "configure": "Configure"
   }
 }

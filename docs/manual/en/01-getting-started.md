@@ -57,9 +57,11 @@ Navigation lives in the **left sidebar**. At its top sits the **project switcher
 
 ## Initial setup checklist
 
-1. **Create a project** — you'll be prompted on first login. Projects scope everything: members, resources, budgets, repositories.
+1. **Create a project** — you'll be prompted on first login. Projects scope everything: members, resources, budgets, repositories. A new project is **auto-granted every built-in model, skill, and Faber**, so the resource grants you'd otherwise toggle on by hand are already in place.
 2. **Connect a repository** (Project → Settings → Repositories): URL, default branch, and an access token for private repos. Tokens are encrypted and never displayed again.
-3. **Grant resources** (Project → Settings → Resources): toggle on the **models** the project may use (at least one per tier you need) and any **skills**/**MCP servers** its task types require. Submission fails with a clear error if a required resource isn't granted.
-4. **Set a quota** (Project → Settings → Quota), optionally: monthly cost/token limits with a hard stop.
-5. **Invite teammates** (Project → Settings → Members) by email — they must have signed up first. Roles: admin / member / viewer.
-6. **Submit your first task** from the Catalog tab — try *Status Report* against your connected repo.
+3. **Add a provider key if a task needs one** (Project → Settings → Resources): each provider groups its key and model grants in one place — e.g. an Aliyun Bailian/DashScope key for Qwen models. Adding a key **also grants that provider's built-in models automatically**.
+4. **Need a custom provider?** (Admin → Models & Providers): an org admin registers a custom provider (DeepSeek, a self-hosted gateway, …) with its Anthropic- or OpenAI-compatible endpoint and a host allowlist, then registers models under it. Projects then configure a key for it in Resources just like a builtin.
+5. **Fine-tune grants only if needed** (Project → Settings → Resources): built-ins are already on; toggle off anything you don't want. The submit summary shows a **readiness checklist** (models, key, skills, repo) before you submit — each failing item links straight to the settings tab to fix.
+6. **Set a quota** (Project → Settings → Quota), optionally: monthly cost/token limits with a hard stop.
+7. **Invite teammates** (Project → Settings → Members) by email — they must have signed up first. Roles: admin / member / viewer.
+8. **Submit your first task** from the Catalog tab — try *Status Report* against your connected repo.
