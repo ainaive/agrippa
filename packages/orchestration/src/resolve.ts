@@ -2,17 +2,22 @@ import {
   EXECUTOR_CATALOG,
   EXECUTOR_DEFAULT_SENTINEL,
   type ExecutorCatalogEntry,
+  executorProviders,
   isCredentialGatedExecutor,
   isExecutorId,
   type ModelTier,
+  PROVIDER_CATALOG,
+  type ProviderCatalog,
   providerAuthPolicy,
 } from "@agrippa/core";
 import {
   type Db,
   fabri,
+  loadProviderCatalog,
   mcpServers,
   models,
   projectResourceGrants,
+  projects,
   providerCredentials,
   repoConnections,
   skills,
@@ -157,8 +162,16 @@ export function resolveSlotModels(args: {
   roles: ReadonlySet<string>;
   providers: readonly string[] | "*";
   credentialed: ReadonlySet<string>;
+  /**
+   * Merged provider catalog (builtins + org customs). Drives auth-policy for
+   * each candidate provider — a custom provider with auth "project" requires
+   * a credential the way dashscope does. Defaults to the builtin code catalog
+   * for the unit-test / resolveModelRoles back-compat path.
+   */
+  catalog?: ProviderCatalog;
 }): ModelResolution {
   const { slotId, granted, roleSpecs, roles, providers, credentialed } = args;
+  const catalog = args.catalog ?? PROVIDER_CATALOG;
   if (roles.size === 0) return {};
   if (granted.length === 0) {
     throw new SubmitError("no_models_granted", "No models are granted to this project");
@@ -183,7 +196,7 @@ export function resolveSlotModels(args: {
       roles,
     );
     const needsCredential =
-      providerAuthPolicy(provider) === "project" && !credentialed.has(provider);
+      providerAuthPolicy(provider, catalog) === "project" && !credentialed.has(provider);
     if ("resolution" in result && !needsCredential) {
       const totalCost = Object.values(result.resolution).reduce(
         (sum, entry) => sum + entry.inputCostPerMtok,
@@ -310,9 +323,15 @@ export async function assertResolutionCredentialed(
   executorId: string,
 ): Promise<void> {
   const required = new Set<string>();
+  const [projectRow] = await db
+    .select({ orgId: projects.orgId })
+    .from(projects)
+    .where(eq(projects.id, projectId));
+  if (!projectRow) throw new SubmitError("project_not_found", `Project '${projectId}' not found`);
+  const catalog = await loadProviderCatalog(db, projectRow.orgId);
   const collect = (entries: ModelResolutionEntry[]): void => {
     for (const entry of entries) {
-      if (providerAuthPolicy(entry.provider) === "project") required.add(entry.provider);
+      if (providerAuthPolicy(entry.provider, catalog) === "project") required.add(entry.provider);
     }
   };
   const values = Object.values(modelResolution ?? {});
@@ -395,6 +414,14 @@ export async function resolveAgentBindings(
     .from(providerCredentials)
     .where(eq(providerCredentials.projectId, projectId));
   const credentialed = new Set(credentialRows.map((r) => r.provider));
+  // merged provider catalog: builtins + this org's custom providers. Drives
+  // protocol-derived candidate providers + auth-policy for customs.
+  const [projectRow] = await db
+    .select({ orgId: projects.orgId })
+    .from(projects)
+    .where(eq(projects.id, projectId));
+  if (!projectRow) throw new SubmitError("project_not_found", `Project '${projectId}' not found`);
+  const catalog = await loadProviderCatalog(db, projectRow.orgId);
   const roleSets = slotRoleSets(compiled);
   const bindings: AgentBindingResolution["bindings"] = {};
   const modelResolution: AgentBindingResolution["modelResolution"] = {};
@@ -492,8 +519,12 @@ export async function resolveAgentBindings(
       granted: grantedModels,
       roleSpecs: compiled.spec.models.roles,
       roles: roleSets.get(slotId) ?? new Set(),
-      providers: entry?.providers ?? "*",
+      // providers derived from the executor's wire protocol against the merged
+      // catalog (was: a hardcoded list) — the change that lets a custom
+      // Anthropic-compatible provider be resolved by the claude executor.
+      providers: executorProviders(entry ?? undefined, catalog),
       credentialed,
+      catalog,
     });
     bindings[slotId] = { faberId, executorId };
   }
