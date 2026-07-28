@@ -5,16 +5,7 @@ import { Topbar } from "@/components/shell/Topbar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { MeContext, useMeQuery } from "../features/me";
-
-/**
- * The sidebar writes its state to this cookie, but unlike shadcn's Next.js
- * starter — where the server reads it into `defaultOpen` — nothing in this
- * SPA read it back, so a collapse choice was discarded on every reload.
- */
-function sidebarDefaultOpen(): boolean {
-  const match = document.cookie.match(/(?:^|;\s*)sidebar_state=(true|false)/);
-  return match ? match[1] === "true" : true;
-}
+import { sidebarStateFromCookie } from "../lib/sidebar-state";
 
 export function Shell() {
   const { data: me, isLoading, isError } = useMeQuery();
@@ -35,7 +26,7 @@ export function Shell() {
 
   return (
     <MeContext.Provider value={me}>
-      <SidebarProvider defaultOpen={sidebarDefaultOpen()}>
+      <SidebarProvider defaultOpen={sidebarStateFromCookie(document.cookie)}>
         <AppSidebar currentProjectId={params.projectId ?? null} />
         <SidebarInset>
           <Topbar />

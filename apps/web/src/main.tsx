@@ -24,10 +24,15 @@ const queryClient = new QueryClient({
 // Radix modal layers (the retry confirm dialog, dropdown menus…) set
 // `pointer-events: none` on <body> while open; a navigation that unmounts one
 // mid-exit-animation can leave that lock behind (radix-ui unmount-during-close),
-// after which every click in the app is a silent no-op. Clear any stale lock
-// once a navigation settles.
+// after which every click in the app is a silent no-op. Clear the lock once a
+// navigation settles — but only when no layer remains open: the shell persists
+// across routes, so browser back/forward can resolve with e.g. the user menu
+// still up, and its lock is legitimate (Radix won't reapply a cleared one).
+// Open Radix layers render portal content with these roles and unmount on
+// close, so an empty query is a reliable staleness signal.
 router.subscribe("onResolved", () => {
-  if (document.body.style.pointerEvents === "none") {
+  const openLayer = document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]');
+  if (!openLayer && document.body.style.pointerEvents === "none") {
     document.body.style.pointerEvents = "";
   }
 });

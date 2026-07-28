@@ -53,7 +53,7 @@ Auth flows, RBAC allow/deny matrix per role × endpoint class, transactional tas
 
 ### Frontend
 
-- No automated frontend tests yet (the `TaskParamsForm` and run-timeline reducer component tests described in earlier plans are not implemented — a known gap).
+- No automated frontend component tests yet (the `TaskParamsForm` and run-timeline reducer component tests described in earlier plans are not implemented — a known gap). Pure SPA helpers are unit-tested where extraction is cheap (`lib/sidebar-state.test.ts` — cookie parsing).
 - Full-browser E2E is deferred as a manual scripted walkthrough (automating with Playwright is a stretch goal, not a gate).
 
 ### Cross-cutting guards
