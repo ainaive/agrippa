@@ -38,8 +38,10 @@ Error stream (probed live: a model id the auth mode doesn't serve):
 
 Notes:
 
-- `input_tokens` **includes** `cached_input_tokens`; the mapper splits them so
-  cache reads are not counted twice in the token total.
+- `input_tokens` **includes** `cached_input_tokens`; the mapper subtracts the
+  cached portion and reports it as `cacheReadTokens`. The usage meter counts
+  input + output only, so cached input is tracked but never charged against a
+  run's token limit.
 - `thread_id` is the resume handle (`codex exec resume <id>`), used only for
   retry/crash-resume of the same step per ADR-0005.
 - Unknown event/item kinds (reasoning, web_search, todo_list…) are ignored.

@@ -433,6 +433,16 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(await executeRun(makeDeps(script, { mcpServers: ["github"] }), runId)).toBe("failed");
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
     expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
+
+    // and the step that blew the limit is closed out — a failed run must not
+    // leave a row reading 'running' forever in the timeline
+    const [openPr] = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "open-pr")));
+    expect(openPr?.status).toBe("failed");
+    expect(openPr?.finishedAt).not.toBeNull();
+    expect((openPr?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
   });
 
   it("hard-stop project quota aborts mid-run", async () => {
