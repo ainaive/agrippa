@@ -451,4 +451,19 @@ outputs:
 `;
     expect(issuesOf(source).join()).toContain("version");
   });
+
+  it("compiles a v3 single-agent template", () => {
+    const source = readFileSync(path.join(TEMPLATES_DIR, "pm/status-report.yaml"), "utf8");
+    const { compiled } = compileTemplate(source, { resolveFile });
+    expect(compiled.metadata.slug).toBe("pm.status-report");
+    expect(compiled.spec.agents).toHaveProperty("main");
+    expect(compiled.spec.models.roles).toHaveProperty("analysis");
+    expect(compiled.spec.outputs.artifacts).toHaveLength(2);
+  });
+
+  it("upgradeCompiledTemplate is idempotent on v3-compiled output", () => {
+    const source = readFileSync(path.join(TEMPLATES_DIR, "pm/status-report.yaml"), "utf8");
+    const { compiled } = compileTemplate(source, { resolveFile });
+    expect(upgradeCompiledTemplate(compiled)).toBe(compiled);
+  });
 });
