@@ -379,6 +379,70 @@ export function flattenPhases(
   return flat;
 }
 
+// ── agrippa/v3 flat authoring format (ADR-0015) ───────────────────────────────
+
+/**
+ * v3 flat authoring format (GitHub-Actions-style). Both single-agent
+ * (`faber`) and multi-agent (`slots`) templates compile to the same v2 IR.
+ * v3 is source-only sugar — the compiler normalizes it into CompiledTemplate,
+ * so the engine, API, and DB are unchanged. v1/v2 stay accepted.
+ */
+export const templateDocV3Schema = z
+  .object({
+    version: z.literal(3),
+    slug: templateSlugSchema,
+    scenario: z.string().regex(/^[a-z][a-z0-9-]*$/),
+    name: localizedTextSchema,
+    description: localizedTextSchema,
+
+    // single-agent mode (was spec.faber)
+    faber: idSchema.optional(),
+
+    // multi-agent mode (was spec.agents)
+    slots: z.record(idSchema, agentSlotSchema).optional(),
+
+    inputs: z.array(templateInputSchema).default([]),
+    workspace: z
+      .object({
+        repo: z.string(),
+        ref: z.string().optional(),
+        access: z.enum(["readOnly", "readWrite"]).default("readOnly"),
+      })
+      .optional(),
+
+    // flat resource refs (were spec.resources.*)
+    skills: z.array(skillRefSchema).default([]),
+    mcpServers: z.array(mcpRefSchema).default([]),
+    subagents: z.array(subagentSchema).default([]),
+
+    // flat model roles (spec.models.roles wrapper removed)
+    models: z.record(z.string(), modelRoleSchema),
+    allowProjectOverride: z.boolean().default(true),
+
+    // unified flow: plain phases and loop nodes, in declaration order
+    phases: z.array(flowNodeSchema).min(1),
+
+    // singular budget (was spec.budgets)
+    budget: budgetsSchema.default({ perPhase: {} }),
+
+    // flat outputs (spec.outputs.artifacts wrapper removed)
+    outputs: z
+      .array(
+        z.object({
+          key: idSchema,
+          kind: z.enum(ARTIFACT_KINDS),
+          required: z.boolean().default(false),
+        }),
+      )
+      .min(1),
+    summary: z.object({ from: idSchema }).optional(),
+  })
+  .refine((doc) => (doc.faber !== undefined) !== (doc.slots !== undefined), {
+    message: "must declare exactly one of 'faber' (single-agent) or 'slots' (multi-agent)",
+  });
+
+export type TemplateDocV3 = z.infer<typeof templateDocV3Schema>;
+
 /** "45m" | "24h" | "2d" → minutes */
 export function durationToMinutes(duration: string): number {
   const value = Number(duration.slice(0, -1));
