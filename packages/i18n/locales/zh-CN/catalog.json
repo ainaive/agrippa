@@ -20,5 +20,16 @@
     "agentFaber": "人设",
     "agentExecutor": "引擎",
     "agentUnavailable": "当前部署不可用"
+  },
+  "preflight": {
+    "title": "就绪检查",
+    "ready": "可以提交",
+    "notReady": "尚未就绪——请先修复以下项",
+    "models": "模型",
+    "provider_credential": "供应商密钥",
+    "skills": "技能",
+    "mcp": "MCP 服务",
+    "repo": "代码仓库",
+    "configure": "去配置"
   }
 }

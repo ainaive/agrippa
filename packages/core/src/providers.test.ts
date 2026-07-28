@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { providerServesProtocol, validateProviderBaseUrl } from "./providers";
+import {
+  buildProviderCatalog,
+  executorResolvableProviders,
+  providerAuthPolicy,
+  providerServesProtocol,
+  validateProviderBaseUrl,
+} from "./providers";
 
 describe("validateProviderBaseUrl", () => {
   it("accepts the documented regional override hosts", () => {
@@ -60,9 +66,62 @@ describe("providerServesProtocol", () => {
     expect(providerServesProtocol("dashscope", "openai")).toBe(false);
   });
 
-  it("places no restriction on native or unknown providers", () => {
+  it("native providers serve their own protocol only; unknowns serve any", () => {
     expect(providerServesProtocol("anthropic", "anthropic")).toBe(true);
     expect(providerServesProtocol("openai", "openai")).toBe(true);
+    // a native provider does NOT serve the other family's protocol
+    expect(providerServesProtocol("anthropic", "openai")).toBe(false);
+    expect(providerServesProtocol("openai", "anthropic")).toBe(false);
+    // unknown providers (executor-runtime back-compat) serve any
     expect(providerServesProtocol("some-gateway", "openai")).toBe(true);
+  });
+});
+
+describe("buildProviderCatalog + executorResolvableProviders", () => {
+  const catalog = buildProviderCatalog([
+    { providerId: "anthropic", label: "Anthropic", baseUrls: {}, auth: "env" },
+    { providerId: "openai", label: "OpenAI", baseUrls: {}, auth: "env" },
+    {
+      providerId: "dashscope",
+      label: "DashScope",
+      baseUrls: { anthropic: "https://dashscope.aliyuncs.com/apps/anthropic" },
+      auth: "project",
+      baseUrlHosts: ["dashscope.aliyuncs.com"],
+    },
+    {
+      providerId: "deepseek",
+      label: "DeepSeek",
+      baseUrls: { anthropic: "https://api.deepseek.com/anthropic" },
+      auth: "project",
+    },
+    {
+      providerId: "disabled-one",
+      label: "Disabled",
+      baseUrls: {},
+      auth: "env",
+      status: "disabled",
+    },
+  ]);
+
+  it("skips disabled rows", () => {
+    expect(catalog["disabled-one"]).toBeUndefined();
+    expect(catalog["deepseek"]).toBeDefined();
+  });
+
+  it("derives claude (anthropic) candidates: anthropic + dashscope + deepseek, not openai", () => {
+    expect(executorResolvableProviders(catalog, "anthropic").sort()).toEqual([
+      "anthropic",
+      "dashscope",
+      "deepseek",
+    ]);
+  });
+
+  it("derives codex (openai) candidates: openai only", () => {
+    expect(executorResolvableProviders(catalog, "openai")).toEqual(["openai"]);
+  });
+
+  it("custom provider auth policy comes from the catalog row", () => {
+    expect(providerAuthPolicy("deepseek", catalog)).toBe("project");
+    expect(providerAuthPolicy("openai", catalog)).toBe("env");
   });
 });

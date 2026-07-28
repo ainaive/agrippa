@@ -276,6 +276,51 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
     expect(body.issues.length).toBeGreaterThan(0);
   });
 
+  it("new projects auto-grant every built-in resource (models, skills, fabri)", async () => {
+    const res = await admin.request("/api/v1/projects", {
+      method: "POST",
+      json: { slug: "auto-grants", name: "Auto Grants" },
+    });
+    expect(res.status).toBe(201);
+    const { id: newProjectId } = await jsonOf<{ id: string }>(res);
+
+    const models = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
+    const skills = await jsonOf<Array<{ id: string; slug: string }>>(
+      await admin.request("/api/v1/skills"),
+    );
+    const fabri = await jsonOf<Array<{ id: string; slug: string }>>(
+      await admin.request("/api/v1/fabri"),
+    );
+    const grants = await jsonOf<Array<{ resourceType: string; resourceId: string }>>(
+      await admin.request(`/api/v1/projects/${newProjectId}/grants`),
+    );
+
+    const grantedKeys = new Set(grants.map((g) => `${g.resourceType}:${g.resourceId}`));
+    // every built-in model is granted (no org-scoped models exist in this suite)
+    for (const m of models) {
+      expect(grantedKeys.has(`model:${m.id}`)).toBe(true);
+    }
+    // every built-in skill is granted
+    for (const s of skills) {
+      if (s.slug.startsWith("builtin/")) {
+        expect(grantedKeys.has(`skill:${s.id}`)).toBe(true);
+      }
+    }
+    // the four built-in fabri are granted; an org-scoped faber ("scribe" from
+    // the earlier registry-write test) is deliberately NOT — org-scoped
+    // resources stay an explicit opt-in
+    const builtinFaber = fabri.filter((f) =>
+      ["navigator", "forge", "sentinel", "arbiter"].includes(f.slug),
+    );
+    for (const f of builtinFaber) {
+      expect(grantedKeys.has(`faber:${f.id}`)).toBe(true);
+    }
+    const scribe = fabri.find((f) => f.slug === "scribe");
+    if (scribe) expect(grantedKeys.has(`faber:${scribe.id}`)).toBe(false);
+    // mcp servers are never auto-granted (org-scoped config + optional secret)
+    expect(grants.filter((g) => g.resourceType === "mcp_server")).toHaveLength(0);
+  });
+
   it("grants: admin replaces the set; unknown resource ids rejected; member cannot write", async () => {
     const modelList = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/models"));
     expect(modelList.length).toBeGreaterThan(0);

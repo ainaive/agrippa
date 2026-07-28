@@ -2,6 +2,7 @@ import {
   type CheckpointStoredResponse,
   isCredentialGatedExecutor,
   isTerminalRunStatus,
+  type ProviderCatalog,
   providerAuthPolicy,
   type Question,
   questionsArtifactSchema,
@@ -15,6 +16,7 @@ import {
   artifacts,
   checkpoints,
   fabri,
+  loadProviderCatalog,
   projectQuotas,
   projects,
   runEvents,
@@ -174,6 +176,11 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
   const [project] = await db.select().from(projects).where(eq(projects.id, run.projectId));
   if (!task || !project) throw new Error(`run ${runId}: task/project missing`);
 
+  // merged provider catalog (builtins + this org's customs) — drives runtime
+  // auth-policy for custom providers (a custom with auth "project" must keep
+  // its credential the way dashscope does).
+  const catalog = await loadProviderCatalog(db, project.orgId);
+
   // Per-slot bindings: stored on the run at submit (agrippa/v2); slots without
   // a stored binding — every run submitted before slots existed — fall back to
   // the run's primary faber/executor, which preserves v1 behavior exactly.
@@ -207,7 +214,7 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
       const envAuth = binding.executor.envAuthProviders;
       if (envAuth === undefined) continue; // fake/demo/custom executors: no gating
       for (const entry of slotResolutionEntries(run.modelResolution, slot)) {
-        if (providerAuthPolicy(entry.provider) !== "env") continue; // project-policy → per-step check
+        if (providerAuthPolicy(entry.provider, catalog) !== "env") continue; // project-policy → per-step check
         if (envAuth.includes(entry.provider)) continue;
         const hasCredential = await deps.resources.hasProviderCredential(
           run.projectId,
@@ -223,11 +230,18 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
     }
   }
 
-  const engine = new RunEngine(deps, run, template, bindings, {
-    orgId: task.orgId,
-    taskTitle: task.title,
-    project: { id: project.id, slug: project.slug, name: project.name },
-  });
+  const engine = new RunEngine(
+    deps,
+    run,
+    template,
+    bindings,
+    {
+      orgId: task.orgId,
+      taskTitle: task.title,
+      project: { id: project.id, slug: project.slug, name: project.name },
+    },
+    catalog,
+  );
   return await engine.execute();
 }
 
@@ -265,6 +279,7 @@ class RunEngine {
       taskTitle: string;
       project: { id: string; slug: string; name: string };
     },
+    private readonly catalog: ProviderCatalog,
   ) {
     for (const entry of this.allResolutionEntries()) {
       this.modelPrices.set(entry.providerModelId, {
@@ -1466,12 +1481,15 @@ class RunEngine {
       throw err;
     }
     if (!cred) {
-      const needsCredential = providerAuthPolicy(provider) === "project" || !opts.envFallback;
+      const needsCredential =
+        providerAuthPolicy(provider, this.catalog) === "project" || !opts.envFallback;
       if (opts.gated && needsCredential) {
         throw new RunFailure(
           "provider_credential_required",
           `provider '${provider}' requires a project credential that no longer exists` +
-            (providerAuthPolicy(provider) === "env" ? " (this worker has no env auth for it)" : ""),
+            (providerAuthPolicy(provider, this.catalog) === "env"
+              ? " (this worker has no env auth for it)"
+              : ""),
           "failed",
         );
       }

@@ -89,6 +89,21 @@ export type TaskTypeDetail = {
   fabriOptions: FaberOption[];
 };
 
+export type PreflightCheckKey = "models" | "provider_credential" | "skills" | "mcp" | "repo";
+
+export type PreflightCheck = {
+  key: PreflightCheckKey;
+  ok: boolean;
+  detail: string;
+  /** settings tab to deep-link to when not ok */
+  fixPath: "resources" | "repos" | null;
+};
+
+export type Preflight = {
+  ready: boolean;
+  checks: PreflightCheck[];
+};
+
 export type TaskRow = {
   id: string;
   title: string;
@@ -255,6 +270,18 @@ export type ModelRow = {
   inputCostPerMtok: string | null;
   outputCostPerMtok: string | null;
   status: string;
+};
+
+export type ProviderCatalogRow = {
+  id: string;
+  orgId: string | null; // null = builtin
+  providerId: string;
+  label: string;
+  baseUrls: { anthropic?: string; openai?: string };
+  auth: "project" | "env";
+  baseUrlHosts: string[] | null;
+  status: string;
+  createdAt: string;
 };
 
 export type ProviderCredentialRow = {

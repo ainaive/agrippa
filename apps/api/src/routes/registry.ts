@@ -6,20 +6,24 @@ import {
   mcpServerUpdateSchema,
   modelCreateSchema,
   modelUpdateSchema,
+  providerCatalogCreateSchema,
+  providerCatalogUpdateSchema,
   skillCreateSchema,
   skillVersionCreateSchema,
 } from "@agrippa/core";
 import {
   encryptSecret,
   fabri,
+  loadProviderCatalog,
   loadSecretKey,
   mcpServers,
   models,
+  providerCatalog,
   secrets,
   skills,
   skillVersions,
 } from "@agrippa/db";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, or, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
@@ -62,6 +66,17 @@ export const registryRoutes = new Hono<AppEnv>()
   )
   .post("/models", requireOrgAdmin, validate("json", modelCreateSchema), async (c) => {
     const input = c.req.valid("json");
+    // the provider must be a registered catalog entry (builtin or org custom)
+    // — closes the free-text gap so a model can't be registered under a typo'd
+    // provider that would never resolve
+    const catalog = await loadProviderCatalog(c.var.db, c.var.user.orgId);
+    if (!catalog[input.provider]) {
+      throw new AppError(
+        "provider_not_in_catalog",
+        400,
+        `Provider '${input.provider}' is not registered in the provider catalog`,
+      );
+    }
     const [existing] = await c.var.db
       .select()
       .from(models)
@@ -95,6 +110,111 @@ export const registryRoutes = new Hono<AppEnv>()
     if (!updated) throw AppError.notFound("Model");
     await audit(c, { action: "model.update", resourceType: "model", resourceId: updated.id });
     return c.json(updated);
+  })
+
+  // ── Provider catalog (org_admin-managed customs; builtins seeded) ──────────
+  .get("/provider-catalog", async (c) => {
+    const rows = await c.var.db
+      .select()
+      .from(providerCatalog)
+      .where(or(eq(providerCatalog.orgId, c.var.user.orgId), sql`${providerCatalog.orgId} is null`))
+      .orderBy(asc(providerCatalog.providerId));
+    return c.json(rows);
+  })
+  .post(
+    "/provider-catalog",
+    requireOrgAdmin,
+    validate("json", providerCatalogCreateSchema),
+    async (c) => {
+      const input = c.req.valid("json");
+      const db = c.var.db;
+      const [existing] = await db
+        .select({ id: providerCatalog.id })
+        .from(providerCatalog)
+        .where(eq(providerCatalog.providerId, input.providerId));
+      if (existing) {
+        throw AppError.conflict("provider_exists", "Provider id already exists");
+      }
+      const [created] = await db
+        .insert(providerCatalog)
+        .values({
+          orgId: c.var.user.orgId,
+          providerId: input.providerId,
+          label: input.label,
+          baseUrls: input.baseUrls,
+          auth: input.auth,
+          baseUrlHosts: input.baseUrlHosts ?? null,
+        })
+        .returning();
+      await audit(c, {
+        action: "provider_catalog.create",
+        resourceType: "provider_catalog",
+        resourceId: created?.id,
+        payload: { providerId: input.providerId },
+      });
+      return c.json(created, 201);
+    },
+  )
+  .patch(
+    "/provider-catalog/:providerId",
+    requireOrgAdmin,
+    validate("json", providerCatalogUpdateSchema),
+    async (c) => {
+      const providerId = c.req.param("providerId");
+      const input = c.req.valid("json");
+      const db = c.var.db;
+      // builtins (org_id NULL) are immutable — edit the org-scoped custom only
+      const [row] = await db
+        .select()
+        .from(providerCatalog)
+        .where(
+          and(
+            eq(providerCatalog.providerId, providerId),
+            eq(providerCatalog.orgId, c.var.user.orgId),
+          ),
+        );
+      if (!row) throw AppError.notFound("Provider (or is a builtin and immutable)");
+      const [updated] = await db
+        .update(providerCatalog)
+        .set({
+          ...(input.label !== undefined && { label: input.label }),
+          ...(input.baseUrls !== undefined && { baseUrls: input.baseUrls }),
+          ...(input.auth !== undefined && { auth: input.auth }),
+          ...(input.baseUrlHosts !== undefined && { baseUrlHosts: input.baseUrlHosts }),
+          ...(input.status !== undefined && { status: input.status }),
+        })
+        .where(eq(providerCatalog.id, row.id))
+        .returning();
+      await audit(c, {
+        action: "provider_catalog.update",
+        resourceType: "provider_catalog",
+        resourceId: row.id,
+        payload: { providerId },
+      });
+      return c.json(updated);
+    },
+  )
+  .delete("/provider-catalog/:providerId", requireOrgAdmin, async (c) => {
+    const providerId = c.req.param("providerId");
+    const db = c.var.db;
+    const [row] = await db
+      .select()
+      .from(providerCatalog)
+      .where(
+        and(
+          eq(providerCatalog.providerId, providerId),
+          eq(providerCatalog.orgId, c.var.user.orgId),
+        ),
+      );
+    if (!row) throw AppError.notFound("Provider (or is a builtin and non-deletable)");
+    await db.delete(providerCatalog).where(eq(providerCatalog.id, row.id));
+    await audit(c, {
+      action: "provider_catalog.remove",
+      resourceType: "provider_catalog",
+      resourceId: row.id,
+      payload: { providerId },
+    });
+    return c.json({ removed: true });
   })
 
   // ── MCP servers (secrets write-only) ────────────────────────────────────────

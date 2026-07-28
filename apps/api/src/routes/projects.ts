@@ -16,6 +16,9 @@ import {
   auditLogs,
   encryptSecret,
   fabri,
+  grantBuiltinResources,
+  grantProviderBuiltinModels,
+  loadProviderCatalog,
   loadSecretKey,
   mcpServers,
   models,
@@ -28,12 +31,16 @@ import {
   repoConnections,
   secrets,
   skills,
+  taskTypes,
+  templateVersions,
   users,
 } from "@agrippa/db";
+import { preflightSubmit, upgradeCompiledTemplate } from "@agrippa/orchestration";
 import { and, count, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
+import { liveExecutorIds } from "../lib/executors";
 import { projectUsage } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { requireProjectRole } from "../middleware/rbac";
@@ -88,6 +95,11 @@ export const projectRoutes = new Hono<AppEnv>()
       await tx
         .insert(projectMembers)
         .values({ projectId: created.id, userId: user.id, role: "admin" });
+      // Convention over Configuration: a new project starts authorized to use
+      // every built-in resource (active models, published skills, active fabri)
+      // so onboarding doesn't require hand-toggling each grant. Org-scoped
+      // resources stay opt-in. See docs/superpowers/specs/2026-07-27-…-slice1.
+      const grants = await grantBuiltinResources(tx, created.id, user.id);
       await tx.insert(auditLogs).values({
         orgId: user.orgId,
         projectId: created.id,
@@ -95,7 +107,7 @@ export const projectRoutes = new Hono<AppEnv>()
         action: "project.create",
         resourceType: "project",
         resourceId: created.id,
-        payload: { slug: input.slug, name: input.name },
+        payload: { slug: input.slug, name: input.name, defaultGrants: grants },
       });
       return created;
     });
@@ -356,8 +368,18 @@ export const projectRoutes = new Hono<AppEnv>()
     async (c) => {
       const projectId = c.req.param("projectId");
       const { apiKey, provider, baseUrl } = c.req.valid("json");
+      // the provider must be a registered catalog entry — closes the free-text
+      // gap so a key can't be set for a typo'd provider
+      const catalog = await loadProviderCatalog(c.var.db, c.var.user.orgId);
+      if (!catalog[provider]) {
+        throw new AppError(
+          "provider_not_in_catalog",
+          400,
+          `Provider '${provider}' is not registered in the provider catalog`,
+        );
+      }
       if (baseUrl !== undefined) {
-        const reason = validateProviderBaseUrl(provider, baseUrl);
+        const reason = validateProviderBaseUrl(provider, baseUrl, catalog);
         if (reason) throw new AppError("base_url_invalid", 400, `Base URL ${reason}`);
       }
       const db = c.var.db;
@@ -391,6 +413,17 @@ export const projectRoutes = new Hono<AppEnv>()
           .insert(providerCredentials)
           .values({ projectId, provider, baseUrl: baseUrl ?? null, secretRef: secret.id })
           .returning();
+        // Convention over Configuration: a credential is what makes a
+        // provider's models *usable*, so granting them at the same time
+        // couples the two previously-decoupled steps (settings → providers vs
+        // settings → grants). Org-scoped models stay an explicit opt-in.
+        // Idempotent via the grants unique index.
+        const autoGrantedModels = await grantProviderBuiltinModels(
+          tx,
+          projectId,
+          provider,
+          c.var.user.id,
+        );
         await audit(
           c,
           {
@@ -398,14 +431,21 @@ export const projectRoutes = new Hono<AppEnv>()
             resourceType: "provider_credential",
             resourceId: row?.id,
             projectId,
-            payload: { provider },
+            payload: { provider, autoGrantedModels },
           },
           tx,
         );
-        return row;
+        return { row, autoGrantedModels };
       });
       return c.json(
-        created ? { ...created, secretRef: undefined, hasCredential: true } : null,
+        created.row
+          ? {
+              ...created.row,
+              secretRef: undefined,
+              hasCredential: true,
+              autoGrantedModels: created.autoGrantedModels,
+            }
+          : null,
         201,
       );
     },
@@ -418,8 +458,9 @@ export const projectRoutes = new Hono<AppEnv>()
       const projectId = c.req.param("projectId");
       const provider = c.req.param("provider");
       const patch = c.req.valid("json");
+      const catalog = await loadProviderCatalog(c.var.db, c.var.user.orgId);
       if (patch.baseUrl !== undefined && patch.baseUrl !== null) {
-        const reason = validateProviderBaseUrl(provider, patch.baseUrl);
+        const reason = validateProviderBaseUrl(provider, patch.baseUrl, catalog);
         if (reason) throw new AppError("base_url_invalid", 400, `Base URL ${reason}`);
       }
       const db = c.var.db;
@@ -563,6 +604,44 @@ export const projectRoutes = new Hono<AppEnv>()
       return c.json(rows);
     },
   )
+
+  // ── Preflight (submit-readiness) ───────────────────────────────────────────
+  // Read-only check that runs the same resolution + resource-authorization
+  // paths submit uses, but reports each dimension (models, provider credential,
+  // skills, mcp, repo) as a structured check instead of failing fast on the
+  // first. Lets the submit summary surface config gaps before the round-trip.
+  .get("/:projectId/task-types/:taskTypeId/preflight", requireProjectRole("viewer"), async (c) => {
+    const db = c.var.db;
+    const projectId = c.req.param("projectId");
+    const [taskType] = await db
+      .select()
+      .from(taskTypes)
+      .where(eq(taskTypes.id, c.req.param("taskTypeId")));
+    if (!taskType?.enabled) throw AppError.notFound("Task type");
+    const [template] = await db
+      .select()
+      .from(orchestrationTemplates)
+      .where(eq(orchestrationTemplates.id, taskType.templateId));
+    if (!template?.latestPublishedVersionId) {
+      throw new AppError("template_unpublished", 409, "Task type has no published template");
+    }
+    const [version] = await db
+      .select()
+      .from(templateVersions)
+      .where(eq(templateVersions.id, template.latestPublishedVersionId));
+    if (!version) throw AppError.notFound("Template version");
+    const compiled = upgradeCompiledTemplate(version.compiled);
+    // the deployment default executor — same as the catalog route and submit
+    const defaultExecutor = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
+    const result = await preflightSubmit(
+      db,
+      projectId,
+      compiled,
+      { faberId: taskType.defaultFaberId, executorId: defaultExecutor },
+      { registeredExecutors: await liveExecutorIds(db) },
+    );
+    return c.json(result);
+  })
 
   // ── Usage ──────────────────────────────────────────────────────────────────
   .get("/:projectId/usage", requireProjectRole("viewer"), async (c) => {

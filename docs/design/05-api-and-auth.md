@@ -63,7 +63,23 @@ PATCH  /projects/:id/providers/:provider  DELETE /projects/:id/providers/:provid
    # back to the catalog default); setting a NEW baseUrl requires re-entering apiKey in the same request —
    # endpoint and key travel together, so an existing write-only key can never be redirected (ADR-0013 am. 2).
    # DELETE removes row + secret in one tx. Duplicate provider → 409 provider_exists; bad endpoint → 400 base_url_invalid.
+   # POST also grants that provider's active built-in models (autoGrantedModels in the response) — convention
+   # over configuration: a credential is what makes a provider's models usable, so the two are coupled.
+   # POST/PATCH validate the provider is an active provider_catalog entry (400 provider_not_in_catalog) and
+   # the baseUrl host against that entry's host allowlist.
+GET    /provider-catalog              POST /provider-catalog                # org_admin-managed provider catalog
+PATCH  /provider-catalog/:providerId  DELETE /provider-catalog/:providerId
+   # the resolvable provider set (label, per-wire-protocol default endpoints, auth policy, host pins).
+   # builtins (anthropic/openai/dashscope) are seeded org_id NULL and immutable/non-deletable; customs are
+   # org-scoped. Resolution derives claude (anthropic) / codex (openai) candidates by protocol from this
+   # catalog, so a custom Anthropic-compatible provider is resolvable by the claude executor.
 GET    /projects/:id/grants               PUT /projects/:id/grants # bulk enable/disable resources
+   # a NEW project is auto-granted every active built-in resource (models/skills/fabri) inside its create
+   # transaction, so it never starts in a zero-grants state; a seed backfill brings existing projects to parity.
+GET    /projects/:id/task-types/:taskTypeId/preflight   # viewer-readable submit-readiness check (P1-4)
+   # runs the same resolution + skill/MCP/repo grant logic submit uses, but reports each dimension as a
+   # structured check instead of failing fast; returns {ready, checks[]} with a settings fixPath per failing
+   # item so the submit summary can deep-link to the right tab. 409 if the template has no published version.
 GET    /projects/:id/quota                PUT /projects/:id/quota
 GET    /projects/:id/usage   # current-month totals + byModel + byTaskType + byDay (same window as the quota gate)
 ```
