@@ -7,6 +7,7 @@ import "./index.css";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "./features/theme";
 import { ApiError } from "./lib/api";
+import { shouldClearBodyLock } from "./lib/body-lock";
 import { router } from "./router";
 
 const queryClient = new QueryClient({
@@ -19,6 +20,15 @@ const queryClient = new QueryClient({
       staleTime: 5_000,
     },
   },
+});
+
+// Clear a stale Radix body lock once a navigation settles — the shell
+// persists across routes, so this must not fire while any layer still
+// legitimately owns the lock (see lib/body-lock.ts for the ownership rule).
+router.subscribe("onResolved", () => {
+  if (shouldClearBodyLock(document)) {
+    document.body.style.pointerEvents = "";
+  }
 });
 
 const root = document.getElementById("root");

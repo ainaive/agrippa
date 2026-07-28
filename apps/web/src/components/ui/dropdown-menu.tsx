@@ -29,6 +29,7 @@ function DropdownMenuContent({
     <DropdownMenuPrimitive.Portal>
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
+        data-locks-body=""
         sideOffset={sideOffset}
         align={align}
         className={cn(

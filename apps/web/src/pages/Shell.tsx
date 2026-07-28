@@ -5,6 +5,7 @@ import { Topbar } from "@/components/shell/Topbar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
 import { MeContext, useMeQuery } from "../features/me";
+import { sidebarStateFromCookie } from "../lib/sidebar-state";
 
 export function Shell() {
   const { data: me, isLoading, isError } = useMeQuery();
@@ -25,7 +26,7 @@ export function Shell() {
 
   return (
     <MeContext.Provider value={me}>
-      <SidebarProvider>
+      <SidebarProvider defaultOpen={sidebarStateFromCookie(document.cookie)}>
         <AppSidebar currentProjectId={params.projectId ?? null} />
         <SidebarInset>
           <Topbar />
