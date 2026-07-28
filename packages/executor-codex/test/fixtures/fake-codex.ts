@@ -125,6 +125,60 @@ switch (scenario) {
     process.exit(1);
     break;
   }
+  case "model-rejected": {
+    // captured live from codex-cli 0.145.0: an auth-mode-incompatible model id
+    // yields a non-fatal metadata warning item, then the backend 400 as a
+    // JSON blob in `error` / `turn.failed`
+    emit({ type: "thread.started", thread_id: "sess-rejected" });
+    emit({
+      type: "item.completed",
+      item: {
+        id: "item_0",
+        type: "error",
+        message:
+          "Model metadata for `gpt-5.1-codex` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+      },
+    });
+    emit({ type: "turn.started" });
+    const backend = JSON.stringify({
+      type: "error",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        message:
+          "The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account.",
+      },
+    });
+    emit({ type: "error", message: backend });
+    emit({ type: "turn.failed", error: { message: backend } });
+    process.exit(1);
+    break;
+  }
+  case "warning-then-success": {
+    // a lone metadata-warning error item on a turn that completes fine
+    emit({ type: "thread.started", thread_id: "sess-warn" });
+    emit({
+      type: "item.completed",
+      item: {
+        id: "item_0",
+        type: "error",
+        message:
+          "Model metadata for `gpt-5.6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+      },
+    });
+    emit({ type: "turn.started" });
+    emit({
+      type: "item.completed",
+      item: { id: "item_1", type: "agent_message", text: "All done" },
+    });
+    emit({ type: "turn.completed", usage: USAGE });
+    break;
+  }
+  case "die-silent": {
+    // dies before thread.started with empty stdout/stderr
+    process.exit(1);
+    break;
+  }
   case "hang": {
     emit({ type: "thread.started", thread_id: "sess-hang" });
     // stay alive until SIGTERM (default handler exits)

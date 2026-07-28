@@ -127,6 +127,7 @@ All executor work happens in the **worker container** (`apps/worker`), one run p
 | Config isolation | `--ignore-user-config` (no `~/.codex/config.toml` MCP servers riding in; auth still uses `CODEX_HOME`) + `--ignore-rules`; the boot probe refuses CLIs lacking these flags |
 | Streaming | `thread.started` → `step.started{sessionId}`; `item.*` agent messages / command executions → `message.completed` / `tool.*` |
 | Usage | `turn.completed.usage` — `input_tokens` is cached-inclusive and split into `inputTokens`/`cacheReadTokens` |
+| Errors | fatal = `turn.failed` / top-level `error` (JSON-blob messages unwrapped to the inner sentence) or a nonzero exit; item-level `error` items carry `message` and are often non-fatal warnings ("Model metadata … Defaulting to fallback") — they refine the failure message but never fail a completed turn |
 | Resume | `codex exec resume <thread_id>` (same-step crash recovery only, per ADR-0005) |
 | Env | `buildScrubbedEnv` (OPENAI_API_KEY/CODEX_API_KEY on the provider-auth allow-list) |
 

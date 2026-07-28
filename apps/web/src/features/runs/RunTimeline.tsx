@@ -35,6 +35,7 @@ type TurnItem = {
   tools: string[];
   done: boolean;
   failed: boolean;
+  error: { code: string; message: string } | null;
 };
 
 type TimelineItem =
@@ -87,6 +88,7 @@ function buildTimeline(
           tools: [],
           done: false,
           failed: false,
+          error: null,
         };
         openTurns.set(stepKey, turn);
         items.push(turn);
@@ -120,6 +122,12 @@ function buildTimeline(
         if (turn) {
           turn.done = true;
           turn.failed = true;
+          // each retry attempt re-opens its own turn, so this failure detail
+          // stays attached to the attempt that produced it
+          const error = p.error as { code?: string; message?: string } | undefined;
+          turn.error = error
+            ? { code: String(error.code ?? "error"), message: String(error.message ?? "") }
+            : null;
         }
         break;
       }
@@ -247,6 +255,12 @@ function TurnBlock({ turn, run }: { turn: TurnItem; run: Run }) {
           <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-2.5 text-xs">
             {shown}
           </pre>
+        ) : null}
+        {turn.error ? (
+          <p className="rounded-md border border-destructive/40 bg-destructive/5 px-2.5 py-1.5 text-xs text-destructive">
+            {turn.error.code}
+            {turn.error.message ? `: ${turn.error.message}` : ""}
+          </p>
         ) : null}
         {collapsed || (turn.done && turn.text.length > 600 && expanded) ? (
           <button

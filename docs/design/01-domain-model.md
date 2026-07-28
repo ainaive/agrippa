@@ -157,6 +157,7 @@ models    (id pk, org_id fk, provider text,                   -- 'anthropic' | .
 ```sql
 tasks     (id pk, org_id fk, project_id fk, task_type_id fk,
            title, params jsonb,                               -- validated against template inputs
+           agent_overrides jsonb,                             -- raw submit-time slot overrides (ADR-0014)
            latest_run_id fk null, created_by fk, created_at)
 
 runs      (id pk, task_id fk,
@@ -218,7 +219,7 @@ audit_logs (id pk, org_id fk, project_id fk null,
 
 - **Why `run_events` + `run_steps` both**: events give a replayable, gap-free timeline (SSE resume via `Last-Event-ID` = per-run `seq`); steps give cheap queryability (current status, per-step usage) without scanning events. The engine writes the event first, then updates the projection.
 - **Why `params_snapshot` on runs** when `tasks.params` exists: a retry may happen after the task type's template was republished with different inputs; the run must be self-contained and auditable.
-- **Why `model_resolution` frozen at run start**: role→tier→model resolution depends on project grants, which can change mid-run; freezing makes runs reproducible and usage attribution unambiguous.
+- **Why `model_resolution` frozen at run start**: role→tier→model resolution depends on project grants, which can change mid-run; freezing makes runs reproducible and usage attribution unambiguous. The freeze is per **run**, never per task — a retry re-resolves against current configuration and freezes its own resolution (ADR-0014).
 - **Why `token_usage.attempt`**: a retried step re-incurs cost; rows keyed by `(run_id, step_id, attempt)` let the budget meter sum persisted totals on resume without double-counting a partially-executed attempt (the attempt's rows are written incrementally and summed as-is — cost is real even when the attempt failed).
 - **Why `mcp_servers.config_revision`**: MCP config is mutable head state (no full versioning in M1 — configs are small and secrets rotate); runs record the revision they resolved so audits can detect drift.
 - **Storage**: artifacts ≤ 64 KB are stored `inline` (jsonb/text); larger ones go to a disk-backed store at `storage_ref` (a Docker volume path in M1; the indirection allows S3 later).

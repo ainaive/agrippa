@@ -62,7 +62,7 @@ The page (`pages/RunDetailPage.tsx` composing `features/runs/*`):
 - **RunMetaCard** — pinned `slug@vN`, executor, and the frozen model resolution (flat or slot-keyed: slot · role → provider model + tier). The page header additionally shows per-slot agent chips (faber avatar + name + executor label) and the platform work branch.
 - **Activity tab** (`features/runs/RunActivityFeed.tsx`) — the raw event feed kept for debugging: tool calls (error-tinted), subagent spawns, workspace checkout, step transitions, checkpoint requests.
 - **Artifact previews** (`components/artifacts/ArtifactPreview.tsx`) — markdown rendered inline (react-markdown + GFM, styled by the `.markdown-body` component layer), patches colorized by the hand-rolled `PatchView`, JSON pretty-printed, links clickable; anything over 256 KB (or of kind `file`) is download-only.
-- Cancel while running; retry (navigates to the new pinned run) once terminal.
+- Cancel while running; retry once terminal (members only) — a confirm dialog states that the new run re-executes from checkout under current project configuration and re-asks earlier checkpoints (ADR-0014); submit-shaped rejections (grants, credentials, quota) surface as a toast.
 
 `useRunEvents` keeps one `EventSource` per run for the run's whole lifetime: the run status is read through a ref, not the effect deps, so status transitions don't tear down the stream (recreating it wiped accumulated activity mid-run); terminal `run.*` events still close it.
 

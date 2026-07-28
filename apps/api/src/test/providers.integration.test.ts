@@ -315,11 +315,12 @@ describe.skipIf(!dbUp)("provider credentials (project settings → submit gate)"
     gatedTaskId = taskId;
   });
 
-  it("retry re-checks the credential gate against the frozen resolution", async () => {
+  it("retry re-checks the credential gate against current configuration", async () => {
     // no worker in this fixture — mark the queued run terminal so retry is legal
     await db.update(runs).set({ status: "failed" }).where(eq(runs.taskId, gatedTaskId));
 
-    // deleting the credential must block retry, not fail mid-run on auth
+    // retry re-resolves in full (ADR-0014); with dashscope-only grants the
+    // deleted credential must block retry here, not fail mid-run on auth
     await admin.request(`/api/v1/projects/${gatedProjectId}/providers/dashscope`, {
       method: "DELETE",
     });

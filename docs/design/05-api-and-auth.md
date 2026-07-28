@@ -94,7 +94,7 @@ GET /task-types/:id                       # includes compiled input schema → f
 ```
 POST /projects/:id/tasks                  # {taskTypeId, title, params, agents?} → 202 {taskId, runId}
 GET  /projects/:id/tasks?status=&taskType=
-GET  /tasks/:id                           POST /tasks/:id/retry     # → new run (bindings copied)
+GET  /tasks/:id                           POST /tasks/:id/retry     # → new run (re-resolved vs current config, ADR-0014)
 GET  /runs/:id                            # embeds a viewer-scoped template plan (phases/loops/checkpoints/budgets/modelRoles —
                                           # no prompts), per-slot agent metadata, and all checkpoint rows with decider names
 GET  /runs/:id/steps                      # each row carries iteration + usage {costUsd, tokens}
