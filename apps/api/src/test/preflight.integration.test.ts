@@ -114,7 +114,7 @@ describe.skipIf(!dbUp)("preflight (submit-readiness)", () => {
     expect(result.ready).toBe(false);
     const skill = result.checks.find((c) => c.key === "skills");
     expect(skill?.ok).toBe(false);
-    expect(skill?.fixPath).toBe("grants");
+    expect(skill?.fixPath).toBe("resources");
   });
 
   it("flags a missing provider credential with fixPath=providers", async () => {
@@ -144,6 +144,6 @@ describe.skipIf(!dbUp)("preflight (submit-readiness)", () => {
     expect(result.ready).toBe(false);
     const cred = result.checks.find((c) => c.key === "provider_credential");
     expect(cred?.ok).toBe(false);
-    expect(cred?.fixPath).toBe("providers");
+    expect(cred?.fixPath).toBe("resources");
   });
 });

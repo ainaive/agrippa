@@ -96,7 +96,7 @@ export type PreflightCheck = {
   ok: boolean;
   detail: string;
   /** settings tab to deep-link to when not ok */
-  fixPath: "providers" | "grants" | "repos" | null;
+  fixPath: "resources" | "repos" | null;
 };
 
 export type Preflight = {

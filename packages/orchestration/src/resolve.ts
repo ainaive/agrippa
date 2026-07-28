@@ -643,7 +643,7 @@ export type PreflightCheck = {
   /** human-readable, localized at the API layer from error codes where stable. */
   detail: string;
   /** settings tab to deep-link to when not ok; null when ok or not user-fixable. */
-  fixPath: "providers" | "grants" | "repos" | null;
+  fixPath: "resources" | "repos" | null;
 };
 
 export type PreflightResult = {
@@ -685,7 +685,7 @@ export async function preflightSubmit(
         // models resolved for some provider, but that provider needs a key
         credentialOk = false;
         credentialDetail = err.message;
-        credentialFix = "providers";
+        credentialFix = "resources";
         modelDetail = describeGrantedModels(await fetchGrantedModels(db, projectId), compiled);
       } else if (err.code === "no_models_granted" || err.code === "model_unresolvable") {
         modelOk = false;
@@ -709,7 +709,7 @@ export async function preflightSubmit(
     key: "models",
     ok: modelOk,
     detail: modelDetail,
-    fixPath: !modelOk ? "grants" : null,
+    fixPath: !modelOk ? "resources" : null,
   });
   checks.push({
     key: "provider_credential",
@@ -753,7 +753,7 @@ export async function preflightSubmit(
       missingSkills.length === 0
         ? requiredSkills.map((s) => s.ref.split("@")[0]).join(", ") || "none required"
         : `missing: ${missingSkills.join(", ")}`,
-    fixPath: missingSkills.length > 0 ? "grants" : null,
+    fixPath: missingSkills.length > 0 ? "resources" : null,
   });
 
   const missingMcp: string[] = [];
@@ -768,7 +768,7 @@ export async function preflightSubmit(
       missingMcp.length === 0
         ? requiredMcp.map((m) => m.ref).join(", ") || "none required"
         : `missing: ${missingMcp.join(", ")}`,
-    fixPath: missingMcp.length > 0 ? "grants" : null,
+    fixPath: missingMcp.length > 0 ? "resources" : null,
   });
 
   // ── repo (does the project have a connection when the template needs one?) ─
