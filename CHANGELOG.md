@@ -20,6 +20,11 @@ All notable changes to Agrippa are documented here. The format follows
 
 ### Fixed
 
+- **Dead clicks after confirming a retry, and sidebar collapse quirks** — Radix modal layers lock `<body>` with `pointer-events: none` while open; the retry confirm dialog navigating to the new run could unmount it mid-exit-animation and leave the lock behind, after which every click (the sidebar toggle included) silently did nothing:
+  - *Stale body locks are cleared when a navigation settles* — a router subscription resets the lock, covering every dialog/dropdown that a route change can unmount mid-close.
+  - *Sidebar state finally persists.* The vendored sidebar wrote its `sidebar_state` cookie but nothing read it back (shadcn's Next.js starter reads it server-side; this is a SPA) — `Shell` now feeds it into `defaultOpen`, so a collapse survives reloads.
+  - *The invisible expand rail is clickable full-height* (the sidebar container now out-stacks the sticky topbar, whose z-tie previously deadened the rail's top ~56px), and *the mobile drawer opens at its intended 18rem* (the sheet's side-variant width classes out-specified the sidebar's plain width override).
+
 - **Codex failures now surface their real cause** — a live requirement-delivery run died with the useless "codex reported an error" while the backend had said exactly what was wrong ("The 'gpt-5.1-codex' model is not supported when using Codex with a ChatGPT account"):
   - *Error items carry `message`, not `text`.* codex-cli 0.145 puts error-item text in `message`; the mapper read only `text`, dropping the detail. It now reads both.
   - *Warnings no longer mask or fabricate failures.* The CLI emits non-fatal error items ("Model metadata … Defaulting to fallback") and then completes the turn fine; first-error-wins let that warning shadow the fatal `turn.failed`, and any recorded error failed the step even on a clean exit. Fatal stream errors (`turn.failed` / top-level `error`, JSON blobs unwrapped to the inner sentence) and the exit code now decide failure; item errors only refine the message, and a step that completed with a lone warning succeeds (logged, not failed).
