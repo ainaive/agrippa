@@ -272,6 +272,18 @@ export type ModelRow = {
   status: string;
 };
 
+export type ProviderCatalogRow = {
+  id: string;
+  orgId: string | null; // null = builtin
+  providerId: string;
+  label: string;
+  baseUrls: { anthropic?: string; openai?: string };
+  auth: "project" | "env";
+  baseUrlHosts: string[] | null;
+  status: string;
+  createdAt: string;
+};
+
 export type ProviderCredentialRow = {
   id: string;
   provider: string;
