@@ -10,6 +10,22 @@ import {
   workspaceDirFor,
 } from "./workspace";
 
+/**
+ * Every provider API call fails fast instead of hanging a run — pr.open and
+ * push are template-retryable steps, so a bounded failure beats a stuck job.
+ */
+const SCM_HTTP_TIMEOUT_MS = 30_000;
+const scmTimeout = () => AbortSignal.timeout(SCM_HTTP_TIMEOUT_MS);
+
+/** `https://host/owner/repo(.git)` → `[owner, repo]` (github/gitcode URL shape). */
+function ownerRepoFromUrl(url: URL): [string | undefined, string | undefined] {
+  const [owner, repo] = url.pathname
+    .replace(/^\//, "")
+    .replace(/\.git$/, "")
+    .split("/");
+  return [owner, repo];
+}
+
 /** gitcode.com serves its API from api.gitcode.com; other hosts (tests, self-managed) are origin-relative. */
 function gitcodeApiBase(url: URL): string {
   return url.hostname === "gitcode.com" ? "https://api.gitcode.com/api/v5" : `${url.origin}/api/v5`;
@@ -26,6 +42,7 @@ export async function gitcodeCredentialedUrl(repoUrl: string, token: string): Pr
     const url = new URL(repoUrl);
     const response = await fetch(`${gitcodeApiBase(url)}/user`, {
       headers: { authorization: `Bearer ${token}`, "user-agent": "agrippa" },
+      signal: scmTimeout(),
     });
     if (response.ok) {
       const { login } = (await response.json()) as { login?: string };
@@ -166,10 +183,7 @@ export class GitScmService implements ScmService {
     spec: PullRequestSpec,
   ): Promise<{ url: string }> {
     const url = new URL(repoUrl);
-    const [owner, repo] = url.pathname
-      .replace(/^\//, "")
-      .replace(/\.git$/, "")
-      .split("/");
+    const [owner, repo] = ownerRepoFromUrl(url);
     const apiBase = gitcodeApiBase(url);
     const headers = {
       authorization: `Bearer ${token}`,
@@ -185,6 +199,7 @@ export class GitScmService implements ScmService {
         base: spec.base,
         body: spec.body,
       }),
+      signal: scmTimeout(),
     });
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
@@ -195,7 +210,7 @@ export class GitScmService implements ScmService {
         for (let page = 1; page <= 5; page++) {
           const lookup = await fetch(
             `${apiBase}/repos/${owner}/${repo}/pulls?state=open&base=${encodeURIComponent(spec.base)}&per_page=100&page=${page}`,
-            { headers },
+            { headers, signal: scmTimeout() },
           );
           if (!lookup.ok) break;
           const open = (await lookup.json()) as Array<{
@@ -227,10 +242,7 @@ export class GitScmService implements ScmService {
     spec: PullRequestSpec,
   ): Promise<{ url: string }> {
     const url = new URL(repoUrl);
-    const [owner, repo] = url.pathname
-      .replace(/^\//, "")
-      .replace(/\.git$/, "")
-      .split("/");
+    const [owner, repo] = ownerRepoFromUrl(url);
     // github.com uses api.github.com; GHES exposes the API under /api/v3
     const apiBase =
       url.hostname === "github.com" ? "https://api.github.com" : `${url.origin}/api/v3`;
@@ -249,6 +261,7 @@ export class GitScmService implements ScmService {
         base: spec.base,
         body: spec.body,
       }),
+      signal: scmTimeout(),
     });
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
@@ -259,7 +272,7 @@ export class GitScmService implements ScmService {
       if (response.status === 422) {
         const lookup = await fetch(
           `${apiBase}/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(`${owner}:${spec.head}`)}&base=${encodeURIComponent(spec.base)}&state=open`,
-          { headers },
+          { headers, signal: scmTimeout() },
         );
         if (lookup.ok) {
           const open = (await lookup.json()) as Array<{ html_url?: string }>;
@@ -292,6 +305,7 @@ export class GitScmService implements ScmService {
         title: spec.title,
         description: spec.body,
       }),
+      signal: scmTimeout(),
     });
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
@@ -299,7 +313,7 @@ export class GitScmService implements ScmService {
       if (response.status === 409) {
         const lookup = await fetch(
           `${apiBase}/merge_requests?source_branch=${encodeURIComponent(spec.head)}&target_branch=${encodeURIComponent(spec.base)}&state=opened`,
-          { headers },
+          { headers, signal: scmTimeout() },
         );
         if (lookup.ok) {
           const open = (await lookup.json()) as Array<{ web_url?: string }>;

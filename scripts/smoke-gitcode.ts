@@ -22,7 +22,11 @@ if (!url || !token) {
   process.exit(1);
 }
 
-const scrub = (text: string): string => text.replaceAll(token, "***");
+// the URL API percent-encodes the password, so git errors can leak the
+// encoded form — scrub both representations
+const encodedToken = encodeURIComponent(token);
+const scrub = (text: string): string =>
+  text.replaceAll(token, "***").replaceAll(encodedToken, "***");
 
 async function run(cmd: string[], cwd?: string): Promise<string> {
   const proc = Bun.spawn({ cmd, cwd, stdout: "pipe", stderr: "pipe", env: process.env });
