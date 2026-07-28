@@ -409,14 +409,14 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     };
     expect(await executeRun(makeDeps(script), runId)).toBe("failed");
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
-    expect((run?.error as { code: string } | null)?.code).toBe("budget_exceeded");
+    expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
   });
 
   it("hard-stop project quota aborts mid-run", async () => {
     const { db, runId, makeDeps } = await setupFixture({ quota: { tokenLimit: 2000 } });
     expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
-    expect((run?.error as { code: string } | null)?.code).toBe("budget_exceeded");
+    expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
   });
 
   it("resume does not double-count the run's own spend against the quota", async () => {

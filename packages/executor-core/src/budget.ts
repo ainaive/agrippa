@@ -1,13 +1,13 @@
 import type { UsageDelta } from "./types";
 
-export class BudgetExceededError extends Error {
+export class UsageLimitExceededError extends Error {
   constructor(
     /** Which limit tripped: "run" | "phase" | "quota_cost" | "quota_tokens". */
     readonly scope: string,
     message: string,
   ) {
     super(message);
-    this.name = "BudgetExceededError";
+    this.name = "UsageLimitExceededError";
   }
 }
 
@@ -29,7 +29,7 @@ export type BudgetSnapshot = {
 
 /**
  * Accumulates usage against run, phase, and quota limits; throws
- * BudgetExceededError at the cap. Initialized from persisted token_usage
+ * UsageLimitExceededError at the cap. Initialized from persisted token_usage
  * totals on resume so a crash never resets spend (docs/design/04).
  */
 export class BudgetMeter {
@@ -73,23 +73,23 @@ export class BudgetMeter {
   check(): void {
     const limits = this.limits;
     if (limits.maxCostUsd !== undefined && this.costUsd > limits.maxCostUsd) {
-      throw new BudgetExceededError(
+      throw new UsageLimitExceededError(
         "run",
         `run budget exceeded: $${this.costUsd.toFixed(4)} > $${limits.maxCostUsd}`,
       );
     }
     const phaseLimit = limits.perPhaseCostUsd?.[this.currentPhase];
     if (phaseLimit !== undefined && (this.perPhase[this.currentPhase] ?? 0) > phaseLimit) {
-      throw new BudgetExceededError(
+      throw new UsageLimitExceededError(
         "phase",
         `phase '${this.currentPhase}' budget exceeded: $${(this.perPhase[this.currentPhase] ?? 0).toFixed(4)} > $${phaseLimit}`,
       );
     }
     if (limits.quotaCostUsd !== undefined && this.costUsd > limits.quotaCostUsd) {
-      throw new BudgetExceededError("quota_cost", "project cost quota exhausted");
+      throw new UsageLimitExceededError("quota_cost", "project cost quota exhausted");
     }
     if (limits.quotaTokens !== undefined && this.tokens > limits.quotaTokens) {
-      throw new BudgetExceededError("quota_tokens", "project token quota exhausted");
+      throw new UsageLimitExceededError("quota_tokens", "project token quota exhausted");
     }
   }
 

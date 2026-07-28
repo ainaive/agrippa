@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { BudgetExceededError, BudgetMeter } from "./budget";
+import { BudgetMeter, UsageLimitExceededError } from "./budget";
 
 const usage = (costUsd: number, tokens = 100) => ({
   model: "m",
@@ -15,7 +15,7 @@ describe("BudgetMeter", () => {
     const meter = new BudgetMeter({ maxCostUsd: 1 });
     meter.enterPhase("a");
     meter.record(usage(0.6));
-    expect(() => meter.record(usage(0.6))).toThrow(BudgetExceededError);
+    expect(() => meter.record(usage(0.6))).toThrow(UsageLimitExceededError);
   });
 
   it("enforces per-phase limits independently", () => {
@@ -30,12 +30,12 @@ describe("BudgetMeter", () => {
     } catch (err) {
       error = err;
     }
-    expect((error as BudgetExceededError).scope).toBe("phase");
+    expect((error as UsageLimitExceededError).scope).toBe("phase");
   });
 
   it("initializes from persisted totals on resume — no spend reset", () => {
     const meter = new BudgetMeter({ maxCostUsd: 1 }, { costUsd: 0.9, tokens: 5000 });
-    expect(() => meter.record(usage(0.2))).toThrow(BudgetExceededError);
+    expect(() => meter.record(usage(0.2))).toThrow(UsageLimitExceededError);
   });
 
   it("enforces quota limits with their own scopes", () => {
@@ -47,7 +47,7 @@ describe("BudgetMeter", () => {
     } catch (err) {
       error = err;
     }
-    expect((error as BudgetExceededError).scope).toBe("quota_cost");
+    expect((error as UsageLimitExceededError).scope).toBe("quota_cost");
 
     const tokenMeter = new BudgetMeter({ quotaTokens: 100 });
     tokenMeter.enterPhase("a");
@@ -56,7 +56,7 @@ describe("BudgetMeter", () => {
     } catch (err) {
       error = err;
     }
-    expect((error as BudgetExceededError).scope).toBe("quota_tokens");
+    expect((error as UsageLimitExceededError).scope).toBe("quota_tokens");
   });
 
   it("snapshot round-trips through a new meter", () => {
@@ -65,6 +65,6 @@ describe("BudgetMeter", () => {
     first.record(usage(0.25, 40));
     const second = new BudgetMeter({ maxCostUsd: 0.3 }, first.snapshot());
     second.enterPhase("b");
-    expect(() => second.record(usage(0.1))).toThrow(BudgetExceededError);
+    expect(() => second.record(usage(0.1))).toThrow(UsageLimitExceededError);
   });
 });

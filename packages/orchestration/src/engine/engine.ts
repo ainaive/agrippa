@@ -28,7 +28,6 @@ import {
   users,
 } from "@agrippa/db";
 import {
-  BudgetExceededError,
   BudgetMeter,
   collectEnvSecretValues,
   createSecretRedactor,
@@ -42,6 +41,7 @@ import {
   type SecretRedactor,
   type StepExecutionRequest,
   type UsageDelta,
+  UsageLimitExceededError,
 } from "@agrippa/executor-core";
 import { and, eq, gte, inArray, max, ne, sql } from "drizzle-orm";
 import { upgradeCompiledTemplate } from "../compile";
@@ -66,7 +66,7 @@ type AgentStep = TemplateStepV2 & { kind: "agent" };
 type SystemStep = TemplateStepV2 & { kind: "system" };
 type CheckpointStep = TemplateStepV2 & { kind: "checkpoint" };
 
-type AbortReason = "cancelled" | "timed_out" | "budget_exceeded";
+type AbortReason = "cancelled" | "timed_out" | "usage_limit_exceeded";
 
 /** A run's per-slot execution binding, resolved once at pickup. */
 type SlotBinding = {
@@ -1234,7 +1234,7 @@ class RunEngine {
     const request = await this.buildRequest(step, row, attempt);
     const ctx: ExecutionContext = {
       signal: this.abort.signal,
-      budget: {
+      usage: {
         record: () => {}, // engine records via usage events; executors may also call this
       },
       secrets: async () => {
@@ -1259,8 +1259,8 @@ class RunEngine {
         try {
           await this.recordUsage(event, row, attempt);
         } catch (err) {
-          if (err instanceof BudgetExceededError) {
-            this.triggerAbort("budget_exceeded");
+          if (err instanceof UsageLimitExceededError) {
+            this.triggerAbort("usage_limit_exceeded");
           } else {
             throw err;
           }
@@ -1806,7 +1806,7 @@ class RunEngine {
       case "timed_out":
         return new RunFailure("timeout", "run duration budget exhausted", "timed_out");
       default:
-        return new RunFailure("budget_exceeded", "budget exhausted");
+        return new RunFailure("usage_limit_exceeded", "usage limit exhausted");
     }
   }
 
@@ -1844,8 +1844,8 @@ class RunEngine {
       await this.finalize(status, { code: err.code, message: err.message });
       return status;
     }
-    if (err instanceof BudgetExceededError) {
-      await this.finalize("failed", { code: "budget_exceeded", message: err.message });
+    if (err instanceof UsageLimitExceededError) {
+      await this.finalize("failed", { code: "usage_limit_exceeded", message: err.message });
       return "failed";
     }
     // Unexpected errors (infra blips, crashes) rethrow: the run stays
