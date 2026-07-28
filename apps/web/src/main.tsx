@@ -21,6 +21,17 @@ const queryClient = new QueryClient({
   },
 });
 
+// Radix modal layers (the retry confirm dialog, dropdown menus…) set
+// `pointer-events: none` on <body> while open; a navigation that unmounts one
+// mid-exit-animation can leave that lock behind (radix-ui unmount-during-close),
+// after which every click in the app is a silent no-op. Clear any stale lock
+// once a navigation settles.
+router.subscribe("onResolved", () => {
+  if (document.body.style.pointerEvents === "none") {
+    document.body.style.pointerEvents = "";
+  }
+});
+
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 
