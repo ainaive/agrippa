@@ -86,7 +86,7 @@ type DepsOptions = {
 
 type FixtureOptions = {
   params?: Record<string, unknown>;
-  quota?: { costLimitUsd?: number; tokenLimit?: number };
+  quota?: { tokenLimit?: number };
   /** Override the run's authorized-resource manifest (default: all template resources). */
   resourceManifest?: { mcpServers: string[]; skills: string[] };
 };
@@ -133,7 +133,6 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   if (options.quota) {
     await db.insert(projectQuotas).values({
       projectId: project.id,
-      costLimitUsd: options.quota.costLimitUsd?.toString(),
       tokenLimit: options.quota.tokenLimit,
       hardStop: true,
     });
@@ -191,7 +190,6 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
         mcpServers: template.spec.resources.mcpServers.map((m) => m.ref),
         skills: template.spec.resources.skills.map((s) => s.ref.split("@")[0] as string),
       },
-      budget: template.spec.limits as unknown as Record<string, unknown>,
       createdBy: user.id,
     })
     .returning();
@@ -536,9 +534,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(rows[0]?.status).toBe("cancelled");
   });
 
-  it("expired duration budget times the run out on pickup", async () => {
+  it("expired duration limit times the run out on pickup", async () => {
     const { db, runId, makeDeps } = await setupFixture();
-    // simulate a run that started 46 minutes ago (budget: 45m)
+    // simulate a run that started 46 minutes ago (limit: 45m)
     await db
       .update(runs)
       .set({ status: "running", startedAt: new Date(Date.now() - 46 * 60_000) })
@@ -1173,7 +1171,6 @@ async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> 
       paramsSnapshot: params,
       modelResolution: { implementer: modelResolution, reviewer: modelResolution },
       resourceManifest: { mcpServers: [], skills: [] },
-      budget: {},
       createdBy: user.id,
     })
     .returning();

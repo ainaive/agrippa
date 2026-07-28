@@ -78,6 +78,13 @@
       "when": 1785235551065,
       "tag": "0010_model_rank",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1785236070051,
+      "tag": "0011_drop_money",
+      "breakpoints": true
     }
   ]
 }

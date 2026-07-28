@@ -4,7 +4,6 @@ import {
   boolean,
   date,
   jsonb,
-  numeric,
   pgTable,
   text,
   uniqueIndex,
@@ -120,7 +119,6 @@ export const projectQuotas = pgTable("project_quotas", {
     .notNull()
     .default("monthly"),
   tokenLimit: bigint("token_limit", { mode: "number" }),
-  costLimitUsd: numeric("cost_limit_usd", { precision: 12, scale: 2 }),
   hardStop: boolean("hard_stop").notNull().default(true),
   currentPeriodStart: date("current_period_start"),
   createdAt: createdAtCol(),

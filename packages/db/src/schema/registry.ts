@@ -4,7 +4,6 @@ import {
   boolean,
   integer,
   jsonb,
-  numeric,
   pgTable,
   text,
   uniqueIndex,
@@ -174,8 +173,6 @@ export const models = pgTable("models", {
    * resolution — the registry no longer stores money (ADR-0015).
    */
   rank: integer("rank").notNull().default(100),
-  inputCostPerMtok: numeric("input_cost_per_mtok", { precision: 12, scale: 4 }),
-  outputCostPerMtok: numeric("output_cost_per_mtok", { precision: 12, scale: 4 }),
   status: text("status", { enum: ["active", "disabled"] })
     .notNull()
     .default("active"),
