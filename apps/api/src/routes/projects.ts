@@ -18,6 +18,7 @@ import {
   fabri,
   grantBuiltinResources,
   grantProviderBuiltinModels,
+  loadProviderCatalog,
   loadSecretKey,
   mcpServers,
   models,
@@ -366,8 +367,18 @@ export const projectRoutes = new Hono<AppEnv>()
     async (c) => {
       const projectId = c.req.param("projectId");
       const { apiKey, provider, baseUrl } = c.req.valid("json");
+      // the provider must be a registered catalog entry — closes the free-text
+      // gap so a key can't be set for a typo'd provider
+      const catalog = await loadProviderCatalog(c.var.db, c.var.user.orgId);
+      if (!catalog[provider]) {
+        throw new AppError(
+          "provider_not_in_catalog",
+          400,
+          `Provider '${provider}' is not registered in the provider catalog`,
+        );
+      }
       if (baseUrl !== undefined) {
-        const reason = validateProviderBaseUrl(provider, baseUrl);
+        const reason = validateProviderBaseUrl(provider, baseUrl, catalog);
         if (reason) throw new AppError("base_url_invalid", 400, `Base URL ${reason}`);
       }
       const db = c.var.db;
@@ -446,8 +457,9 @@ export const projectRoutes = new Hono<AppEnv>()
       const projectId = c.req.param("projectId");
       const provider = c.req.param("provider");
       const patch = c.req.valid("json");
+      const catalog = await loadProviderCatalog(c.var.db, c.var.user.orgId);
       if (patch.baseUrl !== undefined && patch.baseUrl !== null) {
-        const reason = validateProviderBaseUrl(provider, patch.baseUrl);
+        const reason = validateProviderBaseUrl(provider, patch.baseUrl, catalog);
         if (reason) throw new AppError("base_url_invalid", 400, `Base URL ${reason}`);
       }
       const db = c.var.db;
