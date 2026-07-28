@@ -19,7 +19,7 @@ The product is fully bilingual: English and Simplified Chinese (zh-CN), across U
 │  Orchestration layer                                        │
 │  Fabri (硅基人, preset agents) execute Runs by following    │
 │  orchestration templates: phases, steps, approvals,         │
-│  model-selection rules, budgets                             │
+│  model-selection rules, usage limits                        │
 ├─────────────────────────────────────────────────────────────┤
 │  Resource layer                                             │
 │  Models · Sub-agents · Skills · MCP servers · Templates     │
@@ -28,12 +28,12 @@ The product is fully bilingual: English and Simplified Chinese (zh-CN), across U
 ```
 
 1. **Scenario layer** — the user-facing catalog. Tasks are organized by work scenario (project management, software development, test & verification), each with sub-task types (requirements development, bug localization & fix, test plan generation, …). Users never touch orchestration details; they fill an auto-generated form and submit.
-2. **Orchestration layer** — the execution brain. A Faber is a preset platform agent with a persona and defaults. Given a submitted task, the engine walks the scenario's orchestration template — phases, steps, human-approval checkpoints, budget limits — delegating each step to an **executor** (first implementation: Claude Agent SDK) which runs the actual agent loop with sub-agents, Skills, and MCP servers, on models selected by role→tier rules.
-3. **Resource layer** — governed registries. Models (provider registrations with tiers and costs), sub-agents, Skills, MCP servers, and orchestration templates are registered, versioned (immutable published versions), and permission-governed. Projects enable specific resources via grants.
+2. **Orchestration layer** — the execution brain. A Faber is a preset platform agent with a persona and defaults. Given a submitted task, the engine walks the scenario's orchestration template — phases, steps, human-approval checkpoints, usage limits — delegating each step to an **executor** (first implementation: Claude Agent SDK) which runs the actual agent loop with sub-agents, Skills, and MCP servers, on models selected by role→tier rules.
+3. **Resource layer** — governed registries. Models (provider registrations with tiers and selection ranks), sub-agents, Skills, MCP servers, and orchestration templates are registered, versioned (immutable published versions), and permission-governed. Projects enable specific resources via grants.
 
 ## Core Product Decisions
 
-- **Project-based collaboration.** Users create projects and add members. The project is the resource scope and billing boundary: project-level enablement of Skills/MCP/models, token budget & quota, connected repositories and documents.
+- **Project-based collaboration.** Users create projects and add members. The project is the resource scope: project-level enablement of Skills/MCP/models, a token quota, connected repositories and documents.
 - **Hybrid engine strategy.** Agrippa owns its domain model (Task / Run / Step) and template format; agent engines are pluggable behind an `Executor` interface. The Claude Agent SDK is the first executor; templates stay engine-portable.
 - **Self-hosted first.** Ships as a Docker Compose stack (api, worker, Postgres, Redis) for a single organization. Every top-level table carries `org_id` so SaaS multi-tenancy can layer on later without schema rewrites.
 - **Breadth with a real engine.** M1 ships all three scenarios (2–3 task types each) on a full-strength shared orchestration layer — no stubbed engine.
@@ -48,14 +48,14 @@ The product is fully bilingual: English and Simplified Chinese (zh-CN), across U
 | **Task** | 任务 | A user's submission: task type + parameters. May have multiple runs (retries). |
 | **Run** | 执行 | One execution of a task against a pinned template version. Has a state machine, steps, events, artifacts, usage. |
 | **Step** | 步骤 | The atomic execution unit inside a run: one agent invocation (or one system action). The idempotency and resume boundary. |
-| **Orchestration template** | 编排模板 | Versioned declarative YAML defining inputs, phases/steps, resources, model rules, approvals, budgets, and the output contract for a task type. |
+| **Orchestration template** | 编排模板 | Versioned declarative YAML defining inputs, phases/steps, resources, model rules, approvals, usage limits, and the output contract for a task type. |
 | **Executor** | 执行器 | A pluggable engine that executes a single step (agent loop, tools, sub-agents). First implementation: Claude Agent SDK. |
 | **Skill** | 技能 | A packaged instruction set + resources an agent can load (Claude Code skill format). |
 | **MCP server** | MCP 服务 | A Model Context Protocol server providing tools/context to agents. |
 | **Resource grant** | 资源授权 | Project-level enablement of a resource (skill/MCP/model/template/faber), optionally with config overrides. |
 | **Approval** | 审批 | A human checkpoint defined in a template; the run pauses (`waiting_approval`) until a member decides. |
 | **Artifact** | 产出物 | A declared output of a run (markdown report, patch, link, file), governed by the template's output contract. |
-| **Quota** | 配额 | Project-level token/cost budget per period; enforceable as a hard stop. |
+| **Quota** | 配额 | Project-level token ceiling per period; enforceable as a hard stop. |
 
 ## Non-Goals (M1)
 
@@ -65,7 +65,7 @@ The product is fully bilingual: English and Simplified Chinese (zh-CN), across U
 - **Custom engine plugins by end users** — the `Executor` interface is internal API in M1.
 - **Template loops/branching beyond `when` + `retry`** — the v1 expression language is deliberately non-Turing-complete.
 - **Real-time multi-user co-editing** (e.g. of templates) — last-write-wins with version history.
-- **Billing/invoicing integration** — cost accounting and quotas only.
+- **Any notion of money** — no pricing, cost accounting, or billing. Consumption is measured and capped in tokens (ADR-0015).
 
 ## Architecture at a Glance
 
@@ -81,4 +81,4 @@ Doc map: [01 domain model](01-domain-model.md) · [02 template format](02-orches
 
 1. **Executor abstraction fidelity** — if future engines don't fit "one step = one agent invocation", templates leak engine semantics. Mitigated by `priorContext`/`resumeSessionId` in the interface and a FakeExecutor compliance suite built before the Claude executor ([ADR-0005](../adr/0005-executor-step-granularity.md)).
 2. **Sandboxing repo-connected execution** — M1 posture is adequate for a trusted org, not hostile inputs. Secret scrubbing and egress control get explicit tests now; per-run isolation is scheduled for M2.
-3. **Resumability & budget correctness across crashes** — usage keyed by (run, step, attempt); budget meter reads persisted totals on resume; kill-and-resume scenarios are first-class tests.
+3. **Resumability & usage-accounting correctness across crashes** — usage keyed by (run, step, attempt); the usage meter reads persisted totals on resume; kill-and-resume scenarios are first-class tests.

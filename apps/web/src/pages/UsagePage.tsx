@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useParams } from "@tanstack/react-router";
-import { BarChart3Icon, CircleDollarSignIcon, CoinsIcon } from "lucide-react";
+import { BarChart3Icon, CoinsIcon, GaugeIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { EmptyState } from "@/components/EmptyState";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
@@ -10,20 +10,18 @@ import { StatCard } from "@/components/StatCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
-import { formatCost, lt } from "@/lib/format";
+import { formatTokens, lt } from "@/lib/format";
 import type { Quota } from "@/lib/types";
 
 type Usage = {
-  costUsd: number;
   tokens: number;
-  byModel: Array<{ model: string; costUsd: number; tokens: number }>;
+  byModel: Array<{ model: string; tokens: number }>;
   byTaskType: Array<{
     taskTypeId: string | null;
     taskTypeNameI18n: Record<string, string> | null;
-    costUsd: number;
     tokens: number;
   }>;
-  byDay: Array<{ day: string; costUsd: number; tokens: number }>;
+  byDay: Array<{ day: string; tokens: number }>;
   period: { start: string; today: string };
 };
 
@@ -56,7 +54,7 @@ function DailyBars({
 }) {
   const days = periodDays(period);
   const byKey = new Map(byDay.map((row) => [row.day, row]));
-  const max = Math.max(...byDay.map((row) => row.costUsd), 0.000001);
+  const max = Math.max(...byDay.map((row) => row.tokens), 1);
 
   const barWidth = 10;
   const gap = 3;
@@ -74,14 +72,14 @@ function DailyBars({
       <title>{label}</title>
       {days.map((day, index) => {
         const row = byKey.get(day);
-        const value = row?.costUsd ?? 0;
+        const value = row?.tokens ?? 0;
         const h = value > 0 ? Math.max((value / max) * plotHeight, 3) : 0;
         const x = index * (barWidth + gap);
         const y = plotHeight - h;
         const r = Math.min(2, h);
         return (
           <g key={day}>
-            <title>{`${day} · ${formatCost(value)}`}</title>
+            <title>{`${day} · ${formatTokens(value)}`}</title>
             {/* full-height hit target so hover works on empty days too */}
             <rect x={x} y={0} width={barWidth} height={plotHeight} fill="transparent" />
             {h > 0 ? (
@@ -122,10 +120,10 @@ function BreakdownCard({
   rows,
 }: {
   title: string;
-  rows: Array<{ key: string; label: string; costUsd: number; tokens: number }>;
+  rows: Array<{ key: string; label: string; tokens: number }>;
 }) {
   const { t } = useTranslation("usage");
-  const max = Math.max(...rows.map((row) => row.costUsd), 0.000001);
+  const max = Math.max(...rows.map((row) => row.tokens), 1);
   return (
     <Card>
       <CardHeader>
@@ -140,16 +138,13 @@ function BreakdownCard({
               <div className="flex items-baseline justify-between gap-2 text-sm">
                 <span className="min-w-0 truncate">{row.label}</span>
                 <span className="shrink-0 font-medium tabular-nums">
-                  {formatCost(row.costUsd)}
-                  <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                    {row.tokens.toLocaleString()}
-                  </span>
+                  {formatTokens(row.tokens)}
                 </span>
               </div>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                 <div
                   className="h-full rounded-full bg-chart-1"
-                  style={{ width: `${Math.max((row.costUsd / max) * 100, 2)}%` }}
+                  style={{ width: `${Math.max((row.tokens / max) * 100, 2)}%` }}
                 />
               </div>
             </div>
@@ -178,7 +173,7 @@ export function UsagePage() {
   const data = usage.data;
   if (!data) return null;
 
-  const costLimit = quota.data?.costLimitUsd ? Number(quota.data.costLimitUsd) : null;
+  const tokenLimit = quota.data?.tokenLimit ?? null;
   // header label from the database's month, not the browser's
   const [py, pm] = (data?.period.start ?? "").split("-").map(Number);
   const period =
@@ -194,36 +189,36 @@ export function UsagePage() {
     <div className="space-y-6">
       <PageHeader title={t("usage:title")} description={t("usage:period", { period })} />
 
-      {data.tokens === 0 && data.costUsd === 0 ? (
+      {data.tokens === 0 ? (
         <EmptyState icon={BarChart3Icon} title={t("usage:noUsage")} />
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2">
             <StatCard
-              title={t("usage:totalCost")}
-              icon={CircleDollarSignIcon}
+              title={t("usage:totalTokens")}
+              icon={CoinsIcon}
               value={
                 <>
-                  {formatCost(data.costUsd)}
-                  {costLimit ? (
+                  {formatTokens(data.tokens)}
+                  {tokenLimit ? (
                     <span className="ml-1 text-sm font-normal text-muted-foreground">
-                      / {formatCost(costLimit)}
+                      / {formatTokens(tokenLimit)}
                     </span>
                   ) : null}
                 </>
               }
             >
-              {costLimit ? (
+              {tokenLimit ? (
                 <Progress
-                  value={Math.min(100, (data.costUsd / costLimit) * 100)}
+                  value={Math.min(100, (data.tokens / tokenLimit) * 100)}
                   className="h-1.5"
                 />
               ) : null}
             </StatCard>
             <StatCard
-              title={t("usage:totalTokens")}
-              icon={CoinsIcon}
-              value={data.tokens.toLocaleString()}
+              title={t("usage:remaining")}
+              icon={GaugeIcon}
+              value={tokenLimit ? formatTokens(Math.max(0, tokenLimit - data.tokens)) : "—"}
             />
           </div>
 
@@ -244,7 +239,6 @@ export function UsagePage() {
               rows={data.byModel.map((row) => ({
                 key: row.model,
                 label: row.model,
-                costUsd: row.costUsd,
                 tokens: row.tokens,
               }))}
             />
@@ -253,7 +247,6 @@ export function UsagePage() {
               rows={data.byTaskType.map((row) => ({
                 key: row.taskTypeId ?? "unknown",
                 label: row.taskTypeNameI18n ? lt(row.taskTypeNameI18n) : "—",
-                costUsd: row.costUsd,
                 tokens: row.tokens,
               }))}
             />

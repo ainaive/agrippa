@@ -80,8 +80,8 @@ spec:
             single-line verdict: PASS, FAIL, or PASS-WITH-FLAKES.
           produces: [verdict-report]
 
-  budgets:
-    maxCostUsd: 4
+  limits:
+    maxTokens: 800000
     maxDurationMinutes: 30
 
   outputs:

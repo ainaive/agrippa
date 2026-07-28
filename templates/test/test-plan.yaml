@@ -71,8 +71,8 @@ spec:
             case id, precondition, steps, expected result, priority.
           produces: [test-plan, case-matrix]
 
-  budgets:
-    maxCostUsd: 3
+  limits:
+    maxTokens: 600000
     maxDurationMinutes: 20
 
   outputs:

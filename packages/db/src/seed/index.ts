@@ -336,100 +336,91 @@ export async function seed(db: Db): Promise<void> {
     }
   }
 
-  // ── Models (prices are list USD per MTok) ─────────────────────────────────
+  // ── Models ────────────────────────────────────────────────────────────────
+  // `rank` is the selection preference within a tier (lower wins, ties break by
+  // provider model id). Spaced by 10 so new models can slot between builtins.
   const modelRows = [
     {
       provider: "anthropic",
       providerModelId: "claude-opus-4-8",
+      rank: 80,
       displayName: "Claude Opus 4.8",
       tier: "strong" as const,
       contextWindow: 1_000_000,
-      inputCostPerMtok: "5.00",
-      outputCostPerMtok: "25.00",
     },
     {
       provider: "anthropic",
       providerModelId: "claude-sonnet-5",
+      rank: 70,
       displayName: "Claude Sonnet 5",
       tier: "balanced" as const,
       contextWindow: 1_000_000,
-      inputCostPerMtok: "3.00",
-      outputCostPerMtok: "15.00",
     },
     {
       provider: "anthropic",
       providerModelId: "claude-haiku-4-5",
+      rank: 40,
       displayName: "Claude Haiku 4.5",
       tier: "fast" as const,
       contextWindow: 200_000,
-      inputCostPerMtok: "1.00",
-      outputCostPerMtok: "5.00",
     },
     // OpenAI models for the codex-cli executor (requirement-delivery reviewer
-    // slot). Verify current ids/pricing against the OpenAI price list when
-    // rolling out — admins can adjust rows in the registry. Model ids are
-    // auth-mode-dependent: the gpt-*-codex ids serve API-key auth but 400
-    // under a ChatGPT-account login (CODEX_HOME), which gpt-5.6-sol serves.
+    // slot). Verify current ids against OpenAI when rolling out — admins can
+    // adjust rows in the registry. Model ids are auth-mode-dependent: the
+    // gpt-*-codex ids serve API-key auth but 400 under a ChatGPT-account login
+    // (CODEX_HOME), which gpt-5.6-sol serves.
     {
       provider: "openai",
       providerModelId: "gpt-5.1-codex",
+      rank: 50,
       displayName: "GPT-5.1 Codex",
       tier: "strong" as const,
       contextWindow: 400_000,
-      inputCostPerMtok: "1.25",
-      outputCostPerMtok: "10.00",
     },
     {
       provider: "openai",
       providerModelId: "gpt-5.1-codex-mini",
+      rank: 20,
       displayName: "GPT-5.1 Codex Mini",
       tier: "fast" as const,
       contextWindow: 400_000,
-      inputCostPerMtok: "0.25",
-      outputCostPerMtok: "2.00",
     },
     {
       // codex-cli 0.145's default model; verified working under ChatGPT-account
-      // auth (the gpt-*-codex ids above are rejected there). Context/pricing
+      // auth (the gpt-*-codex ids above are rejected there). Context window
       // from OpenAI's model catalog (developers.openai.com/api/docs/models).
       provider: "openai",
       providerModelId: "gpt-5.6-sol",
+      rank: 90,
       displayName: "GPT-5.6 Sol",
       tier: "strong" as const,
       contextWindow: 1_050_000,
-      inputCostPerMtok: "5.00",
-      outputCostPerMtok: "30.00",
     },
     // Qwen via Aliyun Bailian (DashScope); runs need a per-project dashscope
-    // credential (project settings → providers). Prices are entry-tier list
-    // USD per MTok — Bailian tiers rates by input length, so verify against
-    // the live Model Studio price list when rolling out.
+    // credential (project settings → providers).
     {
       provider: "dashscope",
       providerModelId: "qwen3.7-max",
+      rank: 60,
       displayName: "Qwen3.7 Max",
       tier: "strong" as const,
       contextWindow: 1_000_000,
-      inputCostPerMtok: "2.50",
-      outputCostPerMtok: "7.50",
     },
     {
       provider: "dashscope",
       providerModelId: "qwen3.7-plus",
+      rank: 30,
       displayName: "Qwen3.7 Plus",
       tier: "balanced" as const,
       contextWindow: 1_000_000,
-      inputCostPerMtok: "0.32",
-      outputCostPerMtok: "1.28",
     },
     {
       provider: "dashscope",
       providerModelId: "qwen3.6-flash",
+      rank: 10,
       displayName: "Qwen3.6 Flash",
       tier: "fast" as const,
       contextWindow: 1_000_000,
-      inputCostPerMtok: "0.25",
-      outputCostPerMtok: "1.50",
     },
   ];
   for (const row of modelRows) {

@@ -71,9 +71,9 @@
   "steps": {
     "attempts": "共 {{count}} 次尝试"
   },
-  "budget": {
-    "title": "预算",
-    "cost": "费用",
+  "limits": {
+    "title": "用量上限",
+    "tokens": "Token",
     "duration": "时长",
     "perPhase": "分阶段上限"
   },
@@ -86,14 +86,13 @@
   "dashboard": {
     "openTasks": "进行中",
     "pendingApprovals": "待办审批",
-    "spend": "花费",
+    "tokens": "Token 用量",
     "total": "任务总数",
     "recent": "最近任务",
     "newTask": "新建任务",
     "viewAll": "查看全部",
-    "byModel": "按模型花费",
-    "noSpend": "本月尚无花费。",
-    "tokensCount": "{{formattedCount}} 个 Token",
+    "byModel": "按模型 Token 用量",
+    "noUsage": "本月尚无用量。",
     "empty": "还没有任务——去任务目录选择一个吧。"
   },
   "table": {

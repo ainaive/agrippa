@@ -12,7 +12,7 @@
     "scenario": "Scenario",
     "status": "Status",
     "tier": "Tier",
-    "pricing": "Pricing"
+    "rank": "Rank"
   },
   "template": {
     "published": "published",
@@ -32,8 +32,7 @@
     "editModel": "Edit model",
     "provider": "Provider",
     "providerModelId": "Provider model ID",
-    "inputCost": "Input $/Mtok",
-    "outputCost": "Output $/Mtok",
+    "rank": "Selection rank (lower = preferred)",
     "newSkill": "New skill",
     "description": "Description",
     "source": "Source",

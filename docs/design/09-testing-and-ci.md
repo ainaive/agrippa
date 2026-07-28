@@ -12,7 +12,7 @@ Toolchain: **Biome** (lint + format, one root config), **bun:test** everywhere, 
 - Expression language: interpolation, `when:` evaluation, rejection of anything outside the grammar.
 - Model-selection resolver: role→tier→model with grants, overrides, fallbacks, no-candidate errors.
 - Run state machine (`@agrippa/core`): full legal/illegal transition matrix.
-- `pickLocale`, `BudgetMeter` (accumulation, per-phase caps, resume-from-persisted-totals), RBAC decision matrix.
+- `pickLocale`, `UsageMeter` (accumulation, per-phase caps, resume-from-persisted-totals, quota refresh), RBAC decision matrix.
 
 ### Engine integration (the crown jewel — `@agrippa/orchestration` × FakeExecutor × real Postgres)
 
@@ -20,11 +20,11 @@ Runs against `docker-compose.dev.yml` Postgres. Scenarios, each asserting both `
 
 - happy path: all phases → `succeeded`, contract artifacts present, usage totals correct;
 - approval: pause (job completes, slot freed) → approve → resume; reject → `failed`; expire → per-template `onTimeout`;
-- budget: run-level and per-phase `maxCostUsd` abort; duration timeout → `timed_out`; project hard-stop quota mid-run;
+- usage limits: run-level and per-phase `maxTokens` abort; duration timeout → `timed_out`; project hard-stop quota mid-run;
 - crash-resume: kill mid-step → retry skips succeeded steps → resumes/restarts correct attempt → **no double-counted usage**; a **no-retry** step crash re-executes (not silently skipped) and resumes its session;
 - run lifecycle: `transitionRun` compare-and-swap, database-allocated event seq (no collision under concurrent append), `decideApproval` CAS on `pending`;
 - authorization: an ungranted optional MCP server is not resolved even when it exists in the registry;
-- budget: run-level and per-phase `maxCostUsd` abort; duration timeout → `timed_out`; project hard-stop quota mid-run; resume does not double-count the run's own spend against the quota;
+- usage limits: run-level and per-phase `maxTokens` abort; duration timeout → `timed_out`; project hard-stop quota mid-run; resume does not double-count the run's own consumption against the quota;
 - cancellation: mid-step abort latency, queued/waiting cancellation via API path;
 - `when:` false and unmet optional `requires:` → `skipped`;
 - required-artifact missing → `failed` with `contract_violation`.

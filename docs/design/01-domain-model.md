@@ -89,7 +89,7 @@ project_resource_grants (id pk, project_id fk,
 
 project_quotas (id pk, project_id fk unique,
            period text not null default 'monthly',
-           token_limit bigint null, cost_limit_usd numeric null,
+           token_limit bigint null,
            hard_stop boolean not null default true,
            current_period_start date)
 ```
@@ -149,7 +149,7 @@ models    (id pk, org_id fk, provider text,                   -- 'anthropic' | .
            display_name,
            tier text check in ('strong','balanced','fast'),
            capabilities jsonb, context_window int,
-           input_cost_per_mtok numeric, output_cost_per_mtok numeric, status)
+           rank integer not null default 100, status)
 ```
 
 ### Execution
@@ -169,7 +169,7 @@ runs      (id pk, task_id fk,
            faber_id fk, executor_id text,                     -- 'claude-agent-sdk'
            params_snapshot jsonb,                             -- immutable copy at submit
            model_resolution jsonb,                            -- role → concrete model, frozen at start
-           budget jsonb, usage_totals jsonb,
+           usage_totals jsonb,
            workspace_ref text, error jsonb,
            cancel_requested boolean not null default false,
            queued_at, started_at, finished_at, created_by fk)
@@ -205,7 +205,7 @@ token_usage (id pk, org_id fk, project_id fk, run_id fk, step_id fk null,
            model_id fk,
            input_tokens bigint, output_tokens bigint,
            cache_read_tokens bigint, cache_write_tokens bigint,
-           cost_usd numeric, occurred_at,
+           occurred_at,
            index (project_id, occurred_at))
 
 audit_logs (id pk, org_id fk, project_id fk null,
@@ -220,7 +220,7 @@ audit_logs (id pk, org_id fk, project_id fk null,
 - **Why `run_events` + `run_steps` both**: events give a replayable, gap-free timeline (SSE resume via `Last-Event-ID` = per-run `seq`); steps give cheap queryability (current status, per-step usage) without scanning events. The engine writes the event first, then updates the projection.
 - **Why `params_snapshot` on runs** when `tasks.params` exists: a retry may happen after the task type's template was republished with different inputs; the run must be self-contained and auditable.
 - **Why `model_resolution` frozen at run start**: role→tier→model resolution depends on project grants, which can change mid-run; freezing makes runs reproducible and usage attribution unambiguous. The freeze is per **run**, never per task — a retry re-resolves against current configuration and freezes its own resolution (ADR-0014).
-- **Why `token_usage.attempt`**: a retried step re-incurs cost; rows keyed by `(run_id, step_id, attempt)` let the budget meter sum persisted totals on resume without double-counting a partially-executed attempt (the attempt's rows are written incrementally and summed as-is — cost is real even when the attempt failed).
+- **Why `token_usage.attempt`**: a retried step consumes tokens again; rows keyed by `(run_id, step_id, attempt)` let the usage meter sum persisted totals on resume without double-counting a partially-executed attempt (the attempt's rows are written incrementally and summed as-is — the tokens were really spent even when the attempt failed).
 - **Why `mcp_servers.config_revision`**: MCP config is mutable head state (no full versioning in M1 — configs are small and secrets rotate); runs record the revision they resolved so audits can detect drift.
 - **Storage**: artifacts ≤ 64 KB are stored `inline` (jsonb/text); larger ones go to a disk-backed store at `storage_ref` (a Docker volume path in M1; the indirection allows S3 later).
 

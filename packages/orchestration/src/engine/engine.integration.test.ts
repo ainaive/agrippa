@@ -86,7 +86,7 @@ type DepsOptions = {
 
 type FixtureOptions = {
   params?: Record<string, unknown>;
-  quota?: { costLimitUsd?: number; tokenLimit?: number };
+  quota?: { tokenLimit?: number };
   /** Override the run's authorized-resource manifest (default: all template resources). */
   resourceManifest?: { mcpServers: string[]; skills: string[] };
 };
@@ -133,7 +133,6 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   if (options.quota) {
     await db.insert(projectQuotas).values({
       projectId: project.id,
-      costLimitUsd: options.quota.costLimitUsd?.toString(),
       tokenLimit: options.quota.tokenLimit,
       hardStop: true,
     });
@@ -191,7 +190,6 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
         mcpServers: template.spec.resources.mcpServers.map((m) => m.ref),
         skills: template.spec.resources.skills.map((s) => s.ref.split("@")[0] as string),
       },
-      budget: template.spec.budgets as unknown as Record<string, unknown>,
       createdBy: user.id,
     })
     .returning();
@@ -307,7 +305,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
 
     const [run2] = await db.select().from(runs).where(eq(runs.id, runId));
     expect(run2?.status).toBe("succeeded");
-    expect(Number((run2?.usageTotals as { costUsd: number } | null)?.costUsd)).toBeGreaterThan(0);
+    expect(Number((run2?.usageTotals as { tokens: number } | null)?.tokens)).toBeGreaterThan(0);
 
     // succeeded steps were NOT re-executed on resume
     expect(deps2.executor.attempts.get("reproduce-bug")).toBeUndefined();
@@ -396,9 +394,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(approval?.status).toBe("pending");
   });
 
-  it("aborts the run when the template budget is exceeded", async () => {
+  it("aborts the run when the template token limit is exceeded", async () => {
     const { db, runId, makeDeps } = await setupFixture();
-    // strong-tier output at $25/MTok: 2M output tokens ≈ $50 > $8 budget
+    // 2.01M tokens on one step blows past the template's 1.6M run limit
     const script: Record<string, FakeStepBehavior> = {
       ...HAPPY_SCRIPT,
       "find-root-cause": {
@@ -409,19 +407,54 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     };
     expect(await executeRun(makeDeps(script), runId)).toBe("failed");
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
-    expect((run?.error as { code: string } | null)?.code).toBe("budget_exceeded");
+    expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
+  });
+
+  it("fails when the run's very last step is the one that blows the token limit", async () => {
+    // The step loop checks interrupts at the TOP of each step, and runFlow goes
+    // straight from the last phase to finalize — so nothing re-checks the abort
+    // flag after the final step. `open-pr` (autoOpenPr: true) is that step, and
+    // here it succeeds and produces its artifact, so a swallowed abort would
+    // let the run finish 'succeeded' having blown its limit.
+    const { db, runId, makeDeps } = await setupFixture({ params: { autoOpenPr: true } });
+    const script: Record<string, FakeStepBehavior> = {
+      ...HAPPY_SCRIPT,
+      "open-pr": {
+        kind: "succeed",
+        usage: { inputTokens: 10_000, outputTokens: 2_000_000 },
+        events: [
+          { type: "artifact", key: "pr-link", kind: "link", inline: "https://github.com/x/1" },
+        ],
+        output: "pr opened",
+      },
+    };
+    await executeRun(makeDeps(script, { mcpServers: ["github"] }), runId);
+    await approve(db, runId);
+    expect(await executeRun(makeDeps(script, { mcpServers: ["github"] }), runId)).toBe("failed");
+    const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
+
+    // and the step that blew the limit is closed out — a failed run must not
+    // leave a row reading 'running' forever in the timeline
+    const [openPr] = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "open-pr")));
+    expect(openPr?.status).toBe("failed");
+    expect(openPr?.finishedAt).not.toBeNull();
+    expect((openPr?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
   });
 
   it("hard-stop project quota aborts mid-run", async () => {
     const { db, runId, makeDeps } = await setupFixture({ quota: { tokenLimit: 2000 } });
     expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
-    expect((run?.error as { code: string } | null)?.code).toBe("budget_exceeded");
+    expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
   });
 
-  it("resume does not double-count the run's own spend against the quota", async () => {
+  it("resume does not double-count the run's own consumption against the quota", async () => {
     const { runId, makeDeps } = await setupFixture({ quota: { tokenLimit: 3000 } });
-    // cheap pre-approval steps: reproduce-bug spends 1600, find-root-cause 200
+    // small pre-approval steps: reproduce-bug consumes 1600, find-root-cause 200
     const cheap: Record<string, FakeStepBehavior> = {
       ...HAPPY_SCRIPT,
       "reproduce-bug": {
@@ -439,7 +472,7 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
         output: "rc",
       },
     };
-    // spend 1600, then crash before the approval gate
+    // consume 1600, then crash before the approval gate
     await expect(
       executeRun(makeDeps({ ...cheap, "find-root-cause": { kind: "crash" } }), runId),
     ).rejects.toThrow("simulated worker crash");
@@ -536,9 +569,9 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect(rows[0]?.status).toBe("cancelled");
   });
 
-  it("expired duration budget times the run out on pickup", async () => {
+  it("expired duration limit times the run out on pickup", async () => {
     const { db, runId, makeDeps } = await setupFixture();
-    // simulate a run that started 46 minutes ago (budget: 45m)
+    // simulate a run that started 46 minutes ago (limit: 45m)
     await db
       .update(runs)
       .set({ status: "running", startedAt: new Date(Date.now() - 46 * 60_000) })
@@ -1173,7 +1206,6 @@ async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> 
       paramsSnapshot: params,
       modelResolution: { implementer: modelResolution, reviewer: modelResolution },
       resourceManifest: { mcpServers: [], skills: [] },
-      budget: {},
       createdBy: user.id,
     })
     .returning();

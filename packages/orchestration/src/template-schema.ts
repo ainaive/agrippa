@@ -129,11 +129,13 @@ const phaseSchema = z.object({
   steps: z.array(stepSchema).min(1),
 });
 
-const budgetsSchema = z.object({
-  maxCostUsd: z.number().positive().optional(),
+const limitsSchema = z.object({
+  maxTokens: z.number().int().positive().optional(),
   maxDurationMinutes: z.number().int().positive().optional(),
-  perPhase: z.record(idSchema, z.object({ maxCostUsd: z.number().positive() })).default({}),
+  perPhase: z.record(idSchema, z.object({ maxTokens: z.number().int().positive() })).default({}),
 });
+
+export type TemplateLimits = z.infer<typeof limitsSchema>;
 
 const outputsSchema = z.object({
   artifacts: z
@@ -179,7 +181,7 @@ export const templateDocSchema = z.object({
       allowProjectOverride: z.boolean().default(true),
     }),
     phases: z.array(phaseSchema).min(1),
-    budgets: budgetsSchema.default({ perPhase: {} }),
+    limits: limitsSchema.default({ perPhase: {} }),
     outputs: outputsSchema,
   }),
 });
@@ -345,7 +347,7 @@ export const templateDocV2Schema = z.object({
       allowProjectOverride: z.boolean().default(true),
     }),
     phases: z.array(flowNodeSchema).min(1),
-    budgets: budgetsSchema.default({ perPhase: {} }),
+    limits: limitsSchema.default({ perPhase: {} }),
     outputs: outputsSchema,
   }),
 });

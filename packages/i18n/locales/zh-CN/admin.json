@@ -12,7 +12,7 @@
     "scenario": "场景",
     "status": "状态",
     "tier": "档位",
-    "pricing": "价格"
+    "rank": "排序"
   },
   "template": {
     "published": "已发布",
@@ -32,8 +32,7 @@
     "editModel": "编辑模型",
     "provider": "提供商",
     "providerModelId": "提供商模型 ID",
-    "inputCost": "输入 $/百万 Token",
-    "outputCost": "输出 $/百万 Token",
+    "rank": "选用排序（数字越小越优先）",
     "newSkill": "新建技能",
     "description": "描述",
     "source": "来源",

@@ -59,7 +59,7 @@ export const catalogRoutes = new Hono<AppEnv>()
 
     let version: { id: string; version: number; compiled: unknown } | null = null;
     let inputs: unknown[] = [];
-    let budgets: unknown = null;
+    let limits: unknown = null;
     let agents: Record<string, unknown> | null = null;
     const live = await liveExecutorIds(db);
     if (template?.latestPublishedVersionId) {
@@ -71,7 +71,7 @@ export const catalogRoutes = new Hono<AppEnv>()
         const compiled = upgradeCompiledTemplate(row.compiled);
         version = { id: row.id, version: row.version, compiled: row.compiled };
         inputs = compiled.spec.inputs;
-        budgets = compiled.spec.budgets;
+        limits = compiled.spec.limits;
         // slot metadata for the submit page's agent pickers; the sentinel
         // (upgraded v1) resolves to the task type's default faber + the
         // deployment default executor, exactly as submit will
@@ -117,7 +117,7 @@ export const catalogRoutes = new Hono<AppEnv>()
         ? { id: faber.id, slug: faber.slug, nameI18n: faber.nameI18n, avatar: faber.avatar }
         : null,
       inputs,
-      budgets,
+      limits,
       agents,
       // null = no worker heartbeat yet (fresh deployment) — treat all as available
       availableExecutorIds: live.size === 0 ? null : [...live],

@@ -46,7 +46,6 @@ export const acceptInviteSchema = z.object({
 
 export const quotaUpdateSchema = z.object({
   tokenLimit: z.number().int().positive().nullable().optional(),
-  costLimitUsd: z.number().positive().nullable().optional(),
   hardStop: z.boolean().optional(),
 });
 
@@ -88,8 +87,12 @@ export const modelCreateSchema = z.object({
   displayName: z.string().min(1),
   tier: z.enum(MODEL_TIERS),
   contextWindow: z.number().int().positive().optional(),
-  inputCostPerMtok: z.number().nonnegative().optional(),
-  outputCostPerMtok: z.number().nonnegative().optional(),
+  /**
+   * Selection preference within the tier — lower wins. Bounded to the `integer`
+   * column's capacity (models.rank) so an out-of-range value is a 400 here
+   * rather than a Postgres error downstream.
+   */
+  rank: z.number().int().nonnegative().max(2_147_483_647).optional(),
 });
 
 /** Per-wire-protocol default endpoints; absent = the executor's native endpoint. */
@@ -118,8 +121,7 @@ export const modelUpdateSchema = z.object({
   displayName: z.string().min(1).optional(),
   tier: z.enum(MODEL_TIERS).optional(),
   contextWindow: z.number().int().positive().nullable().optional(),
-  inputCostPerMtok: z.number().nonnegative().nullable().optional(),
-  outputCostPerMtok: z.number().nonnegative().nullable().optional(),
+  rank: z.number().int().nonnegative().max(2_147_483_647).optional(),
   status: z.enum(["active", "disabled"]).optional(),
 });
 

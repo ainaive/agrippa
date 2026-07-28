@@ -665,7 +665,6 @@ export const projectRoutes = new Hono<AppEnv>()
       const input = c.req.valid("json");
       const values = {
         tokenLimit: input.tokenLimit ?? null,
-        costLimitUsd: input.costLimitUsd != null ? String(input.costLimitUsd) : null,
         hardStop: input.hardStop ?? true,
       };
       const [quota] = await c.var.db

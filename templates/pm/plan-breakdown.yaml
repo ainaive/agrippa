@@ -80,8 +80,8 @@ spec:
             summary table of milestones, then detailed work items.
           produces: [plan-breakdown]
 
-  budgets:
-    maxCostUsd: 4
+  limits:
+    maxTokens: 800000
     maxDurationMinutes: 30
 
   outputs:

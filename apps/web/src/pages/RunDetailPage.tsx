@@ -14,15 +14,15 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { BudgetMeter } from "@/features/runs/BudgetMeter";
 import { PhaseTimeline } from "@/features/runs/PhaseTimeline";
 import { RunActivityFeed } from "@/features/runs/RunActivityFeed";
 import { RunMetaCard } from "@/features/runs/RunMetaCard";
 import { RunTimeline } from "@/features/runs/RunTimeline";
+import { UsageLimitsCard } from "@/features/runs/UsageLimitsCard";
 import { useMe } from "../features/me";
 import { useRunEvents } from "../features/useRunEvents";
 import { api } from "../lib/api";
-import { formatCost, formatDuration, formatTime, lt } from "../lib/format";
+import { formatDuration, formatTime, formatTokensCompact, lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
 import type { Artifact, Run, RunStep } from "../lib/types";
 
@@ -124,8 +124,8 @@ export function RunDetailPage() {
           <>
             <RunStatusBadge status={current.status} />
             <span className="text-sm text-muted-foreground tabular-nums">
-              {current.usageTotals?.costUsd != null
-                ? `${formatCost(current.usageTotals.costUsd)} · `
+              {current.usageTotals?.tokens != null
+                ? `${formatTokensCompact(current.usageTotals.tokens)} ${t("limits.tokens")} · `
                 : ""}
               {formatDuration(current.startedAt, current.finishedAt)}
             </span>
@@ -200,10 +200,10 @@ export function RunDetailPage() {
           </Card>
           <Card>
             <CardHeader>
-              <CardTitle>{t("budget.title")}</CardTitle>
+              <CardTitle>{t("limits.title")}</CardTitle>
             </CardHeader>
             <CardContent>
-              <BudgetMeter run={current} />
+              <UsageLimitsCard run={current} />
             </CardContent>
           </Card>
           <Card>

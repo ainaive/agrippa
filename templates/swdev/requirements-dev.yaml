@@ -93,8 +93,8 @@ spec:
             a reviewer can check.
           produces: [implementation-plan]
 
-  budgets:
-    maxCostUsd: 6
+  limits:
+    maxTokens: 1200000
     maxDurationMinutes: 40
 
   outputs:

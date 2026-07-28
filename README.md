@@ -7,10 +7,10 @@ Agrippa is a team-oriented agent work platform. Teams collaborate in **projects*
 ## Three layers
 
 1. **Scenario layer** — a task catalog organized by work scenario; forms are auto-generated from template parameter schemas.
-2. **Orchestration layer** — Fabri execute runs by following orchestration templates: phases, bounded loops, steps, human checkpoints (approvals, question forms, review gates), model-selection rules, budgets. Engines are pluggable **per agent slot** — one run can pair a Claude Code implementer with an OpenAI Codex reviewer, as the flagship *Requirement Delivery* workflow does (clarify → plan → implement → review-fix loop → platform-opened PR).
+2. **Orchestration layer** — Fabri execute runs by following orchestration templates: phases, bounded loops, steps, human checkpoints (approvals, question forms, review gates), model-selection rules, usage limits. Engines are pluggable **per agent slot** — one run can pair a Claude Code implementer with an OpenAI Codex reviewer, as the flagship *Requirement Delivery* workflow does (clarify → plan → implement → review-fix loop → platform-opened PR).
 3. **Resource layer** — governed registries for models, sub-agents, Skills, MCP servers, and templates, with registration, immutable versioning, and project-level permission grants.
 
-Projects are the resource scope and billing boundary: enabled Skills/MCP/models, token budget & quota, connected repos and docs.
+Projects are the resource scope: enabled Skills/MCP/models, token quota, connected repos and docs.
 
 ## Status
 
@@ -78,10 +78,10 @@ Agrippa（硅基工坊）是一个面向团队的智能体工作平台。团队�
 ### 三层架构
 
 1. **场景层** —— 按工作场景组织的任务目录；提交表单由模板参数 Schema 自动生成。
-2. **编排层** —— 硅基人依照编排模板执行任务：阶段与有界循环、步骤、人工检查点（审批、问题表单、评审关卡）、模型选择规则、预算限制。执行引擎按**代理位**可插拔——同一次执行可以让 Claude Code 做实现者、OpenAI Codex 做评审者，旗舰工作流「需求交付」正是如此（澄清 → 规划 → 实现 → 评审-修复循环 → 平台创建 PR）。
+2. **编排层** —— 硅基人依照编排模板执行任务：阶段与有界循环、步骤、人工检查点（审批、问题表单、评审关卡）、模型选择规则、用量上限。执行引擎按**代理位**可插拔——同一次执行可以让 Claude Code 做实现者、OpenAI Codex 做评审者，旗舰工作流「需求交付」正是如此（澄清 → 规划 → 实现 → 评审-修复循环 → 平台创建 PR）。
 3. **资源层** —— 模型、子智能体、技能、MCP 服务与编排模板的受管注册表：注册、不可变版本、项目级授权。
 
-项目是资源与计费边界：项目级启用技能/MCP/模型、Token 预算与配额、关联代码仓库与文档。
+项目是资源边界：项目级启用技能/MCP/模型、Token 配额、关联代码仓库与文档。
 
 ### 当前状态
 
