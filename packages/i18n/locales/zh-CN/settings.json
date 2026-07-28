@@ -76,7 +76,6 @@
     "noModels": "该供应商下尚未登记模型。"
   },
   "quota": {
-    "costLimit": "每月费用上限（美元）",
     "tokenLimit": "每月 Token 上限",
     "hardStop": "超限后强制停止",
     "save": "保存配额",

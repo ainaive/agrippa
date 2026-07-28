@@ -46,7 +46,6 @@ export const acceptInviteSchema = z.object({
 
 export const quotaUpdateSchema = z.object({
   tokenLimit: z.number().int().positive().nullable().optional(),
-  costLimitUsd: z.number().positive().nullable().optional(),
   hardStop: z.boolean().optional(),
 });
 

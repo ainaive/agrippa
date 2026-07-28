@@ -5,16 +5,14 @@ import { and, eq, gte, sql } from "drizzle-orm";
 const periodStart = sql`date_trunc('month', now())`;
 
 export type ProjectUsage = {
-  costUsd: number;
   tokens: number;
-  byModel: Array<{ model: string; costUsd: number; tokens: number }>;
+  byModel: Array<{ model: string; tokens: number }>;
   byTaskType: Array<{
     taskTypeId: string | null;
     taskTypeNameI18n: LocalizedText | null;
-    costUsd: number;
     tokens: number;
   }>;
-  byDay: Array<{ day: string; costUsd: number; tokens: number }>;
+  byDay: Array<{ day: string; tokens: number }>;
   /** Month window boundaries from the database clock — the same calendar byDay is grouped in. */
   period: { start: string; today: string };
 };
@@ -27,7 +25,6 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
   const where = and(eq(tokenUsage.projectId, projectId), gte(tokenUsage.occurredAt, periodStart));
   const [totals] = await db
     .select({
-      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
       tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
     })
     .from(tokenUsage)
@@ -36,7 +33,6 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
   const byModel = await db
     .select({
       model: sql<string>`coalesce(${models.displayName}, 'unknown')`,
-      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
       tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
     })
     .from(tokenUsage)
@@ -49,7 +45,6 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
     .select({
       taskTypeId: taskTypes.id,
       nameI18n: taskTypes.nameI18n,
-      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
       tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
     })
     .from(tokenUsage)
@@ -69,7 +64,6 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
   const byDay = await db
     .select({
       day: sql<string>`to_char(date_trunc('day', ${tokenUsage.occurredAt}), 'YYYY-MM-DD')`,
-      cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
       tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
     })
     .from(tokenUsage)
@@ -78,51 +72,35 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
     .orderBy(sql`date_trunc('day', ${tokenUsage.occurredAt})`);
 
   return {
-    costUsd: Number(totals?.cost ?? 0),
     tokens: Number(totals?.tokens ?? 0),
-    byModel: byModel.map((row) => ({
-      model: row.model,
-      costUsd: Number(row.cost),
-      tokens: Number(row.tokens),
-    })),
+    byModel: byModel.map((row) => ({ model: row.model, tokens: Number(row.tokens) })),
     byTaskType: byTaskType.map((row) => ({
       taskTypeId: row.taskTypeId ?? null,
       taskTypeNameI18n: (row.nameI18n as LocalizedText | null) ?? null,
-      costUsd: Number(row.cost),
       tokens: Number(row.tokens),
     })),
-    byDay: byDay.map((row) => ({
-      day: row.day,
-      costUsd: Number(row.cost),
-      tokens: Number(row.tokens),
-    })),
+    byDay: byDay.map((row) => ({ day: row.day, tokens: Number(row.tokens) })),
     period: { start: period?.start ?? "", today: period?.today ?? "" },
   };
 }
 
 /**
- * Submit-time quota gate (docs/design/04): hard-stop quotas reject new work
- * once the current month's spend has reached either limit. The engine re-reads
- * the same month-scoped project usage at every step boundary (excluding the
- * run's own spend, which its budget meter already carries) for mid-run
- * enforcement, so this gate and the engine agree on the accounting window.
+ * Submit-time quota gate (docs/design/04): a hard-stop quota rejects new work
+ * once the current month's token consumption has reached the limit. The engine
+ * re-reads the same month-scoped project usage at every step boundary
+ * (excluding the run's own consumption, which its usage meter already carries)
+ * for mid-run enforcement, so this gate and the engine agree on both the
+ * accounting window and the measure.
  */
 export async function assertQuotaHeadroom(db: Db, projectId: string): Promise<void> {
   const [quota] = await db
     .select()
     .from(projectQuotas)
     .where(eq(projectQuotas.projectId, projectId));
-  if (!quota?.hardStop) return;
-  if (quota.costLimitUsd === null && quota.tokenLimit === null) return;
+  if (!quota?.hardStop || quota.tokenLimit === null) return;
 
   const usage = await projectUsage(db, projectId);
-  if (quota.costLimitUsd !== null && usage.costUsd >= Number(quota.costLimitUsd)) {
-    throw new AppError("quota_exhausted", 400, "The project's cost quota is exhausted", {
-      costUsd: usage.costUsd,
-      costLimitUsd: Number(quota.costLimitUsd),
-    });
-  }
-  if (quota.tokenLimit !== null && usage.tokens >= quota.tokenLimit) {
+  if (usage.tokens >= quota.tokenLimit) {
     throw new AppError("quota_exhausted", 400, "The project's token quota is exhausted", {
       tokens: usage.tokens,
       tokenLimit: quota.tokenLimit,

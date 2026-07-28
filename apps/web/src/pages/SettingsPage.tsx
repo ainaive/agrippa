@@ -721,11 +721,9 @@ function QuotaSection({ projectId }: { projectId: string }) {
     queryKey: ["quota", projectId],
     queryFn: () => api<Quota>(`/projects/${projectId}/quota`),
   });
-  const [costLimit, setCostLimit] = useState<string | null>(null);
   const [tokenLimit, setTokenLimit] = useState<string | null>(null);
   const [hardStop, setHardStop] = useState<boolean | null>(null);
 
-  const costValue = costLimit ?? (quota.data?.costLimitUsd ? String(quota.data.costLimitUsd) : "");
   const tokenValue = tokenLimit ?? (quota.data?.tokenLimit ? String(quota.data.tokenLimit) : "");
   const hardStopValue = hardStop ?? quota.data?.hardStop ?? true;
 
@@ -734,7 +732,6 @@ function QuotaSection({ projectId }: { projectId: string }) {
       api(`/projects/${projectId}/quota`, {
         method: "PUT",
         json: {
-          costLimitUsd: costValue ? Number(costValue) : null,
           tokenLimit: tokenValue ? Number(tokenValue) : null,
           hardStop: hardStopValue,
         },
@@ -748,15 +745,6 @@ function QuotaSection({ projectId }: { projectId: string }) {
 
   return (
     <div className="max-w-md space-y-4">
-      <div className="space-y-1">
-        <Label htmlFor="quota-cost">{t("settings:quota.costLimit")}</Label>
-        <Input
-          id="quota-cost"
-          type="number"
-          value={costValue}
-          onChange={(e) => setCostLimit(e.target.value)}
-        />
-      </div>
       <div className="space-y-1">
         <Label htmlFor="quota-tokens">{t("settings:quota.tokenLimit")}</Label>
         <Input

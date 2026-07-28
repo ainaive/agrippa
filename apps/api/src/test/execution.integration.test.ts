@@ -317,7 +317,6 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
   it("reports usage grouped by model, task type, and day", async () => {
     const usage = await jsonOf<{
-      costUsd: number;
       tokens: number;
       byModel: Array<{ model: string; tokens: number }>;
       byTaskType: Array<{ taskTypeNameI18n: Record<string, string> | null; tokens: number }>;
@@ -393,14 +392,13 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
   it("usage reports current-period totals and hard-stop quota blocks new submissions", async () => {
     const usage = await jsonOf<{
-      costUsd: number;
       tokens: number;
       byModel: Array<{ model: string }>;
     }>(await admin.request(`/api/v1/projects/${projectId}/usage`));
     expect(usage.tokens).toBeGreaterThan(0); // the succeeded run recorded usage
     expect(usage.byModel.length).toBeGreaterThan(0);
 
-    // exhaust the quota below current spend → submit rejected before persisting
+    // exhaust the quota below current consumption → submit rejected before persisting
     await admin.request(`/api/v1/projects/${projectId}/quota`, {
       method: "PUT",
       json: { tokenLimit: 1, hardStop: true },
@@ -526,7 +524,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       ],
     });
 
-    // a retry burns budget like any run — the quota hard-stop applies
+    // a retry consumes tokens like any run — the quota hard-stop applies
     await admin.request(`/api/v1/projects/${projectId}/quota`, {
       method: "PUT",
       json: { tokenLimit: 1, hardStop: true },

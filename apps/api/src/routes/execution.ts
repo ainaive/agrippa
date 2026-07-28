@@ -675,20 +675,17 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(runSteps)
       .where(eq(runSteps.runId, run.id))
       .orderBy(asc(runSteps.seq), asc(runSteps.attempt));
-    // per-step spend lives in token_usage (per attempt); aggregate it into the
-    // response so the timeline can show cost without an N+1 from the SPA
+    // per-step consumption lives in token_usage (per attempt); aggregate it into
+    // the response so the timeline can show tokens without an N+1 from the SPA
     const usageRows = await c.var.db
       .select({
         stepId: tokenUsage.stepId,
-        costUsd: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
         tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
       })
       .from(tokenUsage)
       .where(eq(tokenUsage.runId, run.id))
       .groupBy(tokenUsage.stepId);
-    const usageByStep = new Map(
-      usageRows.map((u) => [u.stepId, { costUsd: Number(u.costUsd), tokens: Number(u.tokens) }]),
-    );
+    const usageByStep = new Map(usageRows.map((u) => [u.stepId, { tokens: Number(u.tokens) }]));
     return c.json(rows.map((row) => ({ ...row, usage: usageByStep.get(row.id) ?? row.usage })));
   })
   .post("/runs/:id/cancel", async (c) => {

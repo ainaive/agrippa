@@ -161,7 +161,7 @@ describe.skipIf(!dbUp)("api integration (auth, projects, RBAC)", () => {
   it("quota: admin sets, viewer reads, member cannot write", async () => {
     const put = await alice.request(`/api/v1/projects/${projectId}/quota`, {
       method: "PUT",
-      json: { tokenLimit: 1_000_000, costLimitUsd: 50, hardStop: true },
+      json: { tokenLimit: 1_000_000, hardStop: true },
     });
     expect(put.status).toBe(200);
     expect((await jsonOf<{ tokenLimit: number }>(put)).tokenLimit).toBe(1_000_000);

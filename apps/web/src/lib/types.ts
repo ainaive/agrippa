@@ -318,6 +318,5 @@ export type TemplateRow = {
 
 export type Quota = {
   tokenLimit: number | null;
-  costLimitUsd: string | null;
   hardStop: boolean;
 } | null;
