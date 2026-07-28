@@ -176,6 +176,34 @@ export const models = pgTable("models", {
   createdAt: createdAtCol(),
 });
 
+// ── Provider catalog ──────────────────────────────────────────────────────────
+// The resolvable set of model providers (label, per-wire-protocol default
+// endpoints, auth policy, host allowlist pins). Replaces the code constant
+// PROVIDER_CATALOG for the variable part: builtins are seeded as org_id NULL
+// rows; custom providers (DeepSeek, self-hosted gateways, …) are org-scoped
+// and org_admin-created. models.provider / provider_credentials.provider match
+// provider_id. See docs/superpowers/specs/2026-07-28-…-slice2-design.md.
+export const PROVIDER_AUTH = ["project", "env"] as const;
+export type ProviderAuth = (typeof PROVIDER_AUTH)[number];
+
+/** { anthropic?: "https://…", openai?: "https://…" } — a base URL per wire protocol. */
+export type ProviderBaseUrls = Partial<Record<"anthropic" | "openai", string>>;
+
+export const providerCatalog = pgTable("provider_catalog", {
+  id: idCol(),
+  orgId: uuid("org_id").references(() => orgs.id), // null = builtin/deployment-level
+  providerId: text("provider_id").notNull().unique(),
+  label: text("label").notNull(),
+  baseUrls: jsonb("base_urls").$type<ProviderBaseUrls>().notNull().default({}),
+  auth: text("auth", { enum: PROVIDER_AUTH }).notNull(),
+  /** Host allowlist pins (".maas.aliyuncs.com" suffix or exact host); null = any https host. */
+  baseUrlHosts: jsonb("base_url_hosts").$type<string[] | null>(),
+  status: text("status", { enum: ["active", "disabled"] })
+    .notNull()
+    .default("active"),
+  createdAt: createdAtCol(),
+});
+
 // ── Executor registrations ────────────────────────────────────────────────────
 
 /**

@@ -5,6 +5,7 @@ import {
   models,
   orchestrationTemplates,
   orgs,
+  providerCatalog,
   scenarios,
   skills,
   skillVersions,
@@ -419,6 +420,37 @@ export async function seed(db: Db): Promise<void> {
   ];
   for (const row of modelRows) {
     await db.insert(models).values(row).onConflictDoNothing();
+  }
+
+  // ── Provider catalog (builtins, mirrored from PROVIDER_CATALOG) ──────────────
+  // org_id NULL = deployment-level; custom providers (org_admin-created) are
+  // org-scoped. This table is the resolvable provider set for resolution +
+  // runtime (see docs/superpowers/specs/2026-07-28-…-slice2-design.md).
+  const providerCatalogRows = [
+    {
+      providerId: "anthropic",
+      label: "Anthropic",
+      baseUrls: {},
+      auth: "env" as const,
+      baseUrlHosts: null,
+    },
+    {
+      providerId: "openai",
+      label: "OpenAI",
+      baseUrls: {},
+      auth: "env" as const,
+      baseUrlHosts: null,
+    },
+    {
+      providerId: "dashscope",
+      label: "Aliyun Bailian (DashScope)",
+      baseUrls: { anthropic: "https://dashscope.aliyuncs.com/apps/anthropic" },
+      auth: "project" as const,
+      baseUrlHosts: ["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", ".maas.aliyuncs.com"],
+    },
+  ];
+  for (const row of providerCatalogRows) {
+    await db.insert(providerCatalog).values(row).onConflictDoNothing();
   }
 
   // ── Default grants for existing projects ────────────────────────────────────
