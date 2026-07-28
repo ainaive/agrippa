@@ -69,7 +69,7 @@ summary: { from: result }
 ## 执行计划
 
 - **阶段（phase）**把步骤分组，用于时间线展示，也是审批节点的挂载点。**步骤顺序执行。**
-- 步骤类型：`agent`（一次智能体调用——指令、`model: {role}`，可选的 `subagents`/`skills`/`mcpServers` 取自 `spec.resources`）与 `system`（平台动作：`workspace.checkout`、`git.branch`、`git.push`、`pr.open`——v2）。
+- 步骤类型：`agent`（一次智能体调用——指令、`model: {role}`，可选的 `subagents`/`skills`/`mcpServers` 取自模板顶层声明的 `skills`/`mcpServers`/`subagents`）与 `system`（平台动作：`workspace.checkout`、`git.branch`、`git.push`、`pr.open`——v2）。
 - **工作区**：声明 `workspace: { repo: ${inputs.myRepo}, ref: ..., access: readOnly|readWrite }`，并在需要克隆的位置放一个 `kind: system, action: workspace.checkout` 步骤。
 - **控制流**——刻意保持极小：`when: <表达式>`（为假则跳过）、`retry: { max: N }`（同步骤重试）、`onFailure: continue`（记录失败后继续）。多智能体模板用 `slots:` 代替 `faber:`；有界循环（`kind: loop`）与检查点步骤（`kind: checkpoint`）在 v3/v2 可用（ADR-0010）；无界/通用循环仍是治理层面的决定（ADR-0006）。
 - **可选集成**：在 `resources` 中给 MCP 服务标记 `optional: true`，再用 `requires: { mcpServers: [name] }` 约束步骤——服务不可用时该步骤*跳过*而非失败。
@@ -105,7 +105,7 @@ budget:
     build: { maxCostUsd: 3 }
 ```
 
-产出物：智能体把文件写入工作区的 `.agrippa/artifacts/<key>`（平台会明确告知每个期望的键）；`patch` 类型的产出物由平台自动从工作区差异生成。每个 `produces:` 键都必须在 `outputs.artifacts` 中声明，每个 `required: true` 的产出物都必须有某个步骤产出——编译器检查连线，引擎保证交付。
+产出物：智能体把文件写入工作区的 `.agrippa/artifacts/<key>`（平台会明确告知每个期望的键）；`patch` 类型的产出物由平台自动从工作区差异生成。每个 `produces:` 键都必须在 `outputs` 中声明，每个 `required: true` 的产出物都必须有某个步骤产出——编译器检查连线，引擎保证交付。
 
 ## 校验清单
 

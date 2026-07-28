@@ -69,7 +69,7 @@ summary: { from: result }
 ## Execution plan
 
 - **Phases** group steps for the timeline and are the attachment point for approvals. **Steps run sequentially.**
-- Step kinds: `agent` (one agent invocation — instructions, `model: {role}`, optional `subagents`/`skills`/`mcpServers` drawn from `spec.resources`) and `system` (platform action: `workspace.checkout`, `git.branch`, `git.push`, `pr.open` — v2).
+- Step kinds: `agent` (one agent invocation — instructions, `model: {role}`, optional `subagents`/`skills`/`mcpServers` drawn from the template's declared `skills`/`mcpServers`/`subagents`) and `system` (platform action: `workspace.checkout`, `git.branch`, `git.push`, `pr.open` — v2).
 - **Workspace**: declare `workspace: { repo: ${inputs.myRepo}, ref: ..., access: readOnly|readWrite }` and add a `kind: system, action: workspace.checkout` step where the clone should happen.
 - **Control flow** — deliberately small: `when: <expression>` (skip the step when falsy), `retry: { max: N }` (same-step retries), `onFailure: continue` (record the failure, move on). Multi-agent templates declare `slots:` instead of `faber:`; bounded loops (`kind: loop`) and checkpoint steps (`kind: checkpoint`) are available in v3/v2 (ADR-0010); unbounded/general loops remain a governance decision (ADR-0006).
 - **Optional integrations**: mark an MCP server `optional: true` in `resources`, then gate steps with `requires: { mcpServers: [name] }` — the step is skipped, not failed, when it's unavailable.
@@ -105,7 +105,7 @@ budget:
     build: { maxCostUsd: 3 }
 ```
 
-Artifacts: agents write files to `.agrippa/artifacts/<key>` in the workspace (the platform tells them to, listing each expected key); `patch`-kind artifacts are generated automatically from the workspace diff. Every `produces:` key must be declared in `outputs.artifacts`, and every `required: true` artifact must be produced by some step — the compiler checks the wiring, the engine enforces delivery.
+Artifacts: agents write files to `.agrippa/artifacts/<key>` in the workspace (the platform tells them to, listing each expected key); `patch`-kind artifacts are generated automatically from the workspace diff. Every `produces:` key must be declared in `outputs`, and every `required: true` artifact must be produced by some step — the compiler checks the wiring, the engine enforces delivery.
 
 ## Validation checklist
 
