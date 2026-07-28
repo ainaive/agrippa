@@ -189,11 +189,15 @@ export class GitScmService implements ScmService {
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 500);
       if (response.status >= 400 && response.status < 500) {
-        const lookup = await fetch(
-          `${apiBase}/repos/${owner}/${repo}/pulls?state=open&base=${encodeURIComponent(spec.base)}&per_page=100`,
-          { headers },
-        );
-        if (lookup.ok) {
+        // the list endpoint has no head filter, so page through (bounded)
+        // and match client-side — one page could hide the duplicate behind
+        // 100 unrelated open PRs on the same base
+        for (let page = 1; page <= 5; page++) {
+          const lookup = await fetch(
+            `${apiBase}/repos/${owner}/${repo}/pulls?state=open&base=${encodeURIComponent(spec.base)}&per_page=100&page=${page}`,
+            { headers },
+          );
+          if (!lookup.ok) break;
           const open = (await lookup.json()) as Array<{
             html_url?: string;
             web_url?: string;
@@ -206,6 +210,7 @@ export class GitScmService implements ScmService {
           });
           const existingUrl = existing?.html_url ?? existing?.web_url;
           if (existingUrl) return { url: existingUrl };
+          if (open.length < 100) break;
         }
       }
       throw new Error(`GitCode PR creation failed (${response.status}): ${detail}`);

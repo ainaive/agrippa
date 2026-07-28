@@ -336,13 +336,23 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
         if (req.method === "GET" && url.pathname === "/api/v5/repos/acme/widget/pulls") {
           if (!state.recoverable) return Response.json([]);
           if (url.searchParams.get("state") !== "open") return Response.json([]);
-          return Response.json([
-            { html_url: "https://gitcode.local/acme/widget/pulls/9", head: { ref: "other" } },
-            {
-              html_url: "https://gitcode.local/acme/widget/pulls/3",
-              head: { ref: "agrippa/run-2-feedc0de1234" },
-            },
-          ]);
+          // the matching PR sits on page 2, behind a full page of unrelated
+          // open PRs — recovery must paginate, not stop at the first page
+          if (url.searchParams.get("page") === "2") {
+            return Response.json([
+              { html_url: "https://gitcode.local/acme/widget/pulls/9", head: { ref: "other" } },
+              {
+                html_url: "https://gitcode.local/acme/widget/pulls/3",
+                head: { ref: "agrippa/run-2-feedc0de1234" },
+              },
+            ]);
+          }
+          return Response.json(
+            Array.from({ length: 100 }, (_, i) => ({
+              html_url: `https://gitcode.local/acme/widget/pulls/f${i}`,
+              head: { ref: `filler-${i}` },
+            })),
+          );
         }
         return new Response("not found", { status: 404 });
       },
