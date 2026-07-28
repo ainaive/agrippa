@@ -2,7 +2,7 @@
 
 > Status: living · Last updated: 2026-07-23
 
-Templates are the contract between the scenario layer (auto-generated forms), the orchestration engine (phases, checkpoints, budgets), and executors (single-step agent invocations). They are authored in **YAML**, compiled to **zod-validated JSON**, and published as **immutable versions** ([ADR-0006](../adr/0006-yaml-template-format.md)).
+Templates are the contract between the scenario layer (auto-generated forms), the orchestration engine (phases, checkpoints, usage limits), and executors (single-step agent invocations). They are authored in **YAML**, compiled to **zod-validated JSON**, and published as **immutable versions** ([ADR-0006](../adr/0006-yaml-template-format.md)).
 
 Two authoring versions exist: `agrippa/v1` (linear phases, phase-level approvals) and `agrippa/v2` (agent slots, checkpoint steps, bounded loops, SCM actions — [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)). Both compile to one v2-shaped IR (`CompiledTemplate`); a pure `upgradeV1ToV2` runs at compile time and when loading stored compiled rows, so v1 templates keep working unchanged and no data migration ever happens.
 
@@ -37,7 +37,7 @@ spec:
   resources: {...}               # §Resources
   models: {...}                  # §Model selection
   phases: [...]                  # §Phases & steps
-  budgets: {...}                 # §Budgets
+  limits: {...}                  # §Limits
   outputs: {...}                 # §Output contract
 ```
 
@@ -144,17 +144,17 @@ phases:
 
 Interpolation contexts: `${inputs.<key>}`, `${steps.<stepId>.outputs.<key>}`, `${run.id}`, `${project.slug}`. The grammar is deliberately tiny and **non-Turing-complete**: property paths, `==`, `!=`, `&&`, `||`, `!`, literals. No loops, no user-defined functions, no arithmetic. `when:` takes one expression; `instructions:` allows embedded `${...}` substitution. This is a governance decision, not a technical limitation — templates must stay auditable ([ADR-0006](../adr/0006-yaml-template-format.md)).
 
-### Budgets
+### Limits
 
 ```yaml
-budgets:
-  maxCostUsd: 8
+limits:
+  maxTokens: 1600000
   maxDurationMinutes: 45
   perPhase:
-    fix: { maxCostUsd: 4 }
+    fix: { maxTokens: 800000 }
 ```
 
-Enforced by the engine's `BudgetMeter` from executor `usage` events, in addition to (never instead of) the project quota. See [04-execution-runtime](04-execution-runtime.md).
+Enforced by the engine's `UsageMeter` from executor `usage` events, in addition to (never instead of) the project quota. Tokens are counted as input + output, cache excluded — the same measure every usage aggregate uses. Limits carry no monetary unit ([ADR-0015](../adr/0015-tokens-as-the-unit-of-account.md)); see [04-execution-runtime](04-execution-runtime.md).
 
 ### Output contract
 
@@ -170,7 +170,7 @@ The engine fails a run that completes its steps without producing all `required`
 
 ## `agrippa/v2` additions ([ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md))
 
-v2 keeps everything above (inputs, workspace, resources, models, budgets, outputs) and changes the execution vocabulary. `templates/swdev/requirement-delivery.yaml` is the reference example.
+v2 keeps everything above (inputs, workspace, resources, models, limits, outputs) and changes the execution vocabulary. `templates/swdev/requirement-delivery.yaml` is the reference example.
 
 ### Agent slots (replaces `spec.faber`)
 
@@ -223,7 +223,7 @@ Decisions store a structured `response` on the checkpoint row, exposed as the `c
   phases: [...]                    # plain phases; no nested loops
 ```
 
-`until` is evaluated after each iteration. `run_steps`/`checkpoints`/`artifacts` carry an `iteration` column; expression reads (`steps.*`, `artifacts.*`, `checkpoints.*`) resolve to the **latest** iteration, and a forward reference to a same-loop checkpoint resolves to the *previous* iteration's response (empty on iteration 1) — how a clarify round reads the answers to the previous round's questions. `budgets.perPhase` caps a phase's cumulative spend across iterations.
+`until` is evaluated after each iteration. `run_steps`/`checkpoints`/`artifacts` carry an `iteration` column; expression reads (`steps.*`, `artifacts.*`, `checkpoints.*`) resolve to the **latest** iteration, and a forward reference to a same-loop checkpoint resolves to the *previous* iteration's response (empty on iteration 1) — how a clarify round reads the answers to the previous round's questions. `limits.perPhase` caps a phase's cumulative token consumption across iterations.
 
 ### System actions & new expression roots
 
@@ -378,11 +378,11 @@ spec:
           instructions: "Push the branch and open a PR; include the fix report as the body."
           produces: [pr-link]
 
-  budgets:
-    maxCostUsd: 8
+  limits:
+    maxTokens: 1600000
     maxDurationMinutes: 45
     perPhase:
-      fix: { maxCostUsd: 4 }
+      fix: { maxTokens: 800000 }
 
   outputs:
     artifacts:
@@ -408,4 +408,4 @@ spec:
 
 ## Engine/Executor Split (the portability rule)
 
-The **engine** (`@agrippa/orchestration`) interprets everything structural: phases, step ordering, `when` conditions, approvals, retries, budgets, the output contract. The **executor** only ever executes **one step** — one agent invocation, possibly with sub-agents. No template concept may require executor-specific behavior; if a step can't be expressed as "prompt + resources + model + tool policy", the format (not the executor contract) must grow. This is what keeps templates portable across future engines ([ADR-0005](../adr/0005-executor-step-granularity.md)).
+The **engine** (`@agrippa/orchestration`) interprets everything structural: phases, step ordering, `when` conditions, approvals, retries, usage limits, the output contract. The **executor** only ever executes **one step** — one agent invocation, possibly with sub-agents. No template concept may require executor-specific behavior; if a step can't be expressed as "prompt + resources + model + tool policy", the format (not the executor contract) must grow. This is what keeps templates portable across future engines ([ADR-0005](../adr/0005-executor-step-granularity.md)).

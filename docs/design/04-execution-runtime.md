@@ -2,16 +2,16 @@
 
 > Status: living · Last updated: 2026-07-23
 
-How a submitted task becomes a finished run: queueing, the run state machine, resumability, approvals, cancellation, budgets, and live progress. Queue: **pg-boss** ([ADR-0003](../adr/0003-pg-boss-over-bullmq.md)); live progress: **SSE** ([ADR-0007](../adr/0007-sse-over-websocket.md)).
+How a submitted task becomes a finished run: queueing, the run state machine, resumability, approvals, cancellation, usage limits, and live progress. Queue: **pg-boss** ([ADR-0003](../adr/0003-pg-boss-over-bullmq.md)); live progress: **SSE** ([ADR-0007](../adr/0007-sse-over-websocket.md)).
 
 ## Submission (transactional)
 
 `POST /projects/:id/tasks` validates params against the compiled template inputs, verifies each `repoRef` points at a repo connection **owned by the project**, checks resource grants and quota headroom, then in **one Postgres transaction**:
 
 1. insert `tasks` row,
-2. insert `runs` row (`status = queued`, pinned `template_version_id`, `params_snapshot`, frozen slot-keyed `model_resolution`, frozen `agent_bindings` (slot → faber + executor, from template defaults + submit-time overrides — see [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)), a pinned `resource_manifest` of the skills/MCP the run is authorized to use, computed `budget`).
+2. insert `runs` row (`status = queued`, pinned `template_version_id`, `params_snapshot`, frozen slot-keyed `model_resolution`, frozen `agent_bindings` (slot → faber + executor, from template defaults + submit-time overrides — see [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)), a pinned `resource_manifest` of the skills/MCP the run is authorized to use).
 
-Model resolution (`resolveAgentBindings` → `resolveSlotModels`, ADR-0013) is per slot and **role-scoped**: each slot resolves only the roles its steps (and their subagents) reference. Provider-constrained slots resolve **single-provider** — a step's base URL is process-wide and its subagents share the query, so a mixed slot could not execute. Candidate providers come from the executor's catalog entry; those whose catalog auth policy is `project` without a `provider_credentials` row are excluded (if that is the only blocker the submit fails with `provider_credential_required`), and the winner ranks by: has a project credential, lowest total input cost over the slot's roles, provider id. The `"*"` provider set (fake/demo, custom executors) keeps the legacy mixed cheapest-per-tier resolution with no credential gating. Note the asymmetry: the `auth` policy governs only whether submission **requires** a credential — a stored credential for an env-policy provider (`anthropic`/`openai`) is still fully live: it wins the resolution ranking, satisfies the keyless-worker preflight, and overrides worker-env auth at every step.
+Model resolution (`resolveAgentBindings` → `resolveSlotModels`, ADR-0013) is per slot and **role-scoped**: each slot resolves only the roles its steps (and their subagents) reference. Provider-constrained slots resolve **single-provider** — a step's base URL is process-wide and its subagents share the query, so a mixed slot could not execute. Candidate providers come from the executor's catalog entry; those whose catalog auth policy is `project` without a `provider_credentials` row are excluded (if that is the only blocker the submit fails with `provider_credential_required`), and the winner ranks by: has a project credential, lowest total selection rank over the slot's roles, provider id. The `"*"` provider set (fake/demo, custom executors) keeps the legacy mixed most-preferred-per-tier resolution with no credential gating. Note the asymmetry: the `auth` policy governs only whether submission **requires** a credential — a stored credential for an env-policy provider (`anthropic`/`openai`) is still fully live: it wins the resolution ranking, satisfies the keyless-worker preflight, and overrides worker-env auth at every step.
 
 After the transaction commits, the handler enqueues the pg-boss job `run.execute({runId})`. The `resource_manifest` is the authorization boundary: required grants are enforced at submit and optional resources are included **only when granted**, so the worker resolves skills/MCP strictly from the manifest and never re-reads the mutable global registry — an ungranted optional resource is simply unavailable (see [ADR-0009](../adr/0009-security-correctness-deep-modules.md)). Project provider credentials are the same shape of boundary for model auth: the engine asks the worker's materializer for the project's credential per provider fresh at each step (decrypted in the worker, registered with the redactor before use) and attaches it to the request. Absence falls back to worker-env auth only where that fallback is legitimate — on a real (cataloged) executor a missing credential fails the step with `provider_credential_required` whenever the provider's auth policy is `project` **or** this worker advertises no env auth for it; demo and uncataloged executors are never gated (ADR-0013 amendments 2 §4 and 4 §2).
 
@@ -74,14 +74,14 @@ for each flow node (phase | loop):
                   → replace .claude/.mcp.json; materialize authorized resources
                   → executor.executeStep(req, ctx)
                   → persist every event to run_events (seq++), publish to Redis,
-                    update run_steps, record token_usage, feed BudgetMeter
+                    update run_steps, record token_usage, feed UsageMeter
 enforce output contract (required artifacts present? latest iteration wins)
 finalize: usage_totals, workspace cleanup, terminal event
 ```
 
 ### Run-level retry (re-submission)
 
-Task retry (`POST /tasks/:id/retry`) creates run #N+1 as a **re-submission of the pinned task** (ADR-0014): the template version and params snapshot are copied, while everything derived from project configuration — agent bindings, per-slot model resolution, the resource manifest, the budget, quota headroom, repo-ref ownership — re-resolves through the same helper submit uses, applying the task's persisted submit-time agent overrides. Unchanged configuration reproduces the previous bindings deterministically; changed configuration is picked up, so a config fix heals a failed task instead of re-billing a doomed run. Configuration that still cannot satisfy a slot fails at the endpoint with submit's error codes, never mid-run. This is distinct from the *step-level* retry below, which resumes inside one run.
+Task retry (`POST /tasks/:id/retry`) creates run #N+1 as a **re-submission of the pinned task** (ADR-0014): the template version and params snapshot are copied, while everything derived from project configuration — agent bindings, per-slot model resolution, the resource manifest, quota headroom, repo-ref ownership — re-resolves through the same helper submit uses, applying the task's persisted submit-time agent overrides. Unchanged configuration reproduces the previous bindings deterministically; changed configuration is picked up, so a config fix heals a failed task instead of burning another run's worth of tokens on a doomed one. Configuration that still cannot satisfy a slot fails at the endpoint with submit's error codes, never mid-run. This is distinct from the *step-level* retry below, which resumes inside one run.
 
 ### Resumability (step-granular)
 
@@ -92,7 +92,7 @@ Steps are the idempotency unit. On retry/resume, the engine loads `run_steps`, *
 - Workspaces are **host-local**: when a succeeded checkout has no repository behind it on this host (the resume landed elsewhere, or the files were removed), the engine's `isIntact()` probe fails the run with `workspace_lost` up front instead of letting every subsequent step run against an empty directory — see [03-executor-abstraction](03-executor-abstraction.md) on the host-affinity boundary.
 - Repository workspaces also require the trusted platform gitdir created at checkout. Legacy workspaces without it fail `workspace_lost`; they are never reconstructed from agent-writable metadata.
 
-Budget correctness on resume: the `BudgetMeter` initializes from **persisted** `token_usage` totals, and usage rows are keyed by `(run_id, step_id, attempt)` — a partially-executed attempt's cost is counted, never double-counted.
+Usage-accounting correctness on resume: the `UsageMeter` initializes from **persisted** `token_usage` totals, and usage rows are keyed by `(run_id, step_id, attempt)` — a partially-executed attempt's tokens are counted, never double-counted.
 
 ### Patch evidence and snapshot publication
 
@@ -117,18 +117,18 @@ Decisions are a compare-and-swap on `status = 'pending'` (`run-lifecycle.decideC
 
 ### Loops
 
-`kind: loop` nodes repeat their phases up to a static `maxIterations`, evaluating `until` after each iteration. All step/checkpoint/artifact rows carry an `iteration`; the resume iteration is **derived** from those rows (no extra state table), so crash recovery inside a loop reuses the ordinary skip-succeeded logic. Expression reads resolve to the latest iteration; loop lifecycle events (`loop.iteration.started`, `loop.completed`, `loop.exhausted`) consult the event log so resumes never re-emit them. `budgets.perPhase` caps a phase's **cumulative** spend across iterations; the run budget plus the static bound cap the loop as a whole.
+`kind: loop` nodes repeat their phases up to a static `maxIterations`, evaluating `until` after each iteration. All step/checkpoint/artifact rows carry an `iteration`; the resume iteration is **derived** from those rows (no extra state table), so crash recovery inside a loop reuses the ordinary skip-succeeded logic. Expression reads resolve to the latest iteration; loop lifecycle events (`loop.iteration.started`, `loop.completed`, `loop.exhausted`) consult the event log so resumes never re-emit them. `limits.perPhase` caps a phase's **cumulative** token consumption across iterations; the run token limit plus the static bound cap the loop as a whole.
 
 ### Cancellation
 
 `POST /runs/:id/cancel` sets `runs.cancel_requested = true` and publishes on Redis channel `run:{id}:control`. The worker's control subscriber fires the run's `AbortController`; the executor aborts; the engine records `cancelled`. If no worker holds the run (queued / waiting_approval), the API transitions it directly and cancels the pending job. The DB flag backstops the pubsub message (worker checks it at step boundaries), so a lost message delays cancellation by at most one step.
 
-### Budgets & quota
+### Usage limits & quota
 
-Two independent layers, both enforced:
+Two independent layers, both enforced, both denominated in **tokens** — the platform has no notion of money ([ADR-0015](../adr/0015-tokens-as-the-unit-of-account.md)):
 
-- **Run budget** (template `budgets`): `BudgetMeter` accumulates `usage` events against run-level and per-phase `maxCostUsd`; breach → abort signal → `failed` with `budget_exceeded`. `maxDurationMinutes` → composed `AbortSignal.timeout` → `timed_out`.
-- **Project quota** (`project_quotas`): checked at submit (reject with quota error) and re-read from the database at every step boundary; if `hard_stop` and exhausted mid-run → abort as `budget_exceeded` with quota provenance. Submit and engine count the **same monthly window**, and the engine's headroom **excludes the run's own spend** (the meter already carries it, so including it would double-count on resume). Re-reading each step lets concurrent runs see each other's spend rather than each measuring only a stale start-of-run snapshot. Soft quotas surface warnings in the UI instead of aborting.
+- **Run limits** (template `limits`): `UsageMeter` accumulates `usage` events against run-level and per-phase `maxTokens`; breach → abort signal → `failed` with `usage_limit_exceeded`. `maxDurationMinutes` → composed `AbortSignal.timeout` → `timed_out`.
+- **Project quota** (`project_quotas.token_limit`): checked at submit (reject with quota error) and re-read from the database at every step boundary; if `hard_stop` and exhausted mid-run → abort as `usage_limit_exceeded` with quota provenance. Submit and engine count the **same monthly window** and the **same measure** (input + output tokens, cache excluded), and the engine's headroom **excludes the run's own consumption** (the meter already carries it, so including it would double-count on resume). Re-reading each step lets concurrent runs see each other's consumption rather than each measuring only a stale start-of-run snapshot. Soft quotas surface warnings in the UI instead of aborting.
 
 ## Live Progress (SSE)
 

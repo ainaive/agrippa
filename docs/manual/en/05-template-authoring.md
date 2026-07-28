@@ -76,7 +76,7 @@ spec:
 
 `${...}` placeholders work in instructions, workspace fields, and `when`. The language is property paths plus `==`, `!=`, `&&`, `||`, `!`, literals, and parentheses — nothing else. Available roots: `inputs.*`, `steps.<id>.outputs.result` (an earlier step's final output), `run.id`/`run.number`, `project.slug`/`project.name`. The compiler rejects references to unknown inputs or to steps defined later.
 
-## Approvals, budgets, artifacts
+## Approvals, limits, artifacts
 
 ```yaml
 phases:
@@ -88,11 +88,11 @@ phases:
       timeout: 48h                     # then: cancel | reject | approve
       onTimeout: cancel
 
-budgets:
-  maxCostUsd: 6
+limits:
+  maxTokens: 1200000
   maxDurationMinutes: 40
   perPhase:
-    build: { maxCostUsd: 3 }
+    build: { maxTokens: 600000 }
 ```
 
 Artifacts: agents write files to `.agrippa/artifacts/<key>` in the workspace (the platform tells them to, listing each expected key); `patch`-kind artifacts are generated automatically from the workspace diff. Every `produces:` key must be declared in `outputs.artifacts`, and every `required: true` artifact must be produced by some step — the compiler checks the wiring, the engine enforces delivery.

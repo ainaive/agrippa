@@ -76,7 +76,7 @@ spec:
 
 `${...}` 占位符可用于指令、工作区字段与 `when`。语言只有属性路径加 `==`、`!=`、`&&`、`||`、`!`、字面量与括号——再无其他。可用的根：`inputs.*`、`steps.<id>.outputs.result`（前序步骤的最终输出）、`run.id`/`run.number`、`project.slug`/`project.name`。编译器会拒绝引用不存在的输入或定义在后面的步骤。
 
-## 审批、预算、产出物
+## 审批、用量上限、产出物
 
 ```yaml
 phases:
@@ -88,11 +88,11 @@ phases:
       timeout: 48h                     # 到期后：cancel | reject | approve
       onTimeout: cancel
 
-budgets:
-  maxCostUsd: 6
+limits:
+  maxTokens: 1200000
   maxDurationMinutes: 40
   perPhase:
-    build: { maxCostUsd: 3 }
+    build: { maxTokens: 600000 }
 ```
 
 产出物：智能体把文件写入工作区的 `.agrippa/artifacts/<key>`（平台会明确告知每个期望的键）；`patch` 类型的产出物由平台自动从工作区差异生成。每个 `produces:` 键都必须在 `outputs.artifacts` 中声明，每个 `required: true` 的产出物都必须有某个步骤产出——编译器检查连线，引擎保证交付。

@@ -6,6 +6,19 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Tokens are the unit of account — Agrippa tracks no money** ([ADR-0015](docs/adr/0015-tokens-as-the-unit-of-account.md)). Every dollar figure the product showed was an inference from a registry price table it could not keep accurate: list rates drift silently, Bailian tiers Qwen pricing by input length, and Codex under ChatGPT-account auth has no per-token price at all. Tokens come straight from the executor, so they replace money everywhere.
+  - *Template format (breaking).* `spec.budgets` → `spec.limits`; `maxCostUsd` → `maxTokens`, per-phase caps likewise; `maxDurationMinutes` unchanged. Builtins converted once at 200 000 tokens per USD. Versions published before this keep working — `upgradeCompiledTemplate` normalizes a stored `spec.budgets` (duration cap survives, cost caps drop), so pinned runs don't break. A draft still written against `spec.budgets` now fails compilation instead of silently losing its cap.
+  - *Vocabulary (breaking).* `BudgetMeter` → `UsageMeter`, `BudgetExceededError` → `UsageLimitExceededError`, `ExecutionContext.budget` → `.usage`, error code `budget_exceeded` → `usage_limit_exceeded`, run-detail "Budget" card → "Usage limits". Tokens count input + output, cache excluded — the same measure the quota gate uses.
+  - *Model selection (breaking).* New `models.rank` (integer, lower wins, ties by model id) replaces price as the ordering key for both cheapest-in-tier resolution and the cross-provider tie-break. Migration `0010` backfills it from the existing prices, so an upgraded deployment resolves exactly what it did before; it also removes two pre-existing nondeterminisms where equal prices resolved by unspecified row order.
+  - *API (breaking).* `costUsd` is gone from `GET /projects/:id/usage`, `GET /runs/:id/steps`, and run payloads; `costLimitUsd` is gone from the quota endpoints; `POST/PATCH /models` take `rank` instead of the two price fields.
+  - *UI.* Every visualization survives, re-based on tokens: "Daily spend" → daily tokens, "Spend by model" → tokens by model, the dashboard spend tile → tokens against the token quota, and the Usage page's second tile → remaining monthly headroom. `formatCost` is replaced by `formatTokens`/`formatTokensCompact`.
+
+### Removed
+
+- **The money columns** (migration `0011`, irreversible): `token_usage.cost_usd`, `project_quotas.cost_limit_usd`, `models.input_cost_per_mtok`, `models.output_cost_per_mtok`, and `runs.budget` — the last a denormalized copy of limits whose authoritative source was always the pinned `template_versions.compiled` row. Token counts, quotas, and all rows are preserved. Two cosmetic leftovers, neither read by anything: runs that failed before the upgrade still render the raw code `budget_exceeded`, and their `usage_totals` jsonb still carries a `costUsd` key.
+
 ### Added
 
 - **Custom model providers + merged Models&Providers UI (slice 2)** — a member can now use a custom provider (DeepSeek, a self-hosted gateway, any Anthropic/OpenAI-compatible endpoint) end-to-end, and provider config + model config live in one place at each layer:

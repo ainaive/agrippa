@@ -1,6 +1,6 @@
 # Concepts
 
-**Project** — the collaboration unit and the boundary for everything: membership, resource grants, budgets/quotas, repositories, and billing attribution. Users can belong to many projects with different roles: **admin** (manage members, grants, repos, quota), **member** (submit tasks, decide approvals, cancel runs), **viewer** (read-only).
+**Project** — the collaboration unit and the boundary for everything: membership, resource grants, quotas, repositories, and usage attribution. Users can belong to many projects with different roles: **admin** (manage members, grants, repos, quota), **member** (submit tasks, decide approvals, cancel runs), **viewer** (read-only).
 
 **Scenario & task type** — the catalog is organized by work scenario (project management, software development, test & verification). A *task type* is one concrete thing you can ask for — "Bug Localization & Fix", "Test Plan" — and binds a scenario to an orchestration template and a default Faber.
 
@@ -12,7 +12,7 @@
 
 **Agent slot & executor** — newer templates declare named *agent slots* (e.g. **Implementer** and **Reviewer**), each pairing a Faber persona with an *executor* — the engine that actually runs the agent (Claude Code or OpenAI Codex). When a slot is overridable you can swap its persona or engine at submission; the roles are interchangeable by design — within what the chosen engine supports: the engine must be available on the deployment and a model from its provider must be granted to the project, so the submit form only offers combinations that will actually run.
 
-**Orchestration template** — the versioned, declarative recipe a run follows: input parameters (which auto-generate the submission form), phases and steps, which skills/MCP servers/sub-agents each step uses, model-selection rules, human checkpoints (approvals, question forms, review gates), budgets, and the artifact contract. Published versions are immutable; editing creates the next version.
+**Orchestration template** — the versioned, declarative recipe a run follows: input parameters (which auto-generate the submission form), phases and steps, which skills/MCP servers/sub-agents each step uses, model-selection rules, human checkpoints (approvals, question forms, review gates), usage limits, and the artifact contract. Published versions are immutable; editing creates the next version.
 
 **Model roles & tiers** — templates never name concrete models. They declare roles (e.g. `planning`, `coding`, `fast`) mapped to tiers (**strong / balanced / fast**); at submission the platform resolves each role to the cheapest granted model of that tier. Swapping a project's model lineup requires no template changes.
 
@@ -24,7 +24,7 @@
 
 **Comments** — every run has a discussion thread woven into its timeline. Members can comment at any point; comments appear live for everyone watching the run.
 
-**Budget vs quota** — a *budget* belongs to the template/run: max cost and duration for one run (optionally per phase). A *quota* belongs to the project: monthly cost/token ceilings across all runs. With **hard stop** enabled, an exhausted quota rejects new submissions and aborts in-flight runs at the next step boundary; without it, it's advisory.
+**Run limits vs project quota** — a *run limit* belongs to the template/run: a token ceiling and a time ceiling for one run (optionally per phase). A *quota* belongs to the project: a monthly token ceiling across all runs. Both are measured in tokens — Agrippa tracks no money at all. With **hard stop** enabled, an exhausted quota rejects new submissions and aborts in-flight runs at the next step boundary; without it, it's advisory.
 
 **Resource grant** — the switch that makes a registry resource (model, skill, MCP server, Faber) usable inside a project. Registries are org-wide; grants are per-project — that's how an admin controls which team can use which model or integration.
 
