@@ -97,7 +97,7 @@ function StepRow({ step, attempts }: { step: RunStep; attempts: number }) {
         <p className="truncate text-sm font-medium">{step.stepId}</p>
         <p className="text-xs text-muted-foreground">
           {step.startedAt ? formatDuration(step.startedAt, step.finishedAt) : "—"}
-          {step.usage.tokens ? ` · ${formatTokensCompact(step.usage.tokens)}` : ""}
+          {step.usage.tokens != null ? ` · ${formatTokensCompact(step.usage.tokens)}` : ""}
           {attempts > 1 ? ` · ${t("steps.attempts", { count: attempts })}` : ""}
         </p>
       </div>

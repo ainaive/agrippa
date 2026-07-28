@@ -107,7 +107,7 @@ models:
   allowProjectOverride: true     # project grants may pin roles to specific models
 ```
 
-Resolution order per role: project override (if allowed) → cheapest enabled granted model of the tier → fallback tiers in order → submit-time error.
+Resolution order per role: project override (if allowed) → lowest-`rank` enabled granted model of the tier → fallback tiers in order → submit-time error.
 
 ### Phases & steps
 

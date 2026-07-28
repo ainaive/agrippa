@@ -103,7 +103,7 @@ export type GrantedModelRow = {
   rank: number;
 };
 
-/** role → cheapest model for its tier chain from a pre-bucketed candidate set. */
+/** role → most-preferred model for its tier chain from a pre-bucketed candidate set. */
 function resolveRolesFrom(
   candidates: GrantedModelRow[],
   roleSpecs: CompiledTemplate["spec"]["models"]["roles"],
@@ -284,7 +284,7 @@ export function slotRoleSets(compiled: CompiledTemplate): Map<string, Set<string
 }
 
 /**
- * All-roles resolution against a project's grants — role → tier → cheapest
+ * All-roles resolution against a project's grants — role → tier → lowest rank
  * granted active model, frozen into runs.model_resolution at submit. Kept as
  * the general-purpose entry point (compliance fixtures seed runs with it);
  * slot-scoped submission goes through resolveSlotModels via

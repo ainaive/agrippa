@@ -62,6 +62,6 @@ Navigation lives in the **left sidebar**. At its top sits the **project switcher
 3. **Add a provider key if a task needs one** (Project → Settings → Resources): each provider groups its key and model grants in one place — e.g. an Aliyun Bailian/DashScope key for Qwen models. Adding a key **also grants that provider's built-in models automatically**.
 4. **Need a custom provider?** (Admin → Models & Providers): an org admin registers a custom provider (DeepSeek, a self-hosted gateway, …) with its Anthropic- or OpenAI-compatible endpoint and a host allowlist, then registers models under it. Projects then configure a key for it in Resources just like a builtin.
 5. **Fine-tune grants only if needed** (Project → Settings → Resources): built-ins are already on; toggle off anything you don't want. The submit summary shows a **readiness checklist** (models, key, skills, repo) before you submit — each failing item links straight to the settings tab to fix.
-6. **Set a quota** (Project → Settings → Quota), optionally: a monthly token ceiling with a hard stop.
+6. **Set a quota** (Project → Settings → Quota), optionally: a monthly token ceiling, with **hard stop** on to reject new submissions and abort in-flight runs once it is reached, or off to leave it advisory.
 7. **Invite teammates** (Project → Settings → Members) by email — they must have signed up first. Roles: admin / member / viewer.
 8. **Submit your first task** from the Catalog tab — try *Status Report* against your connected repo.

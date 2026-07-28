@@ -154,9 +154,9 @@ describe("resolveSlotModels — errors", () => {
 });
 
 describe("resolveSlotModels — '*' legacy path (demo/custom executors)", () => {
-  it("keeps mixed-provider cheapest-per-tier resolution with no credential gating", () => {
+  it("keeps mixed-provider lowest-rank-per-tier resolution with no credential gating", () => {
     const resolution = resolve({ providers: "*", roles: new Set(["coding", "triage"]) });
-    // cheapest strong is openai, cheapest fast is dashscope — mixing allowed,
+    // top-ranked strong is openai, top-ranked fast is dashscope — mixing allowed,
     // and dashscope needs no credential here (the fake executor calls no API)
     expect(resolution.coding?.providerModelId).toBe("gpt-5.1-codex");
     expect(resolution.triage?.providerModelId).toBe("qwen3.6-flash");

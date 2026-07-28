@@ -410,6 +410,31 @@ describe.skipIf(!dbUp)("orchestration engine (FakeExecutor compliance suite)", (
     expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
   });
 
+  it("fails when the run's very last step is the one that blows the token limit", async () => {
+    // The step loop checks interrupts at the TOP of each step, and runFlow goes
+    // straight from the last phase to finalize — so nothing re-checks the abort
+    // flag after the final step. `open-pr` (autoOpenPr: true) is that step, and
+    // here it succeeds and produces its artifact, so a swallowed abort would
+    // let the run finish 'succeeded' having blown its limit.
+    const { db, runId, makeDeps } = await setupFixture({ params: { autoOpenPr: true } });
+    const script: Record<string, FakeStepBehavior> = {
+      ...HAPPY_SCRIPT,
+      "open-pr": {
+        kind: "succeed",
+        usage: { inputTokens: 10_000, outputTokens: 2_000_000 },
+        events: [
+          { type: "artifact", key: "pr-link", kind: "link", inline: "https://github.com/x/1" },
+        ],
+        output: "pr opened",
+      },
+    };
+    await executeRun(makeDeps(script, { mcpServers: ["github"] }), runId);
+    await approve(db, runId);
+    expect(await executeRun(makeDeps(script, { mcpServers: ["github"] }), runId)).toBe("failed");
+    const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("usage_limit_exceeded");
+  });
+
   it("hard-stop project quota aborts mid-run", async () => {
     const { db, runId, makeDeps } = await setupFixture({ quota: { tokenLimit: 2000 } });
     expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");

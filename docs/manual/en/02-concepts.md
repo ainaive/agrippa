@@ -14,7 +14,7 @@
 
 **Orchestration template** — the versioned, declarative recipe a run follows: input parameters (which auto-generate the submission form), phases and steps, which skills/MCP servers/sub-agents each step uses, model-selection rules, human checkpoints (approvals, question forms, review gates), usage limits, and the artifact contract. Published versions are immutable; editing creates the next version.
 
-**Model roles & tiers** — templates never name concrete models. They declare roles (e.g. `planning`, `coding`, `fast`) mapped to tiers (**strong / balanced / fast**); at submission the platform resolves each role to the cheapest granted model of that tier. Swapping a project's model lineup requires no template changes.
+**Model roles & tiers** — templates never name concrete models. They declare roles (e.g. `planning`, `coding`, `fast`) mapped to tiers (**strong / balanced / fast**); at submission the platform resolves each role to the highest-preference granted model of that tier (each model carries a selection rank; lower wins). Swapping a project's model lineup requires no template changes.
 
 **Artifact & output contract** — the declared deliverables of a run (reports, patches, links). A template marks which artifacts are *required*; a run only counts as **succeeded** if every required artifact was produced. Artifacts are downloadable from the run's Artifacts tab.
 
@@ -24,7 +24,7 @@
 
 **Comments** — every run has a discussion thread woven into its timeline. Members can comment at any point; comments appear live for everyone watching the run.
 
-**Run limits vs project quota** — a *run limit* belongs to the template/run: a token ceiling and a time ceiling for one run (optionally per phase). A *quota* belongs to the project: a monthly token ceiling across all runs. Both are measured in tokens — Agrippa tracks no money at all. With **hard stop** enabled, an exhausted quota rejects new submissions and aborts in-flight runs at the next step boundary; without it, it's advisory.
+**Run limits vs project quota** — a *run limit* belongs to the template/run: a token ceiling and a time ceiling for one run (optionally per phase). A *quota* belongs to the project: a monthly token ceiling across all runs. Token consumption is the only thing counted — Agrippa tracks no money at all — while the run's duration ceiling is measured in time. With **hard stop** enabled, an exhausted quota rejects new submissions and aborts in-flight runs at the next step boundary; without it, it's advisory.
 
 **Resource grant** — the switch that makes a registry resource (model, skill, MCP server, Faber) usable inside a project. Registries are org-wide; grants are per-project — that's how an admin controls which team can use which model or integration.
 

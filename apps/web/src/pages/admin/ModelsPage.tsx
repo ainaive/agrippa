@@ -157,6 +157,7 @@ function ModelDialog({
           type="number"
           step="1"
           min="0"
+          max="2147483647"
           className="w-40"
           value={rank}
           onChange={(e) => setRank(e.target.value)}

@@ -1245,11 +1245,15 @@ class RunEngine {
         try {
           await this.recordUsage(event, row, attempt);
         } catch (err) {
+          // Abort first so the executor stops streaming, then rethrow: the
+          // step-boundary checkInterrupts is NOT reached after the run's final
+          // step (runFlow goes straight to finalize), so swallowing this would
+          // let a run that blew its limit finish as 'succeeded'. handleFailure
+          // turns it into a failed run with usage_limit_exceeded.
           if (err instanceof UsageLimitExceededError) {
             this.triggerAbort("usage_limit_exceeded");
-          } else {
-            throw err;
           }
+          throw err;
         }
       }
     }

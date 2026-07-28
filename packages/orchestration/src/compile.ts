@@ -127,7 +127,12 @@ export function upgradeCompiledTemplate(raw: unknown): CompiledTemplate {
   // current passes through untouched (this runs on every run load).
   const compiled = raw as CompiledTemplate;
   if (compiled.spec?.limits) return compiled;
-  return { ...compiled, spec: { ...compiled.spec, limits: normalizeLimits(compiled.spec) } };
+  // drop the legacy key rather than spreading it forward — the upgraded IR
+  // must not carry USD figures the product no longer has a meaning for
+  const { budgets: _legacy, ...spec } = compiled.spec as CompiledTemplate["spec"] & {
+    budgets?: unknown;
+  };
+  return { ...compiled, spec: { ...spec, limits: normalizeLimits(compiled.spec) } };
 }
 
 /**

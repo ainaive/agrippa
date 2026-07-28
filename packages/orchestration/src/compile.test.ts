@@ -88,10 +88,12 @@ describe("template compiler", () => {
     // price, so the run falls back to the project quota alone
     expect(upgraded.spec.limits).toEqual({ maxDurationMinutes: 45, perPhase: {} });
     expect(Object.entries(upgraded.spec.limits.perPhase)).toEqual([]);
+    // and the USD figures do not ride along on the upgraded IR
+    expect(upgraded.spec).not.toHaveProperty("budgets");
   });
 
   it("rejects a draft still written against spec.budgets", () => {
-    const source = bugFixSource.replace(/^  limits:$/m, "  budgets:");
+    const source = bugFixSource.replace(/^ {2}limits:$/m, "  budgets:");
     expect(issuesOf(source).join()).toContain("spec.budgets was renamed to spec.limits");
   });
 
