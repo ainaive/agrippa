@@ -298,7 +298,8 @@ export const projectRoutes = new Hono<AppEnv>()
         resourceType: "repo_connection",
         resourceId: created?.id,
         projectId,
-        payload: { url: input.url },
+        // provider determines whether pr.open can complete a publish
+        payload: { url: input.url, provider: input.provider },
       });
       return c.json(
         created

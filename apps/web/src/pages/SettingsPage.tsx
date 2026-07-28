@@ -347,7 +347,17 @@ function GrantsSection({ projectId }: { projectId: string }) {
   );
 }
 
-type RepoRow = { id: string; url: string; defaultBranch: string; hasCredential: boolean };
+type RepoProvider = "github" | "gitlab" | "gitcode" | "generic-git";
+type RepoRow = {
+  id: string;
+  url: string;
+  provider: RepoProvider;
+  defaultBranch: string;
+  hasCredential: boolean;
+};
+
+// pr.open can create the pull request on the first three; generic-git is push-only
+const REPO_PROVIDERS: RepoProvider[] = ["github", "gitlab", "gitcode", "generic-git"];
 
 function ReposSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation("settings");
@@ -356,6 +366,7 @@ function ReposSection({ projectId }: { projectId: string }) {
     queryKey: ["repos", projectId],
     queryFn: () => api<RepoRow[]>(`/projects/${projectId}/repos`),
   });
+  const [provider, setProvider] = useState<RepoProvider>("github");
   const [url, setUrl] = useState("");
   const [branch, setBranch] = useState("main");
   const [token, setToken] = useState("");
@@ -366,7 +377,7 @@ function ReposSection({ projectId }: { projectId: string }) {
       api(`/projects/${projectId}/repos`, {
         method: "POST",
         json: {
-          provider: "github",
+          provider,
           url,
           defaultBranch: branch,
           token: token || undefined,
@@ -388,7 +399,22 @@ function ReposSection({ projectId }: { projectId: string }) {
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-2 sm:grid-cols-[1fr_140px_1fr_auto] sm:items-end">
+      <div className="grid gap-2 sm:grid-cols-[150px_1fr_140px_1fr_auto] sm:items-end">
+        <div className="space-y-1">
+          <Label htmlFor="repo-provider">{t("repos.provider")}</Label>
+          <Select value={provider} onValueChange={(next) => setProvider(next as RepoProvider)}>
+            <SelectTrigger id="repo-provider" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {REPO_PROVIDERS.map((id) => (
+                <SelectItem key={id} value={id}>
+                  {t(`repos.providers.${id}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <div className="space-y-1">
           <Label htmlFor="repo-url">{t("repos.url")}</Label>
           <Input
@@ -427,6 +453,7 @@ function ReposSection({ projectId }: { projectId: string }) {
             <div>
               <p className="font-medium">{repo.url}</p>
               <p className="text-xs text-muted-foreground">
+                {t(`repos.providers.${repo.provider}`, { defaultValue: repo.provider })} ·{" "}
                 {repo.defaultBranch} · {repo.hasCredential ? t("repos.private") : t("repos.public")}
               </p>
             </div>
