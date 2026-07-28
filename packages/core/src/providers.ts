@@ -38,6 +38,43 @@ export type ProviderCatalogEntry = {
   baseUrlHosts?: readonly string[];
 };
 
+/**
+ * A resolvable provider catalog: providerId → entry. The code `PROVIDER_CATALOG`
+ * is the builtin baseline; `buildProviderCatalog` merges DB rows (builtins +
+ * org-admin-registered customs) into the same shape for resolution/runtime.
+ */
+export type ProviderCatalog = Record<string, ProviderCatalogEntry>;
+
+/** A DB provider_catalog row in the shape `buildProviderCatalog` consumes. */
+export type ProviderCatalogRow = {
+  providerId: string;
+  label: string;
+  baseUrls: ProviderCatalogEntry["baseUrls"];
+  auth: ProviderCatalogEntry["auth"];
+  baseUrlHosts?: readonly string[] | null;
+  status?: string;
+};
+
+/**
+ * Build a resolvable catalog from DB rows (active only). The code
+ * `PROVIDER_CATALOG` stays the seed source + the executor-runtime fallback;
+ * this merges builtins (seeded as org_id NULL) and org-scoped customs into one
+ * Record for resolution and auth-policy lookups.
+ */
+export function buildProviderCatalog(rows: ProviderCatalogRow[]): ProviderCatalog {
+  const catalog: ProviderCatalog = {};
+  for (const row of rows) {
+    if (row.status === "disabled") continue;
+    catalog[row.providerId] = {
+      label: row.label,
+      baseUrls: row.baseUrls,
+      auth: row.auth,
+      baseUrlHosts: row.baseUrlHosts ?? undefined,
+    };
+  }
+  return catalog;
+}
+
 export const PROVIDER_CATALOG = {
   anthropic: { label: "Anthropic", baseUrls: {}, auth: "env" },
   openai: { label: "OpenAI", baseUrls: {}, auth: "env" },
@@ -62,29 +99,61 @@ export function isProviderId(id: string): id is ProviderId {
   return id in PROVIDER_CATALOG;
 }
 
-/** Auth policy for a provider; unknown providers fall back to worker env. */
-export function providerAuthPolicy(id: string): "project" | "env" {
-  return isProviderId(id) ? PROVIDER_CATALOG[id].auth : "env";
+/**
+ * Auth policy for a provider against a catalog. Unknown providers (not in the
+ * catalog) fall back to worker env — but resolution never considers unknown
+ * providers as candidates, so this branch is only the executor-runtime
+ * back-compat path. Pass the merged catalog at submit/runtime for customs.
+ */
+export function providerAuthPolicy(
+  id: string,
+  catalog: ProviderCatalog = PROVIDER_CATALOG,
+): "project" | "env" {
+  return catalog[id]?.auth ?? "env";
 }
 
 /** Catalog default base URL for a provider on a given wire protocol. */
-export function providerDefaultBaseUrl(id: string, protocol: WireProtocol): string | undefined {
-  if (!isProviderId(id)) return undefined;
-  const entry: ProviderCatalogEntry = PROVIDER_CATALOG[id];
-  return entry.baseUrls[protocol];
+export function providerDefaultBaseUrl(
+  id: string,
+  protocol: WireProtocol,
+  catalog: ProviderCatalog = PROVIDER_CATALOG,
+): string | undefined {
+  return catalog[id]?.baseUrls[protocol];
 }
 
 /**
  * Whether the provider is known to serve the given wire protocol. Providers
- * with catalog defaults serve exactly those protocols; unknown providers and
- * catalog entries without defaults (anthropic, openai — native endpoints)
- * carry no restriction. Used to keep a credential's single baseUrl override
- * from leaking onto a protocol the provider does not speak.
+ * with catalog defaults serve exactly those protocols; a native provider (empty
+ * baseUrls, e.g. the anthropic/openai builtins) serves its *own* protocol only
+ * (so the claude executor won't pick the openai native provider and vice
+ * versa). Unknown providers serve any — the executor-runtime back-compat path
+ * (a custom provider with an explicit credential baseUrl resolves at runtime).
  */
-export function providerServesProtocol(id: string, protocol: WireProtocol): boolean {
-  if (!isProviderId(id)) return true;
-  const entry: ProviderCatalogEntry = PROVIDER_CATALOG[id];
-  return Object.keys(entry.baseUrls).length === 0 || entry.baseUrls[protocol] !== undefined;
+export function providerServesProtocol(
+  id: string,
+  protocol: WireProtocol,
+  catalog: ProviderCatalog = PROVIDER_CATALOG,
+): boolean {
+  const entry = catalog[id];
+  if (!entry) return true;
+  if (entry.baseUrls[protocol] !== undefined) return true;
+  if (Object.keys(entry.baseUrls).length === 0) return id === protocol; // native → own protocol
+  return false;
+}
+
+/**
+ * The providers an executor speaking `protocol` may resolve against, derived
+ * from the catalog (not a hardcoded list) — the change that lets an
+ * org-admin-registered custom Anthropic-compatible provider be resolved by the
+ * claude executor. Sorted for determinism.
+ */
+export function executorResolvableProviders(
+  catalog: ProviderCatalog,
+  protocol: WireProtocol,
+): string[] {
+  return Object.keys(catalog)
+    .filter((id) => providerServesProtocol(id, protocol, catalog))
+    .sort();
 }
 
 /**
@@ -99,7 +168,11 @@ export function providerServesProtocol(id: string, protocol: WireProtocol): bool
  * that need an internal proxy configure it via worker env, which is operator-owned.
  * Returns null when valid, else a short reason.
  */
-export function validateProviderBaseUrl(provider: string, raw: string): string | null {
+export function validateProviderBaseUrl(
+  provider: string,
+  raw: string,
+  catalog: ProviderCatalog = PROVIDER_CATALOG,
+): string | null {
   let url: URL;
   try {
     url = new URL(raw);
@@ -114,8 +187,8 @@ export function validateProviderBaseUrl(provider: string, raw: string): string |
     return "must be a DNS hostname, not an IP address";
   }
   if (host === "localhost" || !host.includes(".")) return "must be a public DNS hostname";
-  if (isProviderId(provider)) {
-    const entry: ProviderCatalogEntry = PROVIDER_CATALOG[provider];
+  const entry = catalog[provider];
+  if (entry) {
     const allowed = entry.baseUrlHosts?.some((pin) =>
       pin.startsWith(".") ? host.endsWith(pin) : host === pin,
     );

@@ -5,6 +5,7 @@
  * catalog lives here. The worker asserts at boot that every executor it
  * registers matches its catalog entry, keeping this file honest.
  */
+import { executorResolvableProviders, type ProviderCatalog, type WireProtocol } from "./providers";
 
 export type ExecutorCapabilityFlags = {
   subagents: boolean;
@@ -17,15 +18,22 @@ export type ExecutorCapabilityFlags = {
 export type ExecutorCatalogEntry = {
   /** Display name, not localized — executors are product names. */
   label: string;
-  /** Model providers this executor can drive; "*" = any granted model. */
-  providers: readonly string[] | "*";
+  /**
+   * The wire protocol this executor speaks. Resolvable providers are derived
+   * from the provider catalog (providers that serve this protocol), not a
+   * hardcoded list — so an org-admin-registered Anthropic-compatible provider
+   * is resolvable by the claude executor. Absent for `providers: "*"` (demo).
+   */
+  protocol?: WireProtocol;
+  /** Model providers this executor can drive; "*" = any granted model (demo). */
+  providers?: readonly string[] | "*";
   capabilities: ExecutorCapabilityFlags;
 };
 
 export const EXECUTOR_CATALOG = {
   "claude-agent-sdk": {
     label: "Claude Code",
-    providers: ["anthropic", "dashscope"],
+    protocol: "anthropic",
     capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
   },
   "codex-cli": {
@@ -33,7 +41,7 @@ export const EXECUTOR_CATALOG = {
     // dashscope is claude-only for now: Codex CLI ≥0.122 removed wire_api
     // "chat", and Bailian's Responses API doesn't yet cover the seeded Qwen
     // models (ADR-0013 amendment).
-    providers: ["openai"],
+    protocol: "openai",
     capabilities: { subagents: false, mcp: false, skills: false, resume: true, streaming: true },
   },
   fake: {
@@ -56,9 +64,20 @@ export function isExecutorId(id: string): id is ExecutorId {
  */
 export const EXECUTOR_DEFAULT_SENTINEL = "__default__";
 
-/** True when the executor can serve models from the given provider. */
-export function executorSupportsProvider(entry: ExecutorCatalogEntry, provider: string): boolean {
-  return entry.providers === "*" || entry.providers.includes(provider);
+/**
+ * The providers an executor can drive. For cataloged executors this is derived
+ * from the provider catalog by `protocol` (see executorResolvableProviders); for
+ * demo/uncataloged executors it stays `"*"` (mixed-provider, no gating) so
+ * token-free demos keep working. Returns `"*"` when neither path applies.
+ */
+export function executorProviders(
+  entry: ExecutorCatalogEntry | undefined,
+  catalog: ProviderCatalog,
+): readonly string[] | "*" {
+  if (!entry) return "*";
+  if (entry.providers === "*") return "*";
+  if (entry.protocol) return executorResolvableProviders(catalog, entry.protocol);
+  return "*";
 }
 
 /**
