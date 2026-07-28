@@ -401,9 +401,9 @@ function ReposSection({ projectId }: { projectId: string }) {
     <div className="space-y-4">
       <div className="grid gap-2 sm:grid-cols-[150px_1fr_140px_1fr_auto] sm:items-end">
         <div className="space-y-1">
-          <Label>{t("repos.provider")}</Label>
+          <Label htmlFor="repo-provider">{t("repos.provider")}</Label>
           <Select value={provider} onValueChange={(next) => setProvider(next as RepoProvider)}>
-            <SelectTrigger className="w-full">
+            <SelectTrigger id="repo-provider" className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

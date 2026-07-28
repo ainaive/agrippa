@@ -10,6 +10,38 @@ import {
   workspaceDirFor,
 } from "./workspace";
 
+/** gitcode.com serves its API from api.gitcode.com; other hosts (tests, self-managed) are origin-relative. */
+function gitcodeApiBase(url: URL): string {
+  return url.hostname === "gitcode.com" ? "https://api.gitcode.com/api/v5" : `${url.origin}/api/v5`;
+}
+
+/**
+ * GitCode HTTPS git auth wants the account's real username with the token as
+ * password — the official GitCode CLI resolves it the same way — so ask the
+ * v5 API who the token belongs to. Any failure falls back to the
+ * x-access-token magic username the other providers use.
+ */
+export async function gitcodeCredentialedUrl(repoUrl: string, token: string): Promise<string> {
+  try {
+    const url = new URL(repoUrl);
+    const response = await fetch(`${gitcodeApiBase(url)}/user`, {
+      headers: { authorization: `Bearer ${token}`, "user-agent": "agrippa" },
+    });
+    if (response.ok) {
+      const { login } = (await response.json()) as { login?: string };
+      if (login) {
+        const withAuth = new URL(repoUrl);
+        withAuth.username = login;
+        withAuth.password = token;
+        return withAuth.toString();
+      }
+    }
+  } catch {
+    // network/parse failure — fall through to the generic credential form
+  }
+  return credentialedUrl(repoUrl, token);
+}
+
 /**
  * Platform-side git write-path (ADR-0011): branch creation, credentialed push,
  * and PR creation via the provider REST API. The PR link is contract-required,
@@ -93,7 +125,10 @@ export class GitScmService implements ScmService {
     }
 
     const { connection, token } = await loadRepoConnection(this.db, spec.projectId, spec.repo);
-    const pushUrl = credentialedUrl(connection.url, token);
+    const pushUrl =
+      connection.provider === "gitcode" && token
+        ? await gitcodeCredentialedUrl(connection.url, token)
+        : credentialedUrl(connection.url, token);
     await platformGit(runId, ["push", pushUrl, `${branchRef}:${branchRef}`]);
     return { status: "pushed", commitSha };
   }
@@ -135,10 +170,7 @@ export class GitScmService implements ScmService {
       .replace(/^\//, "")
       .replace(/\.git$/, "")
       .split("/");
-    // gitcode.com serves its API from api.gitcode.com; other hosts (tests,
-    // self-managed) are assumed origin-relative like GitLab
-    const apiBase =
-      url.hostname === "gitcode.com" ? "https://api.gitcode.com/api/v5" : `${url.origin}/api/v5`;
+    const apiBase = gitcodeApiBase(url);
     const headers = {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",

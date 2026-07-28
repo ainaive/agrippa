@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { secrets } from "@agrippa/db";
+import { auditLogs, secrets } from "@agrippa/db";
+import { eq } from "drizzle-orm";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { App } from "../app";
 import { createApp } from "../app";
@@ -61,6 +62,52 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
     expect(detail.budgets.maxCostUsd).toBe(8);
   });
 
+  it("repo connections accept gitcode, hide the token, and audit the provider", async () => {
+    const created = await admin.request(`/api/v1/projects/${projectId}/repos`, {
+      method: "POST",
+      json: {
+        provider: "gitcode",
+        url: "https://gitcode.com/acme/widget.git",
+        defaultBranch: "main",
+        token: "gc-secret-token",
+      },
+    });
+    expect(created.ok).toBe(true);
+    const row = await jsonOf<{ id: string; provider: string; hasCredential: boolean }>(created);
+    expect(row.provider).toBe("gitcode");
+    expect(row.hasCredential).toBe(true);
+    expect(JSON.stringify(row)).not.toContain("gc-secret-token");
+
+    const list = await jsonOf<Array<{ id: string; provider: string; hasCredential: boolean }>>(
+      await admin.request(`/api/v1/projects/${projectId}/repos`),
+    );
+    const listed = list.find((r) => r.id === row.id);
+    expect(listed?.provider).toBe("gitcode");
+    expect(listed?.hasCredential).toBe(true);
+    expect(JSON.stringify(list)).not.toContain("gc-secret-token");
+
+    // the audit payload records the provider — it determines publishability
+    const audits = await db.select().from(auditLogs).where(eq(auditLogs.resourceId, row.id));
+    const entry = audits.find((a) => a.action === "project.repo.add");
+    const payload = entry?.payload as { provider?: string } | undefined;
+    expect(payload?.provider).toBe("gitcode");
+
+    // unknown providers are rejected at the schema
+    const bad = await admin.request(`/api/v1/projects/${projectId}/repos`, {
+      method: "POST",
+      json: { provider: "bitbucket", url: "https://bitbucket.org/a/b.git" },
+    });
+    expect(bad.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(bad)).code).toBe("validation_failed");
+
+    // repo mutations need the project-admin role
+    const denied = await member.request(`/api/v1/projects/${projectId}/repos`, {
+      method: "POST",
+      json: { provider: "gitcode", url: "https://gitcode.com/x/y.git" },
+    });
+    expect(denied.status).toBe(403);
+  });
+
   it("registry writes require org_admin", async () => {
     const denied = await member.request("/api/v1/fabri", {
       method: "POST",
@@ -110,8 +157,9 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
     expect(body.authSecretRef).toBeUndefined();
     expect(body.configRevision).toBe(1);
 
-    // the token never appears in the response, and the stored secret is encrypted
-    const rows = await db.select().from(secrets);
+    // the token never appears in the response, and the stored secret is
+    // encrypted (kind-scoped: other suites store git/provider secrets too)
+    const rows = await db.select().from(secrets).where(eq(secrets.kind, "mcp_auth"));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.ciphertext).not.toContain("ghp_super_secret");
 

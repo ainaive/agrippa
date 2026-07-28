@@ -28,7 +28,7 @@ const {
   platformGit,
   workspaceDirFor,
 } = await import("./workspace");
-const { GitScmService } = await import("./scm");
+const { GitScmService, gitcodeCredentialedUrl } = await import("./scm");
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 const db = createDb(TEST_DATABASE_URL);
@@ -314,13 +314,17 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     // a fake GitCode forge: v5 paths, Bearer auth, 400 on duplicate (the
     // real status is undocumented — recovery must work for any 4xx), and a
     // list endpoint with no `head` filter, so matching happens client-side
-    const state = { created: 0, recoverable: true };
+    const state = { created: 0, recoverable: true, userResolvable: true };
     const server = Bun.serve({
       port: 0,
       fetch(req) {
         const url = new URL(req.url);
         if (req.headers.get("authorization") !== "Bearer gitcode-token") {
           return new Response("unauthorized", { status: 401 });
+        }
+        if (req.method === "GET" && url.pathname === "/api/v5/user") {
+          if (!state.userResolvable) return new Response("server error", { status: 500 });
+          return Response.json({ login: "acme-bot" });
         }
         if (req.method === "POST" && url.pathname === "/api/v5/repos/acme/widget/pulls") {
           state.created += 1;
@@ -383,6 +387,18 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
       // nothing to recover → the original error surfaces
       state.recoverable = false;
       await expect(scm.openPullRequest(runId, spec)).rejects.toThrow(/400/);
+
+      // push auth resolves the token's real username via /user (the official
+      // GitCode CLI does the same); a failed lookup falls back to the
+      // x-access-token magic username
+      const repoUrl = `http://127.0.0.1:${server.port}/acme/widget.git`;
+      const resolved = new URL(await gitcodeCredentialedUrl(repoUrl, "gitcode-token"));
+      expect(resolved.username).toBe("acme-bot");
+      expect(resolved.password).toBe("gitcode-token");
+      state.userResolvable = false;
+      const fallback = new URL(await gitcodeCredentialedUrl(repoUrl, "gitcode-token"));
+      expect(fallback.username).toBe("x-access-token");
+      expect(fallback.password).toBe("gitcode-token");
     } finally {
       server.stop(true);
     }
