@@ -388,3 +388,67 @@ describe("template compiler (agrippa/v2)", () => {
     expect(issuesOf(source).join()).toContain("unknown artifact 'nonexistent'");
   });
 });
+
+// ── agrippa/v3 flat authoring format ─────────────────────────────────────────
+
+describe("v3 format", () => {
+  it("rejects v3 with both faber and slots", () => {
+    const source = `
+version: 3
+slug: test.both
+scenario: test
+name: { en: "Bad", zh-CN: "坏" }
+description: { en: "Bad", zh-CN: "坏" }
+faber: navigator
+slots:
+  main: { label: { en: "X", zh-CN: "X" }, faber: navigator, executor: default }
+models: { a: { tier: fast } }
+phases:
+  - id: p
+    name: { en: "P", zh-CN: "P" }
+    steps:
+      - { id: s, kind: agent, model: { role: a }, instructions: "do stuff", produces: [] }
+outputs:
+  - { key: out, kind: markdown, required: true }
+`;
+    expect(issuesOf(source).join()).toContain("faber");
+  });
+
+  it("rejects v3 with neither faber nor slots", () => {
+    const source = `
+version: 3
+slug: test.none
+scenario: test
+name: { en: "Bad", zh-CN: "坏" }
+description: { en: "Bad", zh-CN: "坏" }
+models: { a: { tier: fast } }
+phases:
+  - id: p
+    name: { en: "P", zh-CN: "P" }
+    steps:
+      - { id: s, kind: agent, model: { role: a }, instructions: "do stuff", produces: [] }
+outputs:
+  - { key: out, kind: markdown, required: true }
+`;
+    expect(issuesOf(source).join()).toContain("faber");
+  });
+
+  it("rejects a source with neither version nor apiVersion", () => {
+    const source = `
+slug: test.no-version
+scenario: test
+name: { en: "T", zh-CN: "T" }
+description: { en: "T", zh-CN: "T" }
+faber: navigator
+models: { a: { tier: fast } }
+phases:
+  - id: p
+    name: { en: "P", zh-CN: "P" }
+    steps:
+      - { id: s, kind: agent, model: { role: a }, instructions: "x", produces: [] }
+outputs:
+  - { key: out, kind: markdown, required: true }
+`;
+    expect(issuesOf(source).join()).toContain("version");
+  });
+});
