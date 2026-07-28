@@ -10,44 +10,46 @@
 
 ## 最小模板（带注释）
 
+v3 扁平格式是推荐的模板编写方式；v1/v2 源码仍受支持。完整规范见 [docs/design/02](../../design/02-orchestration-template.md)。
+
 ```yaml
-apiVersion: agrippa/v1
-kind: OrchestrationTemplate
-metadata:
-  slug: swdev.my-task            # <场景前缀>.<名称>，须与模板头一致
-  scenario: software-development # 须与模板头的场景一致
-  name: { en: "My Task", zh-CN: "我的任务" }        # 两种语言，缺一不可
-  description: { en: "...", zh-CN: "……" }
-spec:
-  faber: forge                   # 默认硅基人
+version: 3
+slug: swdev.my-task            # <场景前缀>.<名称>，须与模板头一致
+scenario: software-development # 须与模板头的场景一致
+name: { en: "My Task", zh-CN: "我的任务" }        # 两种语言，缺一不可
+description: { en: "...", zh-CN: "……" }
 
-  inputs:                        # ⇒ 自动生成提交表单
-    - key: goal
-      type: text                 # string|text|number|boolean|select|repoRef|docRef
-      required: true
-      label: { en: "Goal", zh-CN: "目标" }
-      ui: { widget: textarea, rows: 6 }
+faber: forge                   # 默认硅基人（单智能体）
 
-  models:
-    roles:                       # 角色 → 档位；提交时解析为已授权模型
-      planning: { tier: strong, fallback: [balanced] }
-      fast: { tier: fast }
+inputs:                        # ⇒ 自动生成提交表单
+  - key: goal
+    type: text                 # string|text|number|boolean|select|repoRef|docRef
+    required: true
+    label: { en: "Goal", zh-CN: "目标" }
+    ui: { widget: textarea, rows: 6 }
 
-  phases:
-    - id: work
-      name: { en: "Work", zh-CN: "执行" }
-      steps:
-        - id: do-it
-          kind: agent
-          model: { role: planning }
-          instructions: |
-            完成这个目标：${inputs.goal}
-          produces: [result]     # 该步骤必须产出的产出物键
+models:                        # 角色 → 档位；提交时解析为已授权模型
+  planning: { tier: strong, fallback: [balanced] }
+  fast: { tier: fast }
 
-  outputs:
-    artifacts:
-      - { key: result, kind: markdown, required: true }   # 缺失则执行失败
-    summary: { from: result }
+phases:
+  - id: work
+    name: { en: "Work", zh-CN: "执行" }
+    steps:
+      - id: do-it
+        kind: agent
+        model: { role: planning }
+        instructions: |
+          完成这个目标：${inputs.goal}
+        produces: [result]     # 该步骤必须产出的产出物键
+
+budget:
+  maxCostUsd: 6
+  maxDurationMinutes: 40
+
+outputs:
+  - { key: result, kind: markdown, required: true }   # 缺失则执行失败
+summary: { from: result }
 ```
 
 ## 输入 → 表单控件
@@ -67,9 +69,9 @@ spec:
 ## 执行计划
 
 - **阶段（phase）**把步骤分组，用于时间线展示，也是审批节点的挂载点。**步骤顺序执行。**
-- 步骤类型：`agent`（一次智能体调用——指令、`model: {role}`，可选的 `subagents`/`skills`/`mcpServers` 取自 `spec.resources`）与 `system`（平台动作，当前为 `workspace.checkout`）。
+- 步骤类型：`agent`（一次智能体调用——指令、`model: {role}`，可选的 `subagents`/`skills`/`mcpServers` 取自 `spec.resources`）与 `system`（平台动作：`workspace.checkout`、`git.branch`、`git.push`、`pr.open`——v2）。
 - **工作区**：声明 `workspace: { repo: ${inputs.myRepo}, ref: ..., access: readOnly|readWrite }`，并在需要克隆的位置放一个 `kind: system, action: workspace.checkout` 步骤。
-- **控制流**——刻意保持极小：`when: <表达式>`（为假则跳过）、`retry: { max: N }`（同步骤重试）、`onFailure: continue`（记录失败后继续）。没有循环——这是治理层面的决定（ADR-0006）。
+- **控制流**——刻意保持极小：`when: <表达式>`（为假则跳过）、`retry: { max: N }`（同步骤重试）、`onFailure: continue`（记录失败后继续）。多智能体模板用 `slots:` 代替 `faber:`；有界循环（`kind: loop`）与检查点步骤（`kind: checkpoint`）在 v3/v2 可用（ADR-0010）；无界/通用循环仍是治理层面的决定（ADR-0006）。
 - **可选集成**：在 `resources` 中给 MCP 服务标记 `optional: true`，再用 `requires: { mcpServers: [name] }` 约束步骤——服务不可用时该步骤*跳过*而非失败。
 
 ## 表达式
@@ -81,14 +83,22 @@ spec:
 ```yaml
 phases:
   - id: build
-    approval:                          # 在该阶段执行【之前】设卡
-      checkpoint: approve-plan
-      title: { en: "Approve the plan", zh-CN: "确认方案" }
-      present: [draft-plan]            # 呈现给审批人的产出物
-      timeout: 48h                     # 到期后：cancel | reject | approve
-      onTimeout: cancel
+    steps:
+      - id: approve-plan                # 在构建执行【之前】设卡（原为阶段级 approval:）
+        kind: checkpoint
+        checkpoint:
+          kind: approval
+          title: { en: "Approve the plan", zh-CN: "确认方案" }
+          present: [draft-plan]         # 呈现给审批人的产出物
+          timeout: 48h                  # 到期后：cancel | reject | approve
+          onTimeout: cancel
+      - id: do-build
+        kind: agent
+        model: { role: planning }
+        instructions: "build it"
+        produces: [built]
 
-budgets:
+budget:
   maxCostUsd: 6
   maxDurationMinutes: 40
   perPhase:
