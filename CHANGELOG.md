@@ -8,6 +8,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ### Added
 
+- **GitCode as a repo-connection provider** ([ADR-0011 addendum](docs/adr/0011-codex-executor-and-platform-scm.md)) — `pr.open` can now create pull requests on gitcode.com, so requirement-delivery publishes there end-to-end (previously a gitcode URL either mis-routed to a GHES-style API under the hard-coded `github` provider, or push-only `generic-git` failed the required `open-pr` step):
+  - *Gitee-style v5 adapter.* `POST /repos/{owner}/{repo}/pulls` with Bearer auth and `html_url` responses, API base `api.gitcode.com/api/v5` for gitcode.com and origin-relative elsewhere; duplicate recovery runs on any 4xx (GitCode's duplicate status is undocumented) by listing open PRs on the base branch and matching the head client-side.
+  - *No migration.* `repo_connections.provider` is plain text — the enum is TypeScript-only — so the new value is a type-level change; the settings form gains a provider picker instead of hard-coding `github`, and the repo list shows each connection's provider.
+
 - **Per-project provider credentials (Aliyun Bailian/DashScope first)** — projects configure model-provider API keys in Settings → Providers instead of relying on worker env ([ADR-0013](docs/adr/0013-per-project-provider-credentials.md)):
   - *Generic credential store.* One `provider_credentials` row per (project, provider) with an optional endpoint override; the key lives encrypted in `secrets` (new kind `provider_api_key`), write-only through the API (reads expose `hasCredential` only), rotated in place, deleted together with its secret, audited on every mutation.
   - *Provider catalog.* `PROVIDER_CATALOG` in `@agrippa/core` declares per-wire-protocol default endpoints and an auth policy per provider — `dashscope` requires a project credential (no legitimate env fallback), `anthropic`/`openai` keep worker env as the deployment default. Qwen models (`qwen3.7-max/plus`, `qwen3.6-flash`) are seeded; claude-agent-sdk serves `dashscope` (claude-only for now — Codex CLI ≥0.122 removed the chat wire API Bailian's compatible mode speaks; ADR-0013 amendment).

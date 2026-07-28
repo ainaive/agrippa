@@ -59,7 +59,8 @@ export const repoConnections = pgTable("repo_connections", {
   projectId: uuid("project_id")
     .notNull()
     .references(() => projects.id, { onDelete: "cascade" }),
-  provider: text("provider", { enum: ["github", "gitlab", "generic-git"] }).notNull(),
+  // TS-type-only enum — the column is plain text, so new providers need no migration
+  provider: text("provider", { enum: ["github", "gitlab", "gitcode", "generic-git"] }).notNull(),
   url: text("url").notNull(),
   defaultBranch: text("default_branch").notNull().default("main"),
   credentialSecretRef: uuid("credential_secret_ref").references(() => secrets.id),

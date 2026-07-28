@@ -109,9 +109,79 @@ export class GitScmService implements ScmService {
     if (connection.provider === "gitlab") {
       return await this.openGitlabMr(connection.url, token, spec);
     }
+    if (connection.provider === "gitcode") {
+      return await this.openGitcodePr(connection.url, token, spec);
+    }
     throw new Error(
       `pr.open is not supported for provider '${connection.provider}' — push succeeded, open the PR manually`,
     );
+  }
+
+  /**
+   * GitCode (gitcode.com) exposes a Gitee-style v5 REST API with GitHub-shaped
+   * pull-request endpoints (POST /repos/{owner}/{repo}/pulls, html_url in the
+   * response) and Bearer token auth. Its duplicate status code is undocumented
+   * (the platform is GitLab-derived; Gitee lineage suggests 400), so recovery
+   * runs on any 4xx: list open PRs on the base branch and match the head
+   * client-side — the v5 list endpoint documents no `head` filter.
+   */
+  private async openGitcodePr(
+    repoUrl: string,
+    token: string,
+    spec: PullRequestSpec,
+  ): Promise<{ url: string }> {
+    const url = new URL(repoUrl);
+    const [owner, repo] = url.pathname
+      .replace(/^\//, "")
+      .replace(/\.git$/, "")
+      .split("/");
+    // gitcode.com serves its API from api.gitcode.com; other hosts (tests,
+    // self-managed) are assumed origin-relative like GitLab
+    const apiBase =
+      url.hostname === "gitcode.com" ? "https://api.gitcode.com/api/v5" : `${url.origin}/api/v5`;
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "user-agent": "agrippa",
+    };
+    const response = await fetch(`${apiBase}/repos/${owner}/${repo}/pulls`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        title: spec.title,
+        head: spec.head,
+        base: spec.base,
+        body: spec.body,
+      }),
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500);
+      if (response.status >= 400 && response.status < 500) {
+        const lookup = await fetch(
+          `${apiBase}/repos/${owner}/${repo}/pulls?state=open&base=${encodeURIComponent(spec.base)}&per_page=100`,
+          { headers },
+        );
+        if (lookup.ok) {
+          const open = (await lookup.json()) as Array<{
+            html_url?: string;
+            web_url?: string;
+            head?: { ref?: string; label?: string };
+            source_branch?: string;
+          }>;
+          const existing = open.find((pr) => {
+            const head = pr.head?.ref ?? pr.head?.label ?? pr.source_branch;
+            return head === spec.head || head === `${owner}:${spec.head}`;
+          });
+          const existingUrl = existing?.html_url ?? existing?.web_url;
+          if (existingUrl) return { url: existingUrl };
+        }
+      }
+      throw new Error(`GitCode PR creation failed (${response.status}): ${detail}`);
+    }
+    const json = (await response.json()) as { html_url?: string; web_url?: string };
+    const prUrl = json.html_url ?? json.web_url;
+    if (!prUrl) throw new Error("GitCode PR creation returned no html_url");
+    return { url: prUrl };
   }
 
   private async openGithubPr(

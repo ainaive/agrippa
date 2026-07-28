@@ -71,7 +71,7 @@ project_members (id pk, project_id fk, user_id fk,
            role text not null check in ('admin','member','viewer'),
            unique (project_id, user_id))
 
-repo_connections (id pk, project_id fk, provider text,        -- 'github' | 'gitlab' | 'generic-git'
+repo_connections (id pk, project_id fk, provider text,        -- 'github' | 'gitlab' | 'gitcode' | 'generic-git'
            url, default_branch, credential_secret_ref fk secrets null, status)
 
 provider_credentials (id pk, project_id fk, provider text,    -- PROVIDER_CATALOG id, e.g. 'dashscope'

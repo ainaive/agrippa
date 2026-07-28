@@ -310,6 +310,84 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     }
   });
 
+  it("creates and duplicate-recovers a GitCode PR (v5 API, undocumented status)", async () => {
+    // a fake GitCode forge: v5 paths, Bearer auth, 400 on duplicate (the
+    // real status is undocumented — recovery must work for any 4xx), and a
+    // list endpoint with no `head` filter, so matching happens client-side
+    const state = { created: 0, recoverable: true };
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (req.headers.get("authorization") !== "Bearer gitcode-token") {
+          return new Response("unauthorized", { status: 401 });
+        }
+        if (req.method === "POST" && url.pathname === "/api/v5/repos/acme/widget/pulls") {
+          state.created += 1;
+          if (state.created === 1) {
+            return Response.json({ html_url: "https://gitcode.local/acme/widget/pulls/3" });
+          }
+          return Response.json({ message: "已存在相同源分支的合并请求" }, { status: 400 });
+        }
+        if (req.method === "GET" && url.pathname === "/api/v5/repos/acme/widget/pulls") {
+          if (!state.recoverable) return Response.json([]);
+          if (url.searchParams.get("state") !== "open") return Response.json([]);
+          return Response.json([
+            { html_url: "https://gitcode.local/acme/widget/pulls/9", head: { ref: "other" } },
+            {
+              html_url: "https://gitcode.local/acme/widget/pulls/3",
+              head: { ref: "agrippa/run-2-feedc0de1234" },
+            },
+          ]);
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      process.env.AGRIPPA_SECRET_KEY ??= btoa(
+        String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))),
+      );
+      const [secret] = await db
+        .insert(secrets)
+        .values({
+          orgId,
+          kind: "git_credential",
+          ciphertext: encryptSecret("gitcode-token", loadSecretKey()),
+        })
+        .returning();
+      const [conn] = await db
+        .insert(repoConnections)
+        .values({
+          projectId,
+          provider: "gitcode",
+          url: `http://127.0.0.1:${server.port}/acme/widget.git`,
+          defaultBranch: "main",
+          credentialSecretRef: secret?.id,
+        })
+        .returning();
+      const spec = {
+        projectId,
+        repo: { repoConnectionId: conn?.id as string },
+        head: "agrippa/run-2-feedc0de1234",
+        base: "main",
+        title: "T",
+        body: "B",
+      };
+
+      const first = await scm.openPullRequest(runId, spec);
+      expect(first.url).toBe("https://gitcode.local/acme/widget/pulls/3");
+      // the retry's 400 recovers via the list + client-side head match
+      const retried = await scm.openPullRequest(runId, spec);
+      expect(retried.url).toBe("https://gitcode.local/acme/widget/pulls/3");
+      expect(state.created).toBe(2);
+      // nothing to recover → the original error surfaces
+      state.recoverable = false;
+      await expect(scm.openPullRequest(runId, spec)).rejects.toThrow(/400/);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("never runs agent-installed hooks or honors agent git config in platform git", async () => {
     const hostileRunId = crypto.randomUUID();
     await workspace.checkout(hostileRunId, {
