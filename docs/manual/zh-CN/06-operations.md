@@ -95,6 +95,8 @@ sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstr
 | 某个可选步骤（如「提交 PR」）被跳过 | 其可选资源未授权——在「设置 → 资源授权」中授权对应 MCP 服务；未授权的可选资源会被跳过，而不会用共享凭证运行。 |
 | 执行失败 `contract_violation` | 智能体未产出某个必需产出物——查看各步骤输出，通常是模板指令的问题。 |
 | 私有仓库检出失败 | 仓库连接的令牌缺失或过期——到 设置 → 代码仓库 重新录入（令牌只写不读，重新填写即可）。 |
+| `git.push` 失败 / `pr.open needs a stored repo credential` | 发布即使面向公开仓库也需要令牌（匿名 HTTPS 只读）——请添加带令牌的仓库连接，令牌需具备内容与合并请求的写权限。 |
+| `pr.open is not supported for provider 'generic-git'` | 分支已推送，但只有 GitHub/GitLab/GitCode 连接能自动创建合并请求——请用正确的托管平台重建连接，或手动开 PR。 |
 | 想看智能体在磁盘上到底做了什么 | 给 worker 设置 `AGRIPPA_KEEP_WORKSPACES=1` 后重跑；工作区保留在 `WORKSPACE_ROOT/<runId>`。 |
 | `healthz` 返回 503 | api 连不上 Postgres——检查 `DATABASE_URL` 与 postgres 服务。 |
 | （虚拟机）worker 卡在「activating」 | 其 `ExecStartPre` 正在等待 api 的 `/healthz`（最长 120 秒）——用 `journalctl -u agrippa-api` 排查 api 为何不健康。 |

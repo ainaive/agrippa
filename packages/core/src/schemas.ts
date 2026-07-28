@@ -163,7 +163,7 @@ export const templateVersionCreateSchema = z.object({
 });
 
 export const repoCreateSchema = z.object({
-  provider: z.enum(["github", "gitlab", "generic-git"]),
+  provider: z.enum(["github", "gitlab", "gitcode", "generic-git"]),
   url: z.url(),
   defaultBranch: z.string().min(1).default("main"),
   /** Write-only; encrypted into the secrets table. */

@@ -33,6 +33,13 @@
     "fabri": "硅基人"
   },
   "repos": {
+    "provider": "托管平台",
+    "providers": {
+      "github": "GitHub",
+      "gitlab": "GitLab",
+      "gitcode": "GitCode",
+      "generic-git": "通用 Git（仅推送）"
+    },
     "url": "仓库地址",
     "branch": "默认分支",
     "token": "访问令牌（可选）",

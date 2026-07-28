@@ -55,6 +55,7 @@ GET    /projects/:id                      PATCH /projects/:id      DELETE /proje
 POST   /projects/:id/members              GET /projects/:id/members
 PATCH  /projects/:id/members/:userId      DELETE /projects/:id/members/:userId
 POST   /projects/:id/repos                GET /projects/:id/repos  DELETE .../repos/:repoId
+                                          # provider: github | gitlab | gitcode | generic-git (pr.open needs the first three)
 GET    /projects/:id/providers            POST /projects/:id/providers            # provider credentials (ADR-0013)
 PATCH  /projects/:id/providers/:provider  DELETE /projects/:id/providers/:provider
    # key is write-only (encrypted into secrets, kind provider_api_key); reads expose hasCredential only.

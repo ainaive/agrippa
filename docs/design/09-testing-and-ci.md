@@ -48,12 +48,12 @@ Auth flows, RBAC allow/deny matrix per role × endpoint class, transactional tas
 ### Worker adapters
 
 - `DiskArtifactStore` path containment: normal file stored, escaping symlink rejected, missing source is not a zero-byte artifact.
-- Real-Git workspace/SCM tests: canonical diffs include committed, staged, and untracked changes; protected paths retain their base state despite agent index/exclude corruption; hostile config, hooks, filters, redirects, and `.git/config` symlinks/FIFOs cannot affect platform Git; stale/empty evidence refuses publication; retry reuses one snapshot commit; platform Git receives no provider credentials.
+- Real-Git workspace/SCM tests: canonical diffs include committed, staged, and untracked changes; protected paths retain their base state despite agent index/exclude corruption; hostile config, hooks, filters, redirects, and `.git/config` symlinks/FIFOs cannot affect platform Git; stale/empty evidence refuses publication; retry reuses one snapshot commit; platform Git receives no provider credentials. PR-creation adapters (GitHub, GitCode) run against loopback fake forges, including duplicate recovery and GitCode's username resolution; `scripts/smoke-gitcode.ts` is the env-gated manual live smoke for real GitCode auth (never in CI).
 - Resource materialization tests replace settings/hooks/MCP state before each invocation and remove a symlinked `.claude` without touching its target.
 
 ### Frontend
 
-- No automated frontend tests yet (the `TaskParamsForm` and run-timeline reducer component tests described in earlier plans are not implemented — a known gap).
+- No automated frontend component tests yet (the `TaskParamsForm` and run-timeline reducer component tests described in earlier plans are not implemented — a known gap). Pure SPA helpers are unit-tested where extraction is cheap (`lib/sidebar-state.test.ts` — cookie parsing; `lib/body-lock.test.ts` — the stale-lock predicate over a stub document).
 - Full-browser E2E is deferred as a manual scripted walkthrough (automating with Playwright is a stretch goal, not a gate).
 
 ### Cross-cutting guards
