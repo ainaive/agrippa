@@ -34,6 +34,13 @@
     "fabri": "Fabri"
   },
   "repos": {
+    "provider": "Provider",
+    "providers": {
+      "github": "GitHub",
+      "gitlab": "GitLab",
+      "gitcode": "GitCode",
+      "generic-git": "Generic Git (push-only)"
+    },
     "url": "Repository URL",
     "branch": "Default branch",
     "token": "Access token (optional)",

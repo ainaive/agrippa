@@ -58,7 +58,7 @@ Navigation lives in the **left sidebar**. At its top sits the **project switcher
 ## Initial setup checklist
 
 1. **Create a project** — you'll be prompted on first login. Projects scope everything: members, resources, budgets, repositories.
-2. **Connect a repository** (Project → Settings → Repositories): URL, default branch, and an access token for private repos. Tokens are encrypted and never displayed again.
+2. **Connect a repository** (Project → Settings → Repositories): pick the hosting provider (GitHub / GitLab / GitCode / generic Git), then URL (HTTPS, not SSH), default branch, and an access token. The token also authenticates pushes and pull-request creation — publishing workflows need it even for public repos. Tokens are encrypted and never displayed again.
 3. **Grant resources** (Project → Settings → Resources): toggle on the **models** the project may use (at least one per tier you need) and any **skills**/**MCP servers** its task types require. Submission fails with a clear error if a required resource isn't granted.
 4. **Set a quota** (Project → Settings → Quota), optionally: monthly cost/token limits with a hard stop.
 5. **Invite teammates** (Project → Settings → Members) by email — they must have signed up first. Roles: admin / member / viewer.
