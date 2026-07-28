@@ -466,4 +466,24 @@ outputs:
     const { compiled } = compileTemplate(source, { resolveFile });
     expect(upgradeCompiledTemplate(compiled)).toBe(compiled);
   });
+
+  it("compiles a v3 multi-agent template", () => {
+    const source = readFileSync(
+      path.join(TEMPLATES_DIR, "swdev/requirement-delivery.yaml"),
+      "utf8",
+    );
+    const { compiled } = compileTemplate(source, { resolveFile });
+    expect(compiled.metadata.slug).toBe("swdev.requirement-delivery");
+    expect(Object.keys(compiled.spec.agents)).toEqual(["implementer", "reviewer"]);
+    const loops = compiled.spec.phases.filter((n) => "kind" in n && n.kind === "loop");
+    expect(loops.length).toBeGreaterThan(0);
+  });
+
+  it("v1 template still works alongside v3", () => {
+    const v1Source = readFileSync(path.join(TEMPLATES_DIR, "swdev/bug-localize-fix.yaml"), "utf8");
+    const v1Compiled = compileTemplate(v1Source, { resolveFile });
+    expect(v1Compiled.compiled.metadata.slug).toBe("swdev.bug-localize-fix");
+    expect(Object.keys(v1Compiled.compiled.spec.agents)).toEqual(["main"]);
+    expect(upgradeCompiledTemplate(v1Compiled.compiled)).toBe(v1Compiled.compiled);
+  });
 });
