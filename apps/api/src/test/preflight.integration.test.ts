@@ -146,4 +146,84 @@ describe.skipIf(!dbUp)("preflight (submit-readiness)", () => {
     expect(cred?.ok).toBe(false);
     expect(cred?.fixPath).toBe("resources");
   });
+
+  it("resolves a custom Anthropic-compatible provider end-to-end", async () => {
+    // 1. org_admin registers a custom provider (Anthropic-compatible, project auth)
+    const provider = await admin.request("/api/v1/provider-catalog", {
+      method: "POST",
+      json: {
+        providerId: "deepseek",
+        label: "DeepSeek",
+        baseUrls: { anthropic: "https://api.deepseek.com/anthropic" },
+        auth: "project",
+        baseUrlHosts: ["api.deepseek.com"],
+      },
+    });
+    expect(provider.status).toBe(201);
+
+    // 2. register models under it (bug-localize-fix needs strong + balanced + fast)
+    const strong = await admin.request("/api/v1/models", {
+      method: "POST",
+      json: {
+        provider: "deepseek",
+        providerModelId: "deepseek-reasoner",
+        displayName: "DeepSeek Reasoner",
+        tier: "strong",
+      },
+    });
+    expect(strong.status).toBe(201);
+    const balanced = await admin.request("/api/v1/models", {
+      method: "POST",
+      json: {
+        provider: "deepseek",
+        providerModelId: "deepseek-chat",
+        displayName: "DeepSeek Chat",
+        tier: "balanced",
+      },
+    });
+    expect(balanced.status).toBe(201);
+    const fast = await admin.request("/api/v1/models", {
+      method: "POST",
+      json: {
+        provider: "deepseek",
+        providerModelId: "deepseek-fast",
+        displayName: "DeepSeek Fast",
+        tier: "fast",
+      },
+    });
+    expect(fast.status).toBe(201);
+
+    // 3. project: grant the deepseek models + a repo + a deepseek credential
+    const projectId = await createProject("custom-prov");
+    await db
+      .insert(repoConnections)
+      .values({ projectId, provider: "github", url: "https://github.com/acme/d.git" })
+      .returning();
+    const models = await jsonOf<Array<{ id: string; provider: string }>>(
+      await admin.request("/api/v1/models"),
+    );
+    const deepseekModels = models.filter((m) => m.provider === "deepseek");
+    const skills = await jsonOf<Array<{ id: string }>>(await admin.request("/api/v1/skills"));
+    await admin.request(`/api/v1/projects/${projectId}/grants`, {
+      method: "PUT",
+      json: [
+        ...deepseekModels.map((m) => ({ resourceType: "model", resourceId: m.id })),
+        ...skills.map((s) => ({ resourceType: "skill", resourceId: s.id })),
+      ],
+    });
+    const cred = await admin.request(`/api/v1/projects/${projectId}/providers`, {
+      method: "POST",
+      json: {
+        provider: "deepseek",
+        apiKey: "sk-deepseek",
+        baseUrl: "https://api.deepseek.com/anthropic",
+      },
+    });
+    expect(cred.status).toBe(201);
+
+    // 4. preflight: ready — the claude executor (anthropic protocol) serves deepseek
+    const result = await preflight(projectId);
+    expect(result.ready).toBe(true);
+    expect(result.checks.find((c) => c.key === "models")?.ok).toBe(true);
+  });
 });
