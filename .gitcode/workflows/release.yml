@@ -33,6 +33,7 @@ stages:
     name: 发布镜像
     jobs:
       api:
+        name: API image
         runs-on: [ubuntu-latest, x64, medium]
         env:
           REGISTRY: ${{ vars.REGISTRY }}
@@ -56,6 +57,7 @@ stages:
               docker push --all-tags "$IMAGE"
 
       worker:
+        name: Worker image
         runs-on: [ubuntu-latest, x64, medium]
         env:
           REGISTRY: ${{ vars.REGISTRY }}

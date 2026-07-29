@@ -29,6 +29,7 @@ stages:
     name: 检查
     jobs:
       verify:
+        name: Lint and checks
         runs-on: [ubuntu-latest, x64, small]
         steps:
           - name: Checkout
@@ -53,7 +54,7 @@ stages:
           - name: Install
             run: bun install --frozen-lockfile
 
-          - name: Lint & format (biome)
+          - name: Lint and format (biome)
             run: bunx biome ci .
 
           - name: Typecheck
@@ -79,6 +80,7 @@ stages:
     name: 构建与测试
     jobs:
       test:
+        name: Test and build
         runs-on: [ubuntu-latest, x64, medium]
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
@@ -132,6 +134,7 @@ stages:
             run: bun run build
 
       docker:
+        name: Docker images
         runs-on: [ubuntu-latest, x64, small]
         steps:
           - name: Checkout
