@@ -1,0 +1,79 @@
+# GitCode Action（AtomGit Action）Release —— 由 .github/workflows/release.yml 迁移而来。
+# 原始 GitHub Actions 版本保留在 .github/workflows/release.yml，未删除。
+# 文档：https://docs.gitcode.com/docs/help/home/org_project/pipeline/
+#
+# 迁移要点：
+#   1. 采用 stages 维度（mapping 形式）：publish_stage 内 api / worker 两个 job 并行构建推送
+#   2. 上下文 github.* → atomgit.*：repository_owner、ref_name
+#   3. AtomGit Action 未见与 ghcr.io / GITHUB_TOKEN 等价的内置镜像仓库服务，
+#      镜像仓库地址与账号改用 vars/secrets（项目设置 → Action 秘钥与变量）：
+#        vars.REGISTRY              镜像仓库地址，缺省回退 registry.gitcode.com（需自行确认实际地址）
+#        secrets.REGISTRY_USERNAME  推送账号
+#        secrets.REGISTRY_PASSWORD  推送口令（日志自动脱敏为 ***）
+#   4. 镜像名中的 owner 统一转小写，避免 Docker 仓库拒绝大写
+#   5. permissions 作用域为 repository（非 packages）
+#   6. 若后续 GitCode 提供官方 docker/login-action 插件，可把登录步骤替换为
+#        - uses: docker/login-action@v3
+#          with:
+#            registry: ${{ vars.REGISTRY }}
+#            username: ${{ secrets.REGISTRY_USERNAME }}
+#            password: ${{ secrets.REGISTRY_PASSWORD }}
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  repository: read
+
+stages:
+  publish_stage:
+    name: 发布镜像
+    jobs:
+      api:
+        runs-on: [ubuntu-latest, x64, medium]
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        steps:
+          - name: Checkout
+            uses: checkout
+
+          - name: Login to registry
+            run: |
+              REGISTRY="${REGISTRY:-registry.gitcode.com}"
+              echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
+
+          - name: Build and push api image
+            run: |
+              REGISTRY="${REGISTRY:-registry.gitcode.com}"
+              OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+              IMAGE="$REGISTRY/$OWNER/agrippa-api"
+              docker build -f infra/Dockerfile.api -t "$IMAGE:${{ atomgit.ref_name }}" -t "$IMAGE:latest" .
+              docker push --all-tags "$IMAGE"
+
+      worker:
+        runs-on: [ubuntu-latest, x64, medium]
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        steps:
+          - name: Checkout
+            uses: checkout
+
+          - name: Login to registry
+            run: |
+              REGISTRY="${REGISTRY:-registry.gitcode.com}"
+              echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
+
+          - name: Build and push worker image
+            run: |
+              REGISTRY="${REGISTRY:-registry.gitcode.com}"
+              OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+              IMAGE="$REGISTRY/$OWNER/agrippa-worker"
+              docker build -f infra/Dockerfile.worker -t "$IMAGE:${{ atomgit.ref_name }}" -t "$IMAGE:latest" .
+              docker push --all-tags "$IMAGE"
