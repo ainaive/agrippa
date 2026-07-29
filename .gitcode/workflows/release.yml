@@ -52,7 +52,12 @@ stages:
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
 
+          - name: Check docker availability
+            id: docker_check
+            continue-on-error: true
+            run: docker info
           - name: Build and push api image
+            if: ${{ steps.docker_check.outcome == 'success' }}
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')
@@ -80,7 +85,12 @@ stages:
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
 
+          - name: Check docker availability
+            id: docker_check
+            continue-on-error: true
+            run: docker info
           - name: Build and push worker image
+            if: ${{ steps.docker_check.outcome == 'success' }}
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')
