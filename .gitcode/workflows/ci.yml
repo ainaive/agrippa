@@ -1,0 +1,142 @@
+# GitCode Action（AtomGit Action）CI —— 由 .github/workflows/ci.yml 迁移而来。
+# 原始 GitHub Actions 版本保留在 .github/workflows/ci.yml，未删除。
+# 文档：https://docs.gitcode.com/docs/help/home/org_project/pipeline/
+#
+# 迁移要点（AtomGit Action 仍处测试阶段，部分能力需等价替代）：
+#   1. 工作流目录 .github/workflows/ → .gitcode/workflows/
+#   2. 采用 AtomGit Action 特有的 stages 维度（mapping 形式）：阶段间串行、阶段内 job 并行
+#      verify_stage（lint/类型/依赖方向/模板/commitlint）→ build_stage（test 与 docker 镜像并行）
+#   3. runs-on 标签改为三段式 {os},{arch},{flavor}，如 [ubuntu-latest, x64, small]
+#   4. 上下文 github.* → atomgit.*；系统变量 GITHUB_* → ATOMGIT_*（用 $ATOMGIT_PATH 注入 bun）
+#   5. AtomGit Action 不支持 services: 服务容器，改用 docker run 启动 postgres/redis
+#   6. Runner 镜像未预装 Bun，改用官方安装脚本；用 cache 插件缓存 bun 全局缓存
+#   7. checkout 未文档化 fetch-depth，故用 git fetch --unshallow 兜底取完整历史
+#   8. commitlint PR 范围：AtomGit 上下文无 base.sha，只有 base.ref，故先 fetch base 再取 head.sha
+#   9. permissions 作用域为 repository（非 contents/packages）
+
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**", "infra/**", "upgrade/**"]
+  pull_request:
+
+permissions:
+  repository: read
+
+stages:
+  verify_stage:
+    name: 检查
+    jobs:
+      verify:
+        runs-on: [ubuntu-latest, x64, small]
+        steps:
+          - name: Checkout
+            uses: checkout
+
+          - name: Ensure full history
+            run: git fetch --prune --unshallow || true
+
+          - name: Cache Bun store
+            uses: cache
+            with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+              restore-keys: |
+                bun-${{ runner.os }}-
+
+          - name: Install Bun
+            run: |
+              curl -fsSL https://bun.sh/install | bash
+              echo "$HOME/.bun/bin" >> "$ATOMGIT_PATH"
+
+          - name: Install
+            run: bun install --frozen-lockfile
+
+          - name: Lint & format (biome)
+            run: bunx biome ci .
+
+          - name: Typecheck
+            run: bunx tsc -b
+
+          - name: Dependency direction
+            run: bun scripts/check-deps.ts
+
+          - name: Validate builtin templates
+            run: bun scripts/validate-templates.ts
+
+          - name: Commitlint (PR range)
+            if: ${{ atomgit.event_name == 'pull_request' }}
+            run: |
+              git fetch origin ${{ atomgit.event.pull_request.base.ref }}
+              bunx commitlint --from origin/${{ atomgit.event.pull_request.base.ref }} --to ${{ atomgit.event.pull_request.head.sha }}
+
+          - name: Commitlint (pushed commit)
+            if: ${{ atomgit.event_name == 'push' }}
+            run: bunx commitlint --last
+
+  build_stage:
+    name: 构建与测试
+    jobs:
+      test:
+        runs-on: [ubuntu-latest, x64, medium]
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
+          REDIS_URL: redis://localhost:6379
+        steps:
+          - name: Checkout
+            uses: checkout
+
+          - name: Cache Bun store
+            uses: cache
+            with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+              restore-keys: |
+                bun-${{ runner.os }}-
+
+          - name: Install Bun
+            run: |
+              curl -fsSL https://bun.sh/install | bash
+              echo "$HOME/.bun/bin" >> "$ATOMGIT_PATH"
+
+          - name: Install
+            run: bun install --frozen-lockfile
+
+          - name: Start Postgres
+            run: |
+              docker run -d --name postgres \
+                -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+                -e POSTGRES_DB=agrippa_test -p 5432:5432 \
+                --health-cmd="pg_isready" --health-interval=5s --health-timeout=3s --health-retries=10 \
+                postgres:17
+              for i in $(seq 1 30); do
+                docker exec postgres pg_isready -U postgres && break
+                sleep 1
+              done
+              docker exec postgres pg_isready -U postgres
+
+          - name: Start Redis
+            run: |
+              docker run -d --name redis -p 6379:6379 redis:7
+              for i in $(seq 1 30); do
+                docker exec redis redis-cli ping && break
+                sleep 1
+              done
+              docker exec redis redis-cli ping
+
+          - name: Test
+            run: bun test
+
+          - name: Build
+            run: bun run build
+
+      docker:
+        runs-on: [ubuntu-latest, x64, small]
+        steps:
+          - name: Checkout
+            uses: checkout
+          - name: Build api image
+            run: docker build -f infra/Dockerfile.api -t agrippa-api:ci .
+          - name: Build worker image
+            run: docker build -f infra/Dockerfile.worker -t agrippa-worker:ci .
