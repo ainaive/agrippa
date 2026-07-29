@@ -8,12 +8,12 @@
 #   3. runs-on 标签改为三段式 {os},{arch},{flavor}，如 [ubuntu-latest, x64, medium]
 #   4. 上下文 github.* → atomgit.*；系统变量 GITHUB_* → ATOMGIT_*（用 $ATOMGIT_PATH 注入 bun）
 #   5. AtomGit Action 不支持 services: 服务容器，改用 docker run 启动 postgres/redis
-#   6. Runner 镜像未预装 Bun，改用官方安装脚本；用 cache 插件缓存 bun 全局缓存
+#   6. Runner 镜像未预装 Bun，且 bun.sh 在国内不可达，改从 npmmirror 二进制镜像下载；用 cache 插件缓存 bun 全局缓存
 #   7. 私有仓库：checkout 用 PAT 密钥 secrets.GIT_TOKEN 鉴权（内置 ATOMGIT_TOKEN 不行），
 #      ref 取 PR 合并提交或推送 sha
 #   8. commitlint PR 范围：AtomGit 上下文无 base.sha，只有 base.ref，故先 fetch base 再取 head.sha
 #   9. permissions 作用域为 repository（非 contents/packages）
-#   10. bun install 走国内镜像 registry.npmmirror.com（仅工作流内写 .npmrc，不污染仓库）
+#   10. bun 走国内镜像：二进制从 npmmirror 下载，依赖经 bunfig.toml [install] registry 指向 npmmirror（仅 runner 工作区，不污染仓库）；bunx 改用 bun x
 
 name: CI
 
@@ -55,20 +55,27 @@ stages:
 
           - name: Install Bun
             run: |
-              curl -fsSL https://bun.sh/install | bash
+              set -e
+              BUN_ARCH=x64; [ "$(uname -m)" = "aarch64" ] && BUN_ARCH=arm64
+              # bun.sh 在国内不可达，改从 npmmirror 二进制镜像下载 bun
+              curl -fsSL "https://registry.npmmirror.com/-/binary/bun/bun-v1.3.14/bun-linux-${BUN_ARCH}.zip" -o /tmp/bun.zip
+              python3 -c "import zipfile; zipfile.ZipFile('/tmp/bun.zip').extractall('/tmp/bun')"
+              install -D -m755 "/tmp/bun/bun-linux-${BUN_ARCH}/bun" "$HOME/.bun/bin/bun"
               echo "$HOME/.bun/bin" >> "$ATOMGIT_PATH"
+              "$HOME/.bun/bin/bun" --version
 
           - name: Install
-            timeout-minutes: 10
+            timeout-minutes: 15
             run: |
-              [ -f .npmrc ] || echo "registry=https://registry.npmmirror.com" > .npmrc
+              # bun 不读 .npmrc 的 registry，用 bunfig.toml 的 [install] registry 设国内镜像
+              printf '[install]\nregistry = "https://registry.npmmirror.com"\n\n[run]\nbun = true\n' > bunfig.toml
               bun install --frozen-lockfile
 
           - name: Lint and format (biome)
-            run: bunx biome ci .
+            run: bun x biome ci .
 
           - name: Typecheck
-            run: bunx tsc -b
+            run: bun x tsc -b
 
           - name: Dependency direction
             run: bun scripts/check-deps.ts
@@ -80,11 +87,11 @@ stages:
             if: ${{ atomgit.event_name == 'pull_request' }}
             run: |
               git fetch origin ${{ atomgit.event.pull_request.base.ref }}
-              bunx commitlint --from origin/${{ atomgit.event.pull_request.base.ref }} --to ${{ atomgit.event.pull_request.head.sha }}
+              bun x commitlint --from origin/${{ atomgit.event.pull_request.base.ref }} --to ${{ atomgit.event.pull_request.head.sha }}
 
           - name: Commitlint (pushed commit)
             if: ${{ atomgit.event_name == 'push' }}
-            run: bunx commitlint --last
+            run: bun x commitlint --last
 
           - name: Start Postgres
             run: |
