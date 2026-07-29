@@ -110,6 +110,10 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 
 ## 升级与扩容
 
+Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode 拉取代码、构建以所部署提交号打标签的镜像、启动、等待 `/healthz`，若新版本起不来则**回滚到上一个标签**。可随时手动执行；向 `deploy` 分支推送时，Janus 会通过 `.janus/deploy.yml` 自动运行同一个脚本。
+
+它每次都会重新构建，这是刻意为之：SPA 与 API 都在构建镜像时打包进 api 镜像，因此单纯的 `git pull && docker compose up -d` 会重启**旧**代码，且看起来像是成功了。构建缓存让纯文档变更的部署依然很快。脚本用 `flock` 串行化并发部署，并且只保留当前与上一个镜像标签（每组约 4 GB）。
+
 拉取新镜像后 `docker compose up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
 
 ### 从「compose 项目未命名」时期的部署升级
