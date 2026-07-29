@@ -91,6 +91,8 @@ export function RunDetailPage() {
   const cancel = useMutation({
     mutationFn: () => api(`/runs/${runId}/cancel`, { method: "POST" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["run", runId] }),
+    // cancel can reject (already_terminal on a lost race, permission, network)
+    onError: toastApiError,
   });
   const retry = useMutation({
     mutationFn: () =>

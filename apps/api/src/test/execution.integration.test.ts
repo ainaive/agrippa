@@ -417,7 +417,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     }
   });
 
-  it("cancel marks the run and the engine honors it", async () => {
+  it("cancel finalizes a queued run immediately", async () => {
     const res = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST",
       json: submitBody(),
@@ -427,9 +427,14 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     const cancel = await admin.request(`/api/v1/runs/${cancelRunId}/cancel`, { method: "POST" });
     expect(cancel.status).toBe(200);
     const [row] = await db.select().from(runs).where(eq(runs.id, cancelRunId));
+    // a queued run has no worker holding it — cancel must flip it to terminal
+    // straight away, not just set a flag the user never sees reflected
+    expect(row?.status).toBe("cancelled");
     expect(row?.cancelRequested).toBe(true);
+    expect(row?.finishedAt).not.toBeNull();
 
-    expect(await executeRun(engineDeps(), cancelRunId)).toBe("cancelled");
+    // the run is already terminal, so the worker's executeRun is a no-op
+    expect(await executeRun(engineDeps(), cancelRunId)).toBe("already_terminal");
   });
 
   it("localizes error messages by ?lang and profile locale", async () => {

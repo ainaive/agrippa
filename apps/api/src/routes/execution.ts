@@ -36,6 +36,7 @@ import {
   buildParamsValidator,
   type CompiledTemplate,
   decideCheckpoint,
+  finalizeRun,
   flattenPhases,
   resolveAgentBindings,
   SubmitError,
@@ -690,9 +691,37 @@ export const executionRoutes = new Hono<AppEnv>()
     }
     await c.var.db.update(runs).set({ cancelRequested: true }).where(eq(runs.id, run.id));
     await c.var.bus?.publishControl(run.id, "cancel");
-    // no worker holds queued/waiting runs — enqueue so the engine observes the flag
+    // No worker holds a queued/waiting run: setting the flag + the control
+    // message + enqueue all miss — the control channel has no subscriber yet,
+    // and enqueueRun is singleton-deduped against the submit-time job. So the
+    // user saw no change until the worker happened to pick the run up. Finalize
+    // directly here; the CAS inside finalizeRun makes this concurrency-safe
+    // against a worker that picks the run up in the same instant.
     if (run.status === "queued" || run.status === "waiting_approval") {
-      await c.var.queue?.enqueueRun(run.id);
+      const result = await finalizeRun(c.var.db, {
+        runId: run.id,
+        from: run.status,
+        to: "cancelled",
+        error: { code: "cancelled", message: "run cancelled" },
+        usageTotals: {},
+        eventPayload: { error: { code: "cancelled", message: "run cancelled" } },
+      });
+      if (result.outcome === "finalized") {
+        // push the terminal event to connected SSE clients immediately
+        await c.var.bus?.publish({
+          runId: run.id,
+          seq: result.seq,
+          type: "run.cancelled",
+          payload: { error: { code: "cancelled", message: "run cancelled" } },
+          createdAt: result.createdAt.toISOString(),
+        });
+      } else {
+        // lost: another path moved the run out of <queued|waiting_approval>
+        // first (typically the worker just picked it up). The flag is set and
+        // the control message fired above; enqueue as a belt-and-suspenders
+        // nudge so the worker observes cancelRequested at its next boundary.
+        await c.var.queue?.enqueueRun(run.id);
+      }
     }
     await audit(c, {
       action: "run.cancel",

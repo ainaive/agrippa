@@ -121,7 +121,7 @@ Decisions are a compare-and-swap on `status = 'pending'` (`run-lifecycle.decideC
 
 ### Cancellation
 
-`POST /runs/:id/cancel` sets `runs.cancel_requested = true` and publishes on Redis channel `run:{id}:control`. The worker's control subscriber fires the run's `AbortController`; the executor aborts; the engine records `cancelled`. If no worker holds the run (queued / waiting_approval), the API transitions it directly and cancels the pending job. The DB flag backstops the pubsub message (worker checks it at step boundaries), so a lost message delays cancellation by at most one step.
+`POST /runs/:id/cancel` sets `runs.cancel_requested = true` and publishes on Redis channel `run:{id}:control`. The worker's control subscriber fires the run's `AbortController`; the executor aborts; the engine records `cancelled`. If no worker holds the run (queued / waiting_approval), the API finalizes it to `cancelled` directly via the same CAS `finalizeRun` path and publishes the terminal event — the pending singleton job, when the worker eventually picks it up, is a no-op (`executeRun` returns `already_terminal`). The DB flag backstops the pubsub message (worker checks it at step boundaries), so a lost message delays cancellation by at most one step.
 
 ### Usage limits & quota
 
