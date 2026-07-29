@@ -20,7 +20,8 @@ infra/docker-compose.yml
 
 - `api` and `worker` are separate images (`infra/Dockerfile.api`, `infra/Dockerfile.worker`) built from the monorepo with Bun; the SPA is built at image build time and served statically by `api` (no separate web container, no CORS).
 - `worker` scales horizontally (`docker compose up --scale worker=3`); run concurrency = workers × slots.
-- Migrations run as an entrypoint step of `api` (`bun run db:migrate`) guarded by a Postgres advisory lock; seeding of builtin resources is idempotent (checksum-guarded upserts).
+- Migrations run **in-process at the top of `apps/api/src/index.ts`**, before the listener opens, guarded by a Postgres advisory lock taken on a reserved connection; seeding of builtin resources and publication of builtin templates follow in the same block, both idempotent (checksum-guarded upserts). `AGRIPPA_MIGRATE_ON_BOOT=0` opts out. There is no entrypoint script — a healthy `/healthz` therefore means all three finished.
+- The `worker` image additionally provisions the **Codex CLI** at `/opt/codex` (pinned by the `CODEX_VERSION` build arg, fetched from `NPM_REGISTRY`). The `codex-cli` executor spawns a literal `codex` binary, so without it `probeCodexCli()` fails, the executor never registers, and templates binding a slot to it — `swdev/requirement-delivery` — become un-submittable. The image build runs the same two flag checks the boot probe does, so a bad pin fails the build rather than degrading silently at runtime.
 - `infra/docker-compose.dev.yml` starts **dependencies only** (postgres + redis) for local development; `api`/`worker`/`web` run via `bun dev` on the host.
 
 ## Configuration (env)
@@ -35,11 +36,13 @@ infra/docker-compose.yml
 | `AGRIPPA_SECRET_KEY` | AES-256-GCM key encrypting the `secrets` table — **back this up; losing it orphans stored credentials** |
 | `BETTER_AUTH_SECRET` | session signing |
 | `ANTHROPIC_API_KEY` | Claude executor (worker only) |
+| `OPENAI_API_KEY` / `CODEX_API_KEY` | Codex executor's `openai` provider (worker only); both optional — a keyless worker still registers `codex-cli` and defers runs needing env auth it lacks |
 | `WORKER_SLOTS` | run concurrency per worker (default 2) |
 | `WORKSPACE_ROOT` | per-run workspaces volume (default `/work/runs`) |
 | `ARTIFACT_STORAGE_ROOT` | large-artifact volume |
-| `WORKER_EGRESS_ALLOWLIST` | optional outbound-network restriction for agent Bash |
+| `AGRIPPA_PORT` | published port mapping; accepts an interface (`127.0.0.1:3000`) so the plain-HTTP API isn't exposed beside the TLS terminator |
 | `APT_MIRROR` | optional **build-time** mirror for the worker image's apt packages (e.g. `https://mirrors.aliyun.com` from a host where `deb.debian.org` is slow/blocked); no-op when empty |
+| `CODEX_VERSION` / `NPM_REGISTRY` | **build-time**: which Codex CLI the worker image installs, and where from (`https://registry.npmmirror.com` is the CN counterpart to `APT_MIRROR`) |
 
 Secrets policy: the master key and the deployment's **fallback** provider API keys live only in `api`/`worker` env (compose `env_file`), never in the DB; user-registered credentials (git tokens, MCP auth, and per-project provider API keys — ADR-0013) live encrypted in the `secrets` table keyed by `AGRIPPA_SECRET_KEY`. A project provider credential **overrides** the worker env for that provider; env auth remains the deployment-wide default for projects without one.
 
@@ -49,9 +52,11 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
 
 - **First-run onboarding**: self-registration is closed (invite-only — see [05](05-api-and-auth.md#authentication)). The api/worker do **not** create users on boot. An operator runs `apps/api/src/cli/bootstrap-admin.ts` once (reads `AGRIPPA_BOOTSTRAP_EMAIL`/`PASSWORD` from the env file, creates the first `org_admin`, idempotent on email) — then signs in and invites members from the UI. Runbook in [Operations → First-run](../manual/en/06-operations.md#first-run-create-the-admin).
 - **Backup**: Postgres volume (pg_dump schedule is the operator's choice) + `ARTIFACT_STORAGE_ROOT` volume + the `AGRIPPA_SECRET_KEY`. Redis is disposable.
-- **Upgrade**: pull images → `docker compose up -d` → api entrypoint migrates. Workers drain gracefully (in-flight runs resume on new workers via step-granular resume — see [04](04-execution-runtime.md)).
-- **TLS / ingress**: out of scope; operators front the stack with their own reverse proxy. SSE requires the proxy to disable response buffering for `/api/v1/runs/*/events`.
-- **Health**: `GET /healthz` (api: DB ping). A per-worker heartbeat row for the admin UI is deferred past M1.
+- **Upgrade**: pull images → `docker compose up -d` → api migrates on boot. Workers drain gracefully (in-flight runs resume on new workers via step-granular resume — see [04](04-execution-runtime.md)); the compose `stop_grace_period` must exceed the drain, so it is set to 60s rather than the 10s default.
+- **TLS / ingress**: out of scope; operators front the stack with their own reverse proxy. SSE requires the proxy to disable response buffering for `/api/v1/runs/*/events` **and** a long read timeout — the stream writes no keepalive frames, so an idle run sends zero bytes and a default 60s timeout severs it.
+- **Health**: `GET /healthz` (api: DB ping). A per-worker heartbeat row for the admin UI is deferred past M1. Executor availability is observable via `executor_registrations` (workers upsert at boot and on the 60s sweeper tick).
+- **Sandboxing under Docker**: the worker image installs bubblewrap, but Docker's default seccomp profile can refuse the namespace operations it needs, and both executors treat an unavailable sandbox as a **silent** degradation (the Claude SDK is configured `failIfUnavailable: false`). Probe explicitly after deploying — `docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true` — and record the posture chosen: accept the container plus non-root `bun` user plus throwaway workspace as the boundary, or relax `security_opt` on the worker service to restore in-container sandboxing at the cost of the outer one. This is the Compose counterpart of the AppArmor hazard documented in the VM section below.
+- **Deferred**: an outbound-network allowlist for agent Bash. Previously listed here as a `WORKER_EGRESS_ALLOWLIST` env var; nothing implements it, so it is recorded as future work rather than configuration.
 
 ## VM deployment (systemd, no Docker)
 
