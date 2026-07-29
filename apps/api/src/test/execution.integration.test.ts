@@ -362,6 +362,54 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(partialText).not.toContain("event: run.started");
   });
 
+  it("keeps an idle stream alive with comment frames that carry no event id", async () => {
+    // A live (non-terminal) run writes nothing between events, so the stream
+    // has to emit something or an intermediary reaps the connection.
+    const submit = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: submitBody(),
+    });
+    expect(submit.status).toBe(202);
+    const { runId: idleRunId } = await jsonOf<{ runId: string }>(submit);
+
+    process.env.AGRIPPA_SSE_KEEPALIVE_MS = "1";
+    try {
+      const res = await viewer.request(`/api/v1/runs/${idleRunId}/events`);
+      expect(res.status).toBe(200);
+
+      // the run never terminates here (the queue is a fake), so read until a
+      // keepalive shows up rather than draining to completion
+      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let seen = "";
+      // under bun's 5s per-test timeout, so a regression fails the assertion
+      // below with a readable diff instead of an opaque timeout
+      const deadline = Date.now() + 3_500;
+      try {
+        while (!seen.includes(": keepalive") && Date.now() < deadline) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          seen += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        await reader.cancel();
+      }
+
+      expect(seen).toContain(": keepalive");
+      // the frame must not look like an event: no id line means it can never
+      // advance the cursor the client reconnects with via Last-Event-ID
+      const keepaliveFrames = seen.split("\n\n").filter((f) => f.startsWith(": keepalive"));
+      expect(keepaliveFrames.length).toBeGreaterThan(0);
+      for (const frame of keepaliveFrames) {
+        expect(frame).not.toContain("id:");
+        expect(frame).not.toContain("event:");
+        expect(frame).not.toContain("data:");
+      }
+    } finally {
+      delete process.env.AGRIPPA_SSE_KEEPALIVE_MS;
+    }
+  });
+
   it("cancel marks the run and the engine honors it", async () => {
     const res = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST",

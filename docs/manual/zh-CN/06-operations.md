@@ -106,7 +106,7 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 
 升级到首次引入平台自有 Git 快照（ADR-0012）的版本前，请先排空仍在进行的**仓库型**执行。旧工作区没有可信的平台 gitdir，新 worker 恢复时会按设计以 `workspace_lost` 失败关闭；非仓库型执行不受影响。后续升级仍保持正常的步骤粒度续跑行为。
 
-反向代理注意：对 `/api/v1/runs/*/events`（SSE）**关闭响应缓冲**——如 nginx 的 `proxy_buffering off;`——否则实时进度会成批到达。
+反向代理注意：对 `/api/v1/runs/*/events`（SSE）**关闭响应缓冲**——如 nginx 的 `proxy_buffering off;`——否则实时进度会成批到达。该流每 15 秒发送一个注释帧，使空闲的执行不会被中间层当成断连回收；若某个中间层的超时更激进，可用 `AGRIPPA_SSE_KEEPALIVE_MS` 调整。
 
 ## 故障排查
 

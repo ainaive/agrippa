@@ -107,7 +107,7 @@ Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/depl
 
 When upgrading to the release that introduced platform-owned Git snapshots (ADR-0012), first drain active **repository-backed** runs. Older checkouts do not contain the trusted platform gitdir and deliberately fail closed as `workspace_lost` on a new worker; non-repository runs are unaffected. Later upgrades retain normal step-granular resume behavior.
 
-Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (SSE) — e.g. `proxy_buffering off;` in nginx — or live progress will arrive in bursts.
+Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (SSE) — e.g. `proxy_buffering off;` in nginx — or live progress will arrive in bursts. The stream emits a comment frame every 15 s so an idle run doesn't look like a dead connection; tune with `AGRIPPA_SSE_KEEPALIVE_MS` if an intermediary reaps faster than that.
 
 ## Troubleshooting
 
