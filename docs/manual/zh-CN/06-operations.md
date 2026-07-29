@@ -121,14 +121,17 @@ Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode �
 ```sh
 # 部署失败时会打印所用的转储文件路径；请把它赋给变量，而不是照抄占位符
 DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
+C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
 
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env stop api worker
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec -T postgres \
-  pg_restore -U agrippa -d agrippa --clean --if-exists < "$DUMP"
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env start api worker
+$C stop api worker                       # dropdb 要求没有任何连接
+$C exec -T postgres dropdb -U agrippa --if-exists agrippa
+$C exec -T postgres createdb -U agrippa agrippa
+$C exec -T postgres pg_restore -U agrippa -d agrippa \
+    --exit-on-error --single-transaction < "$DUMP"
+$C start api worker                      # 仅在还原成功之后
 ```
 
-先停掉应用不是可选项：`pg_restore --clean` 无法删除 api 与 worker 仍持有连接的对象。
+要先删库重建，而不是用 `pg_restore --clean`：`--clean` 只会删除归档中存在的对象，因此失败迁移**新增**的表会残留下来，并可能因依赖关系导致还原失败。`--single-transaction` 配合 `--exit-on-error` 可保证部分还原会整体回滚，而不是留下一个半成品数据库。先停掉应用不是可选项——api 与 worker 仍持有连接时 `dropdb` 会拒绝执行。
 
 只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**已有 worker 注册了执行器时，部署才算成功。副本数之所以重要，是因为 worker 在开始消费队列之前就会先注册，仅凭一条新注册记录会放过一个启动途中就挂掉的 worker。已知残留缺口：worker 起来了但注册后卡死，这种情况检测不到。
 

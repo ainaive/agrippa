@@ -148,10 +148,22 @@ restore_hint() {
   cat >&2 <<HINT
 
 The database was NOT rolled back. If $short_sha applied a migration, restore it:
-  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE stop api worker
-  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE exec -T postgres \\
-    pg_restore -U agrippa -d agrippa --clean --if-exists < $dump
-  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE start api worker
+
+  DUMP=$dump
+  C="docker compose -f $COMPOSE_FILE --env-file $ENV_FILE"
+
+  \$C stop api worker                       # dropdb needs zero connections
+  \$C exec -T postgres dropdb -U agrippa --if-exists agrippa
+  \$C exec -T postgres createdb -U agrippa agrippa
+  \$C exec -T postgres pg_restore -U agrippa -d agrippa \\
+      --exit-on-error --single-transaction < "\$DUMP"
+  \$C start api worker                      # only once the restore succeeded
+
+Drop and recreate rather than pg_restore --clean: --clean only drops what the
+archive contains, so tables the failed migration ADDED would survive and can
+block the restore through dependencies. --single-transaction with
+--exit-on-error means a partial restore rolls back instead of leaving a
+half-populated database.
 HINT
 }
 
@@ -224,26 +236,42 @@ worker_ok() {
   [ "$running" -eq "$expected" ] 2>/dev/null || return 1
   # Bounded: a wedged Postgres would otherwise block here indefinitely, and the
   # caller's HEALTH_TIMEOUT loop cannot fire while this command hangs.
-  # statement_timeout goes through PGOPTIONS, not an inline `set`: a `set`
-  # statement prints "SET" to stdout, which would corrupt the count this reads.
-  n="$(compose exec -T -e PGCONNECT_TIMEOUT=5 -e PGOPTIONS='-c statement_timeout=10s' \
+  # Bounded by whatever is left of HEALTH_TIMEOUT, so a wedged Postgres cannot
+  # push the total past the stated budget. statement_timeout goes through
+  # PGOPTIONS, not an inline `set`: a `set` statement prints "SET" to stdout,
+  # which would corrupt the count this reads.
+  local budget="${probe_budget:-10}"
+  [ "$budget" -gt 1 ] 2>/dev/null || budget=1
+  [ "$budget" -le 10 ] || budget=10
+  # spelled out rather than via compose(): `timeout` needs a real command
+  n="$(timeout "$budget" \
+    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+    exec -T -e PGCONNECT_TIMEOUT=2 -e PGOPTIONS="-c statement_timeout=${budget}s" \
     postgres psql -U agrippa -d agrippa -tAc \
     "select count(*) from executor_registrations where registered_at > to_timestamp($since);" \
     2>/dev/null | tr -d '[:space:]')"
   [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null
 }
 
+# HEALTH_TIMEOUT is a wall-clock bound, so this tracks an absolute deadline
+# rather than counting its own sleeps. Counting sleeps understates the real
+# elapsed time badly: each iteration also pays for a `compose ps` and a psql
+# round trip, so a nominal 180s could run for many minutes. `probe_budget`
+# hands the remaining time to the database probe, which is otherwise the
+# slowest step.
 stack_ok() {
-  local since=$(($(date +%s) - 5)) waited=0
-  while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
+  local since=$(($(date +%s) - 5))
+  local deadline=$(($(date +%s) + HEALTH_TIMEOUT))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    probe_budget=$((deadline - $(date +%s)))
     if api_ok && worker_ok "$since"; then
       return 0
     fi
     sleep 5
-    waited=$((waited + 5))
   done
+  probe_budget=5
   api_ok || echo "  api never became healthy" >&2
-  worker_ok "$since" || echo "  worker never registered an executor" >&2
+  worker_ok "$since" || echo "  worker never became ready" >&2
   return 1
 }
 

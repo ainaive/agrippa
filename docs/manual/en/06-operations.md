@@ -122,14 +122,17 @@ The script therefore takes a `pg_dump` before every deploy, into `/var/lib/agrip
 ```sh
 # the deploy prints the dump path it took; assign it rather than pasting a placeholder
 DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
+C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
 
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env stop api worker
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec -T postgres \
-  pg_restore -U agrippa -d agrippa --clean --if-exists < "$DUMP"
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env start api worker
+$C stop api worker                       # dropdb needs zero connections
+$C exec -T postgres dropdb -U agrippa --if-exists agrippa
+$C exec -T postgres createdb -U agrippa agrippa
+$C exec -T postgres pg_restore -U agrippa -d agrippa \
+    --exit-on-error --single-transaction < "$DUMP"
+$C start api worker                      # only once the restore succeeded
 ```
 
-Stopping the app first is not optional: `pg_restore --clean` cannot drop objects the api and worker still hold connections to.
+Drop and recreate rather than `pg_restore --clean`: `--clean` only drops what the archive contains, so tables the failed migration *added* would survive, and can block the restore through dependencies. `--single-transaction` with `--exit-on-error` means a partial restore rolls back instead of leaving a half-populated database. Stopping the app first is not optional — `dropdb` refuses while the api and worker hold connections.
 
 A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** a worker has registered its executors. The replica count matters because the worker registers before it starts consuming the queue, so a fresh registration alone would pass a worker that died during startup. Residual gap: a worker that stays up but wedges after registering is not detected.
 
