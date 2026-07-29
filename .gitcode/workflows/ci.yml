@@ -4,15 +4,17 @@
 #
 # 迁移要点（AtomGit Action 仍处测试阶段，部分能力需等价替代）：
 #   1. 工作流目录 .github/workflows/ → .gitcode/workflows/
-#   2. 采用 AtomGit Action 特有的 stages 维度（mapping 形式）：阶段间串行、阶段内 job 并行
-#      verify_stage（lint/类型/依赖方向/模板/commitlint）→ build_stage（test 与 docker 镜像并行）
-#   3. runs-on 标签改为三段式 {os},{arch},{flavor}，如 [ubuntu-latest, x64, small]
+#   2. 用 stages 维度（单 stage，ci + docker 两 job 并行），结构贴近 GitHub 原版
+#   3. runs-on 标签改为三段式 {os},{arch},{flavor}，如 [ubuntu-latest, x64, medium]
 #   4. 上下文 github.* → atomgit.*；系统变量 GITHUB_* → ATOMGIT_*（用 $ATOMGIT_PATH 注入 bun）
-#   5. AtomGit Action 不支持 services: 服务容器，改用 docker run 启动 postgres/redis
-#   6. Runner 镜像未预装 Bun，改用官方安装脚本；用 cache 插件缓存 bun 全局缓存
-#   7. checkout 未文档化 fetch-depth，故用 git fetch --unshallow 兜底取完整历史
+#   5. AtomGit Action 不支持 services: 服务容器，改用 docker run 启动 postgres/redis；
+#      runner 无 docker 时经 docker info 预检自动跳过，集成测试在无 DB 时自跳过
+#   6. Runner 镜像未预装 Bun，且 bun.sh 在国内不可达，改从 npmmirror 二进制镜像下载；用 cache 插件缓存 bun 全局缓存
+#   7. 私有仓库：checkout 用 PAT 密钥 secrets.GIT_TOKEN 鉴权（内置 ATOMGIT_TOKEN 不行），
+#      ref 取 PR 合并提交或推送 sha
 #   8. commitlint PR 范围：AtomGit 上下文无 base.sha，只有 base.ref，故先 fetch base 再取 head.sha
 #   9. permissions 作用域为 repository（非 contents/packages）
+#   10. bun 走国内镜像：二进制从 npmmirror 下载，依赖经 bunfig.toml [install] registry 指向 npmmirror（仅 runner 工作区，不污染仓库）；bunx 改用 bun x
 
 name: CI
 
@@ -25,14 +27,21 @@ permissions:
   repository: read
 
 stages:
-  verify_stage:
-    name: 检查
+  ci_stage:
+    name: CI
     jobs:
-      verify:
-        runs-on: [ubuntu-latest, x64, small]
+      ci:
+        name: Lint, test and build
+        runs-on: [ubuntu-latest, x64, medium]
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
+          REDIS_URL: redis://localhost:6379
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
+              token: ${{ secrets.GIT_TOKEN }}
 
           - name: Ensure full history
             run: git fetch --prune --unshallow || true
@@ -47,17 +56,27 @@ stages:
 
           - name: Install Bun
             run: |
-              curl -fsSL https://bun.sh/install | bash
+              set -e
+              BUN_ARCH=x64; [ "$(uname -m)" = "aarch64" ] && BUN_ARCH=arm64
+              # bun.sh 在国内不可达，改从 npmmirror 二进制镜像下载 bun
+              curl -fsSL "https://registry.npmmirror.com/-/binary/bun/bun-v1.3.14/bun-linux-${BUN_ARCH}.zip" -o /tmp/bun.zip
+              python3 -c "import zipfile; zipfile.ZipFile('/tmp/bun.zip').extractall('/tmp/bun')"
+              install -D -m755 "/tmp/bun/bun-linux-${BUN_ARCH}/bun" "$HOME/.bun/bin/bun"
               echo "$HOME/.bun/bin" >> "$ATOMGIT_PATH"
+              "$HOME/.bun/bin/bun" --version
 
           - name: Install
-            run: bun install --frozen-lockfile
+            timeout-minutes: 15
+            run: |
+              # bun 不读 .npmrc 的 registry，用 bunfig.toml 的 [install] registry 设国内镜像
+              printf '[install]\nregistry = "https://registry.npmmirror.com"\n\n[run]\nbun = true\n' > bunfig.toml
+              bun install --frozen-lockfile
 
-          - name: Lint & format (biome)
-            run: bunx biome ci .
+          - name: Lint and format (biome)
+            run: bun x biome ci .
 
           - name: Typecheck
-            run: bunx tsc -b
+            run: bun x tsc -b
 
           - name: Dependency direction
             run: bun scripts/check-deps.ts
@@ -69,41 +88,24 @@ stages:
             if: ${{ atomgit.event_name == 'pull_request' }}
             run: |
               git fetch origin ${{ atomgit.event.pull_request.base.ref }}
-              bunx commitlint --from origin/${{ atomgit.event.pull_request.base.ref }} --to ${{ atomgit.event.pull_request.head.sha }}
+              bun x commitlint --from origin/${{ atomgit.event.pull_request.base.ref }} --to ${{ atomgit.event.pull_request.head.sha }}
 
           - name: Commitlint (pushed commit)
             if: ${{ atomgit.event_name == 'push' }}
-            run: bunx commitlint --last
+            run: bun x commitlint --last
 
-  build_stage:
-    name: 构建与测试
-    jobs:
-      test:
-        runs-on: [ubuntu-latest, x64, medium]
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
-          REDIS_URL: redis://localhost:6379
-        steps:
-          - name: Checkout
-            uses: checkout
-
-          - name: Cache Bun store
-            uses: cache
-            with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-              restore-keys: |
-                bun-${{ runner.os }}-
-
-          - name: Install Bun
+          - name: Check docker availability
+            id: docker_check
+            continue-on-error: true
             run: |
-              curl -fsSL https://bun.sh/install | bash
-              echo "$HOME/.bun/bin" >> "$ATOMGIT_PATH"
-
-          - name: Install
-            run: bun install --frozen-lockfile
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
 
           - name: Start Postgres
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               docker run -d --name postgres \
                 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
@@ -117,6 +119,7 @@ stages:
               docker exec postgres pg_isready -U postgres
 
           - name: Start Redis
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               docker run -d --name redis -p 6379:6379 redis:7
               for i in $(seq 1 30); do
@@ -132,11 +135,26 @@ stages:
             run: bun run build
 
       docker:
+        name: Docker images
         runs-on: [ubuntu-latest, x64, small]
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
+              token: ${{ secrets.GIT_TOKEN }}
+          - name: Check docker availability
+            id: docker_check
+            continue-on-error: true
+            run: |
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
           - name: Build api image
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: docker build -f infra/Dockerfile.api -t agrippa-api:ci .
           - name: Build worker image
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: docker build -f infra/Dockerfile.worker -t agrippa-worker:ci .

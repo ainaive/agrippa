@@ -33,6 +33,7 @@ stages:
     name: 发布镜像
     jobs:
       api:
+        name: API image
         runs-on: [ubuntu-latest, x64, medium]
         env:
           REGISTRY: ${{ vars.REGISTRY }}
@@ -41,13 +42,27 @@ stages:
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              # 私有仓库：内置 ATOMGIT_TOKEN 无法鉴权 git 拉取，改用 PAT 密钥 GIT_TOKEN
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
+              token: ${{ secrets.GIT_TOKEN }}
 
           - name: Login to registry
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
 
+          - name: Check docker availability
+            id: docker_check
+            continue-on-error: true
+            run: |
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
           - name: Build and push api image
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')
@@ -56,6 +71,7 @@ stages:
               docker push --all-tags "$IMAGE"
 
       worker:
+        name: Worker image
         runs-on: [ubuntu-latest, x64, medium]
         env:
           REGISTRY: ${{ vars.REGISTRY }}
@@ -64,13 +80,27 @@ stages:
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              # 私有仓库：内置 ATOMGIT_TOKEN 无法鉴权 git 拉取，改用 PAT 密钥 GIT_TOKEN
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
+              token: ${{ secrets.GIT_TOKEN }}
 
           - name: Login to registry
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
 
+          - name: Check docker availability
+            id: docker_check
+            continue-on-error: true
+            run: |
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
           - name: Build and push worker image
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')
