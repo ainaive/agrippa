@@ -56,7 +56,8 @@ services:
       dockerfile: infra/Dockerfile.worker
       args:
         # closer apt mirror for hosts where deb.debian.org is slow/blocked
-        # (e.g. APT_MIRROR=https://mirrors.aliyun.com in .env); no-op when empty
+        # (e.g. APT_MIRROR=mirrors.aliyun.com in .env); no-op when empty. A
+        # scheme is tolerated but only the host is used.
         APT_MIRROR: ${APT_MIRROR:-}
         # the Codex CLI baked into the image, and where to fetch it from
         # (e.g. NPM_REGISTRY=https://registry.npmmirror.com from CN); both fall
