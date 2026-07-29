@@ -30,6 +30,7 @@ sudo /opt/agrippa/infra/vm/install.sh        # 加 --skip-redis 可不装 Redis
 安装脚本幂等（可重复执行），在同一台机器上完成全部准备：
 
 - Bun，以及 worker 的系统依赖（`git`、`ripgrep`、用于智能体沙箱的 `bubblewrap`）
+- 位于 `/opt/codex` 的 OpenAI Codex CLI —— `codex-cli` 执行器会直接调用它，缺少它则**需求交付**工作流无法提交。`infra/vm/deploy.sh` 每次更新都会重新安装，因此版本升级随普通部署一起生效
 - PostgreSQL 17（PGDG）与 Redis 7（可选——没有它实时流会降级为轮询）
 - `agrippa` 系统用户，数据目录位于 `/var/lib/agrippa`
 - `/etc/agrippa/agrippa.env`，密钥自动生成——**务必备份 `AGRIPPA_SECRET_KEY`**

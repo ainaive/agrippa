@@ -16,19 +16,29 @@
 自助注册已**关闭**——实例采用邀请制，因此第一位用户无法自行注册。需要离线创建一次组织管理员，然后登录：
 
 ```sh
-# Docker：env 文件为 infra/env/.env
-# VM：/etc/agrippa/agrippa.env
-AGRIPPA_BOOTSTRAP_EMAIL=you@example.com
-AGRIPPA_BOOTSTRAP_PASSWORD='设置一个强密码'
+# Docker —— 把两个值直接传给容器。compose 的 --env-file 只用于对 compose 文件
+# 本身做变量插值，写在那里进程读不到；而写进 api 服务的 environment: 又会把管理员
+# 密码长期留在容器环境里。
+read -r -s -p 'admin password: ' PW; echo
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec \
+  -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
+  api bun apps/api/src/cli/bootstrap-admin.ts
+unset PW
+
+# VM（在 /opt/agrippa 下，读取 /etc/agrippa/agrippa.env 获取 DATABASE_URL）：
+sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  AGRIPPA_BOOTSTRAP_PASSWORD='设置一个强密码' \
+  bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
 ```
 
-```sh
-# Docker —— 在 api 镜像中运行脚本，连到当前 compose 栈：
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm \
-  api bun apps/api/src/cli/bootstrap-admin.ts
+若 api 容器尚未启动，把 `exec` 换成 `run`——注意 `-e` 选项必须写在服务名**之前**：
 
-# VM（在 /opt/agrippa 下，读取 /etc/agrippa/agrippa.env）：
-sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
+```sh
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
+  -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
+  api bun apps/api/src/cli/bootstrap-admin.ts
 ```
 
 脚本对邮箱幂等（同地址重复运行不会重复创建），用与登录流程一致的哈希算法存储密码，并写一条审计记录。看到 `org_admin created` 后即可在实例地址登录。之后其他成员只能通过邀请加入（管理 → 成员），参见[管理](04-administration.md#账号与接入)。
@@ -59,7 +69,11 @@ sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstr
 | `BETTER_AUTH_SECRET` | api | **必填。**会话签名密钥 |
 | `AGRIPPA_BASE_URL` | api | 实例的公开地址 |
 | `ANTHROPIC_API_KEY` | worker | Claude 执行器凭证——部署级回退；项目自己的服务商凭证（设置 → 模型服务商）会覆盖对应服务商的该密钥 |
-| `AGRIPPA_EXECUTOR` | api | 新执行的默认执行器：`claude-agent-sdk` 或 `fake`（零 Token 演示） |
+| `OPENAI_API_KEY`、`CODEX_API_KEY` | worker | 同上，用于 Codex 执行器的 `openai` 服务商。二者均可留空：没有密钥的 worker 仍会注册 `codex-cli`，且项目凭证始终优先 |
+| `AGRIPPA_EXECUTOR` | api | 未声明执行器的代理位所使用的默认值：`claude-agent-sdk`、`codex-cli` 或 `fake`（零 Token 演示） |
+| `CODEX_VERSION` | 构建期 | 打进 worker 镜像的 Codex CLI 版本（默认 0.145.0，下限 0.122） |
+| `NPM_REGISTRY` | 构建期 | 从何处下载 Codex CLI——中国大陆主机用 `https://registry.npmmirror.com` |
+| `APT_MIRROR` | 构建期 | 构建 worker 镜像时使用的就近 Debian 镜像源 |
 | `WORKER_SLOTS` | worker | 单 worker 并发执行数（默认 2） |
 | `WORKSPACE_ROOT` | worker | 每次执行的检出目录（镜像内默认 `/work/runs`） |
 | `ARTIFACT_STORAGE_ROOT` | worker | 大产出物存储（>64 KB；更小的存于 Postgres） |
@@ -67,7 +81,26 @@ sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstr
 | `AGRIPPA_WEB_DIST` | api | 要托管的 SPA 构建目录（api 镜像内已设置） |
 | `AGRIPPA_MIGRATE_ON_BOOT` | api | 设为 `0` 关闭启动时迁移/植入 |
 | `AGRIPPA_KEEP_WORKSPACES` | worker | 设为 `1` 保留已结束执行的工作区，便于排查 |
+| `AGRIPPA_MAX_ARTIFACT_BYTES` | worker | 单个产出物大小上限（默认 25 MiB）。非正数或无法解析的值会回退到默认值，而不是取消上限 |
+| `AGRIPPA_SCM` | worker | 设为 `fake` 时用伪造的分支/推送/PR 代替真实远端操作——用于演示 |
+| `AGRIPPA_SSE_KEEPALIVE_MS` | api | 执行事件流发送保活注释帧的间隔（默认 15000 毫秒）。仅当中间层回收空闲连接更快时才需要调小 |
 | `PORT` | api | 监听端口（默认 3000） |
+| `AGRIPPA_PORT` | compose | 对外发布的端口映射，可带网卡地址。反向代理之后请用 `127.0.0.1:3000`，否则明文 HTTP 的 API 会监听 `0.0.0.0` |
+
+## 执行器
+
+worker 会在启动时以及每 60 秒的心跳中，把自己真正能跑的执行器写入 `executor_registrations`；没有任何 worker 注册过的执行器，API 会直接拒绝提交。`claude-agent-sdk` 与 `fake` 总会注册。`codex-cli` 只有在 worker 的 `PATH` 上存在足够新、支持 `codex exec --ignore-user-config` / `--ignore-rules` 的 Codex CLI 时才会注册——worker 镜像会把它装在 `/opt/codex`，该检查不通过时镜像构建会直接失败。
+
+这一点很关键，因为**需求交付**把评审代理位绑定在了 `codex-cli` 上。每次部署后都应确认：
+
+```sh
+docker compose logs worker | grep -i codex
+docker compose exec worker codex --version
+docker compose exec -T postgres psql -U agrippa -d agrippa \
+  -c "select executor_id, registered_at from executor_registrations order by 1;"
+```
+
+即使执行器已注册，步骤解析到的服务商仍需要凭证。`openai` 与 `anthropic` 可用 worker 环境变量（如 `OPENAI_API_KEY`）；`dashscope` 以及组织自行注册的自定义服务商**只能用项目凭证**。注意 `dashscope` 根本无法支撑 `codex-cli` 代理位——它在目录中只提供 `anthropic` 线路协议，因为 Codex ≥ 0.122 移除了百炼 OpenAI 兼容模式所用的 chat 线路 API。这类代理位请改指向提供 `openai` 协议的服务商，或改用 `claude-agent-sdk`。
 
 ## 备份——三样东西
 
@@ -79,9 +112,64 @@ sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstr
 
 拉取新镜像后 `docker compose up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
 
+### 从「compose 项目未命名」时期的部署升级
+
+`v0.2.0` 及更早版本的 `infra/docker-compose.yml` 没有 `name:` 键，Compose 会用文件所在目录名作为项目名，即 `infra`；现在项目名固定为 `agrippa`。若你的卷叫 `infra_pgdata` / `infra_artifacts` / `infra_workspaces`（`docker volume ls` 可查），直接执行 `docker compose up -d` 会在旧栈旁边再起一套**空的**新栈，并与其争抢对外端口。请先迁移一次：
+
+```sh
+# 0. 仅当你已经在新代码上执行过 `docker compose up -d`、因而生成了一套空的
+#    agrippa 栈时才需要这一步。执行前先用 `docker volume ls` 确认数据仍在
+#    infra_* 下——这一步会删除那些新建的空卷。
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
+
+# 1. 停掉旧栈——不要加 -v，那会删掉数据
+docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
+
+# 2. 先检查「源」卷。Docker 会自动创建不存在的具名卷，因此一旦名字写错，就会挂上
+#    一个空卷、什么也没复制，最后得到一个能通过 /healthz 的空数据库——看起来迁移
+#    成功了，实际数据还留在别处。
+for v in pgdata artifacts workspaces; do
+  docker volume inspect "infra_$v" >/dev/null 2>&1 || {
+    echo "infra_$v 不存在——请用 'docker volume ls' 核对真实卷名" >&2
+    exit 1
+  }
+done
+docker run --rm -v infra_pgdata:/from postgres:17 test -f /from/PG_VERSION || {
+  echo "infra_pgdata 中没有 PG_VERSION——它不是 Postgres 数据目录" >&2
+  exit 1
+}
+
+# 3. 把每个卷从 infra_X 复制到 agrippa_X。任何带 cp 的镜像都行，postgres:17
+#    本地已有。执行工作区可丢弃，真正重要的是 pgdata 与 artifacts。
+#
+#    下面的检查不可省略：对已存在的卷执行 `docker volume create` 会静默成功，
+#    而 `cp -a` 也不会删除目标里已有的文件。若把旧集群复制到一个「启动过又弃用」
+#    的新栈上，就会把两个 system identifier 不同的 Postgres 集群混在一起——
+#    WAL 与系统目录文件交错，且没有干净的回退办法。
+for v in pgdata artifacts workspaces; do
+  if docker volume inspect "agrippa_$v" >/dev/null 2>&1 &&
+     [ -n "$(docker run --rm -v "agrippa_$v:/to" postgres:17 sh -c 'ls -A /to')" ]; then
+    echo "agrippa_$v 已存在且非空——请先执行第 0 步" >&2
+    exit 1
+  fi
+  docker volume create "agrippa_$v" >/dev/null
+  docker run --rm -v "infra_$v:/from" -v "agrippa_$v:/to" postgres:17 \
+    sh -c 'cd /from && cp -a . /to'
+done
+
+# 4. 以新项目名启动，确认无误后再清理
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+curl -fsS http://127.0.0.1:3000/healthz
+
+# 5. 确认没问题后再执行这一步——不可逆
+docker volume rm infra_pgdata infra_artifacts infra_workspaces
+```
+
+其余一切不变：镜像相同、env 文件相同、数据相同，变的只是资源的命名空间。
+
 升级到首次引入平台自有 Git 快照（ADR-0012）的版本前，请先排空仍在进行的**仓库型**执行。旧工作区没有可信的平台 gitdir，新 worker 恢复时会按设计以 `workspace_lost` 失败关闭；非仓库型执行不受影响。后续升级仍保持正常的步骤粒度续跑行为。
 
-反向代理注意：对 `/api/v1/runs/*/events`（SSE）**关闭响应缓冲**——如 nginx 的 `proxy_buffering off;`——否则实时进度会成批到达。
+反向代理注意：对 `/api/v1/runs/*/events`（SSE）**关闭响应缓冲**——如 nginx 的 `proxy_buffering off;`——否则实时进度会成批到达。该流每 15 秒发送一个注释帧，使空闲的执行不会被中间层当成断连回收；若某个中间层的超时更激进，可用 `AGRIPPA_SSE_KEEPALIVE_MS` 调整。
 
 ## 故障排查
 
@@ -98,6 +186,9 @@ sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstr
 | `git.push` 失败 / `pr.open needs a stored repo credential` | 发布即使面向公开仓库也需要令牌（匿名 HTTPS 只读）——请添加带令牌的仓库连接，令牌需具备内容与合并请求的写权限。 |
 | `pr.open is not supported for provider 'generic-git'` | 分支已推送，但只有 GitHub/GitLab/GitCode 连接能自动创建合并请求——请用正确的托管平台重建连接，或手动开 PR。 |
 | 想看智能体在磁盘上到底做了什么 | 给 worker 设置 `AGRIPPA_KEEP_WORKSPACES=1` 后重跑；工作区保留在 `WORKSPACE_ROOT/<runId>`。 |
+| 提交被拒 `executor_unavailable` | 没有任何在线 worker 注册过该执行器。若是 `codex-cli`，执行 `docker compose logs worker \| grep -i codex`——原因字符串直接来自 CLI 探测。 |
+| 执行停在 `queued`，且事件里提到服务商鉴权被延后 | worker 没有该步骤所解析服务商的可用凭证——把密钥加进 worker 环境变量，或在设置 → 模型服务商中添加项目凭证。 |
 | `healthz` 返回 503 | api 连不上 Postgres——检查 `DATABASE_URL` 与 postgres 服务。 |
+| （Docker）怀疑沙箱未生效 | 属预期：在 Docker 默认配置下 bubblewrap **无法**创建命名空间，沙箱会静默降级。要恢复它需要同时放开 `seccomp=unconfined` 与 `CAP_SYS_ADMIN`，这比接受"容器即边界"更不划算（见 [design/08](../../design/08-deployment.md)）。需要操作系统级沙箱请改用 VM 部署方式。探测命令：`docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true`。 |
 | （虚拟机）worker 卡在「activating」 | 其 `ExecStartPre` 正在等待 api 的 `/healthz`（最长 120 秒）——用 `journalctl -u agrippa-api` 排查 api 为何不健康。 |
 | （虚拟机）Ubuntu 24.04 上智能体命令失败，或怀疑沙箱失效 | AppArmor 的 `apparmor_restrict_unprivileged_userns` 可能拦截 bubblewrap——而没有 bwrap 时沙箱会**静默**降级。用 `sudo -u agrippa bwrap --unshare-all --ro-bind / / /bin/true` 探测；若失败，放行非特权用户命名空间（或为 bwrap 安装 AppArmor 配置文件）后重启 worker。 |

@@ -17,6 +17,8 @@
 #   APP_DIR (/opt/agrippa)  DATA_DIR (/var/lib/agrippa)
 #   ENV_FILE (/etc/agrippa/agrippa.env)
 #   BUN_VERSION (keep in step with the oven/bun tag in infra/Dockerfile.*)
+#   CODEX_VERSION, NPM_REGISTRY (passed through to codex.sh — note NPM_REGISTRY
+#     is a URL, e.g. https://registry.npmmirror.com, unlike APT_MIRROR's host)
 set -euo pipefail
 
 AGRIPPA_REPO_URL="${AGRIPPA_REPO_URL:-https://github.com/ainaive/agrippa}"
@@ -25,6 +27,8 @@ APP_DIR="${APP_DIR:-/opt/agrippa}"
 DATA_DIR="${DATA_DIR:-/var/lib/agrippa}"
 ENV_FILE="${ENV_FILE:-/etc/agrippa/agrippa.env}"
 BUN_VERSION="${BUN_VERSION:-1.3.14}"
+# CODEX_VERSION / NPM_REGISTRY are defaulted in codex.sh (single source of
+# truth) and inherited from this script's environment.
 
 SKIP_REDIS=0
 for arg in "$@"; do
@@ -81,6 +85,14 @@ log "Bun ${BUN_VERSION} → /usr/local/bin/bun"
 if ! /usr/local/bin/bun --version 2>/dev/null | grep -qx "$BUN_VERSION"; then
   curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}"
 fi
+
+# Codex CLI for the codex-cli executor. Provisioned here as well as in
+# deploy.sh so a fresh install fails fast on a bad pin, before creating the
+# system user and database. deploy.sh re-runs it on every update, which is what
+# gets the binary onto VMs installed before this release; the version check
+# there makes the call below a no-op moments later.
+log "Codex CLI"
+"$(dirname "$0")/codex.sh"
 
 log "System user + data directories"
 getent passwd agrippa >/dev/null ||
@@ -146,9 +158,19 @@ log "First deploy (build + start — same path as future updates)"
 PORT="$(grep -E '^PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2 || true)"
 cat <<SUMMARY
 
-Agrippa is up on port ${PORT:-3000} — the FIRST signup becomes the org admin.
+Agrippa is up on port ${PORT:-3000}.
 
 Next steps:
+  - Create the first org admin — self-registration is CLOSED, so nobody can get
+    in until you run this (idempotent on the email; everyone else joins by
+    invitation from Admin → Members). The prompt keeps the password out of
+    shell history and out of ps output:
+      read -r -s -p 'admin password (min 8 chars): ' PW; echo
+      sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \\
+        AGRIPPA_BOOTSTRAP_PASSWORD="\$PW" \\
+        /usr/local/bin/bun --env-file=$ENV_FILE \\
+        $APP_DIR/apps/api/src/cli/bootstrap-admin.ts
+      unset PW
   - Real runs need ANTHROPIC_API_KEY in $ENV_FILE (or set AGRIPPA_EXECUTOR=fake
     for a token-free demo), then: systemctl restart agrippa-api agrippa-worker
   - Set AGRIPPA_BASE_URL once the instance has a public URL.

@@ -854,6 +854,17 @@ export const executionRoutes = new Hono<AppEnv>()
         closed = true;
       });
 
+      // A run parked on a long agent turn or an approval emits no events for
+      // minutes, and this stream writes nothing in between — so an idle
+      // connection looks dead to every intermediary. nginx severs it at
+      // proxy_read_timeout (60s by default) and Cloudflare at ~100s. A comment
+      // frame is ignored by EventSource but resets those timers, which keeps
+      // the reconnect churn (and the replay it triggers) out of normal
+      // operation. The default sits well under the tightest common limit;
+      // AGRIPPA_SSE_KEEPALIVE_MS exists for proxies more aggressive than that.
+      const keepaliveMs = Number(process.env.AGRIPPA_SSE_KEEPALIVE_MS) || 15_000;
+      let lastWriteAt = Date.now();
+
       const sendRow = async (row: {
         seq: number;
         type: string;
@@ -866,6 +877,15 @@ export const executionRoutes = new Hono<AppEnv>()
           data: JSON.stringify({ seq: row.seq, type: row.type, payload: row.payload }),
         });
         cursor = Math.max(cursor, row.seq);
+        lastWriteAt = Date.now();
+      };
+
+      // Comment frame — carries no id, so it can't disturb the Last-Event-ID
+      // cursor the client reconnects with.
+      const keepaliveIfIdle = async () => {
+        if (closed || Date.now() - lastWriteAt < keepaliveMs) return;
+        await stream.write(": keepalive\n\n");
+        lastWriteAt = Date.now();
       };
 
       const replay = async () => {
@@ -911,6 +931,7 @@ export const executionRoutes = new Hono<AppEnv>()
             });
             notify = null;
             await replay();
+            await keepaliveIfIdle();
           }
         } finally {
           subscription.unsubscribe();
@@ -922,6 +943,7 @@ export const executionRoutes = new Hono<AppEnv>()
           await new Promise((resolve) => setTimeout(resolve, 1000));
           await replay();
           if (await isTerminal()) break;
+          await keepaliveIfIdle();
         }
       }
     });
