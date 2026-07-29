@@ -32,7 +32,14 @@ sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
 ```
 
-若 api 容器尚未启动，把 `exec` 换成 `run --rm --no-deps api …`。
+若 api 容器尚未启动，把 `exec` 换成 `run`——注意 `-e` 选项必须写在服务名**之前**：
+
+```sh
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
+  -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
+  api bun apps/api/src/cli/bootstrap-admin.ts
+```
 
 脚本对邮箱幂等（同地址重复运行不会重复创建），用与登录流程一致的哈希算法存储密码，并写一条审计记录。看到 `org_admin created` 后即可在实例地址登录。之后其他成员只能通过邀请加入（管理 → 成员），参见[管理](04-administration.md#账号与接入)。
 

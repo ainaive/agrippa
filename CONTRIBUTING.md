@@ -26,11 +26,15 @@ Bun loads `.env` / `.env.local` natively from the directory you start it in — 
 Self-registration is closed, so create the first org admin out of band — it signs in at the normal login page, and everyone else joins by invitation from Admin → Members:
 
 ```sh
-AGRIPPA_BOOTSTRAP_EMAIL=you@example.com AGRIPPA_BOOTSTRAP_PASSWORD=at-least-8-chars \
+# prompt for the password rather than putting it in shell history / ps output.
+# Run from the repo root, where Bun picks up .env.local for DATABASE_URL.
+read -r -s -p 'admin password (min 8 chars): ' AGRIPPA_BOOTSTRAP_PASSWORD; echo
+AGRIPPA_BOOTSTRAP_EMAIL=you@example.com AGRIPPA_BOOTSTRAP_PASSWORD="$AGRIPPA_BOOTSTRAP_PASSWORD" \
   bun apps/api/src/cli/bootstrap-admin.ts
+unset AGRIPPA_BOOTSTRAP_PASSWORD
 ```
 
-Real agent runs need `AGRIPPA_EXECUTOR=claude-agent-sdk` plus `ANTHROPIC_API_KEY` (worker env); the Codex reviewer slot additionally needs the Codex CLI on `PATH` and `OPENAI_API_KEY`.
+Real agent runs need `AGRIPPA_EXECUTOR=claude-agent-sdk` plus `ANTHROPIC_API_KEY` (worker env). The Codex reviewer slot needs the Codex CLI on `PATH`; `OPENAI_API_KEY` is optional there — a keyless worker still registers `codex-cli` and defers runs whose provider needs env auth, and a per-project provider credential covers it either way.
 
 ## Quality gates
 

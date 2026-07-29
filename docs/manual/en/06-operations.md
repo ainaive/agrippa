@@ -33,7 +33,14 @@ sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
 ```
 
-Use `run --rm --no-deps api …` instead of `exec` if the api container isn't up yet.
+If the api container isn't up yet, use `run` instead of `exec` — note the `-e` flags go **before** the service name:
+
+```sh
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
+  -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
+  api bun apps/api/src/cli/bootstrap-admin.ts
+```
 
 The script is idempotent on email (re-running with the same address is a no-op), hashes the password with the same routine the login flow uses, and writes an audit row. After it prints `org_admin created`, sign in at the instance URL. Subsequent members join only via invitation (Admin → Members) — see [Administration](04-administration.md#accounts--onboarding).
 

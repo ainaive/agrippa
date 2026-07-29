@@ -372,6 +372,9 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect(submit.status).toBe(202);
     const { runId: idleRunId } = await jsonOf<{ runId: string }>(submit);
 
+    // restore rather than delete: an unconditional delete would clobber a value
+    // the environment supplied and leak into later tests
+    const previousKeepaliveMs = process.env.AGRIPPA_SSE_KEEPALIVE_MS;
     process.env.AGRIPPA_SSE_KEEPALIVE_MS = "1";
     try {
       const res = await viewer.request(`/api/v1/runs/${idleRunId}/events`);
@@ -406,7 +409,11 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
         expect(frame).not.toContain("data:");
       }
     } finally {
-      delete process.env.AGRIPPA_SSE_KEEPALIVE_MS;
+      if (previousKeepaliveMs === undefined) {
+        delete process.env.AGRIPPA_SSE_KEEPALIVE_MS;
+      } else {
+        process.env.AGRIPPA_SSE_KEEPALIVE_MS = previousKeepaliveMs;
+      }
     }
   });
 

@@ -163,11 +163,14 @@ Agrippa is up on port ${PORT:-3000}.
 Next steps:
   - Create the first org admin — self-registration is CLOSED, so nobody can get
     in until you run this (idempotent on the email; everyone else joins by
-    invitation from Admin → Members):
+    invitation from Admin → Members). The prompt keeps the password out of
+    shell history and out of ps output:
+      read -r -s -p 'admin password (min 8 chars): ' PW; echo
       sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \\
-        AGRIPPA_BOOTSTRAP_PASSWORD=at-least-8-chars \\
+        AGRIPPA_BOOTSTRAP_PASSWORD="\$PW" \\
         /usr/local/bin/bun --env-file=$ENV_FILE \\
         $APP_DIR/apps/api/src/cli/bootstrap-admin.ts
+      unset PW
   - Real runs need ANTHROPIC_API_KEY in $ENV_FILE (or set AGRIPPA_EXECUTOR=fake
     for a token-free demo), then: systemctl restart agrippa-api agrippa-worker
   - Set AGRIPPA_BASE_URL once the instance has a public URL.
