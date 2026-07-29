@@ -1,0 +1,24 @@
+# Both images COPY apps/ and packages/ wholesale, so anything a developer's
+# working tree carries there ends up in the build context — including
+# host-native node_modules, which `bun install --frozen-lockfile` would then
+# build on top of inside a Linux image. CI never noticed because it builds from
+# a fresh checkout.
+node_modules
+**/node_modules
+
+# Built output — the API image builds the SPA itself (`bun run build`)
+**/dist
+*.tsbuildinfo
+
+.git
+.github
+
+# Secrets must never reach a layer. .env.example is the documented template and
+# is safe to keep.
+.env
+.env.*
+!.env.example
+
+coverage
+*.log
+.DS_Store

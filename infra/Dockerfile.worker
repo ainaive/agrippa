@@ -1,4 +1,43 @@
 # Agrippa worker — pg-boss consumers + the orchestration engine.
+
+# ── Codex CLI ─────────────────────────────────────────────────────────────────
+# The `codex-cli` executor shells out to a real `codex` binary (ADR-0011), so the
+# worker image has to carry one — without it probeCodexCli() fails, the executor
+# never registers, and templates that pin `executor: codex-cli` (swdev/
+# requirement-delivery) become un-submittable.
+#
+# We deliberately do NOT `bun install -g @openai/codex`: that package's bin is a
+# Node ESM shim (`#!/usr/bin/env node`) that resolves a platform package at
+# runtime, and this image has no Node. Fetch the platform package directly and
+# put its statically-linked musl binary on PATH instead — it runs fine on glibc.
+#
+# Same base image as the final stage on purpose: one registry pull, which matters
+# on hosts with slow access to Docker Hub.
+FROM oven/bun:1.3 AS codex
+# Pinned to the release the adapter's JSONL event shapes are written against
+# (packages/executor-codex/README.md). The floor is 0.122, the first release
+# with the `codex exec --ignore-user-config` / `--ignore-rules` flags that
+# probeCodexCli() requires; bump both together.
+ARG CODEX_VERSION=0.145.0
+# Closer npm registry for hosts where registry.npmjs.org is slow/blocked, the
+# npm-side twin of APT_MIRROR below (e.g. https://registry.npmmirror.com).
+ARG NPM_REGISTRY=https://registry.npmjs.org
+# bun does the download, so the stage needs no curl; npm tarballs nest their
+# payload under package/, hence --strip-components=1; and the final chmod keeps
+# the tree readable for the non-root `bun` user that runs the worker.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) plat=linux-x64 ;; \
+      arm64) plat=linux-arm64 ;; \
+      *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    url="${NPM_REGISTRY}/@openai/codex/-/codex-${CODEX_VERSION}-${plat}.tgz"; \
+    bun -e 'const r = await fetch(Bun.argv[1]); if (!r.ok) throw new Error(`${r.status} ${Bun.argv[1]}`); await Bun.write("/tmp/codex.tgz", r);' "$url"; \
+    mkdir -p /opt/codex; \
+    tar -xzf /tmp/codex.tgz -C /opt/codex --strip-components=1; \
+    rm /tmp/codex.tgz; \
+    chmod -R a+rX /opt/codex
+
 FROM oven/bun:1.3
 WORKDIR /app
 
@@ -15,6 +54,23 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ripgrep ca-certificates bubblewrap \
   && rm -rf /var/lib/apt/lists/*
+
+# The vendor tree is self-contained but position-sensitive: the binary sits next
+# to codex-code-mode-host/codex-path/codex-resources and finds them relative to
+# its own realpath, so link to it rather than copying the binary out.
+COPY --from=codex /opt/codex /opt/codex
+RUN set -eux; \
+    bin="$(find /opt/codex/vendor -type f -name codex | head -n1)"; \
+    [ -n "$bin" ] || { echo "no codex binary in the vendor tree" >&2; exit 1; }; \
+    ln -s "$bin" /usr/local/bin/codex
+
+# Fail the BUILD on a missing or too-old CLI. These are exactly the checks
+# probeCodexCli() (packages/executor-codex/src/cli.ts) runs at worker boot, where
+# failing them means the executor silently does not register — a broken image is
+# much easier to notice here than a run rejected days later.
+RUN codex --version \
+  && codex exec --help | grep -q -- --ignore-user-config \
+  && codex exec --help | grep -q -- --ignore-rules
 
 COPY package.json bun.lock bunfig.toml tsconfig.base.json tsconfig.json ./
 COPY apps ./apps
