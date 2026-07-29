@@ -115,6 +115,8 @@ Compose deployments use **`sudo infra/deploy.sh [<commit>]`**: it fetches from G
 
 It always rebuilds, deliberately: the SPA and the API are baked into the api image, so a bare `git pull && docker compose up -d` restarts the **old** code and looks like it worked. Build cache keeps a docs-only deploy cheap. A `flock` serializes concurrent deploys, and only the current and previous image tags are kept (each pair is ~4 GB).
 
+Two things it will not do. It **only deploys commits reachable from the `deploy` branch** — an arbitrary SHA is refused, which is what keeps the root-level sudo rule meaningful. And **rollback does not revert the database**: the API applies migrations on boot before it is healthy, and some are irreversible. The script therefore takes a `pg_dump` before every deploy (kept in `/var/lib/agrippa-deploy`, last 5 retained) and, if it rolls back, prints the exact `pg_restore` command instead of implying the schema was restored too. A deploy is only reported successful once **both** the api reports healthy *and* the worker has registered its executors — a worker-only regression fails the deploy rather than passing silently.
+
 Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 
 ### Upgrading from a deployment created before the compose project was named

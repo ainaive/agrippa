@@ -58,6 +58,13 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
   `git pull && docker compose up -d` restarts the *old* code and reports success. A `flock` keeps
   concurrent deploys from racing on the image tags. Automated by Janus on push to the `deploy`
   branch (`.janus/deploy.yml`); the same script is the supported manual path.
+  It refuses any commit **not reachable from `deploy`** — the sudoers rule that lets Janus call it
+  as root would otherwise make every branch deployable, and root-owning the tree would buy nothing.
+  Verification covers **both** services: the api's compose healthcheck, and a fresh
+  `executor_registrations` heartbeat proving the worker registered its executors. Rollback restores
+  the previous commit's *code and config*, not the database — the api migrates on boot before it is
+  healthy and some migrations are irreversible, so Postgres is dumped beforehand and the restore
+  command is printed if a rollback happens.
 - **Upgrade (images)**: pull images → `docker compose up -d` → api migrates on boot. Workers drain gracefully (in-flight runs resume on new workers via step-granular resume — see [04](04-execution-runtime.md)); the compose `stop_grace_period` must exceed the drain, so it is set to 60s rather than the 10s default.
 - **TLS / ingress**: out of scope; operators front the stack with their own reverse proxy. SSE requires the proxy to disable response buffering for `/api/v1/runs/*/events`, or live progress arrives in bursts. The stream emits a comment frame every 15s (`AGRIPPA_SSE_KEEPALIVE_MS`) so an idle run — a long agent turn, or one parked on an approval — never looks like a dead connection; a generous `proxy_read_timeout` remains worth setting as defence in depth for intermediaries whose idle limits you do not control.
 - **Health**: `GET /healthz` (api: DB ping). A per-worker heartbeat row for the admin UI is deferred past M1. Executor availability is observable via `executor_registrations` (workers upsert at boot and on the 60s sweeper tick).
