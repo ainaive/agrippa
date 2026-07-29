@@ -43,9 +43,9 @@ stages:
           - name: Checkout
             uses: checkout
             with:
-              # 私有仓库：内置 ATOMGIT_TOKEN 无法鉴权 git 拉取，改用 PAT 密钥 GIT_TOKEN
+              # 私有仓库：用内置令牌 ATOMGIT_TOKEN 鉴权 git 拉取
               ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
-              token: ${{ secrets.GIT_TOKEN }}
+              token: ${{ secrets.ATOMGIT_TOKEN }}
 
           - name: Login to registry
             run: |
@@ -71,9 +71,9 @@ stages:
           - name: Checkout
             uses: checkout
             with:
-              # 私有仓库：内置 ATOMGIT_TOKEN 无法鉴权 git 拉取，改用 PAT 密钥 GIT_TOKEN
+              # 私有仓库：用内置令牌 ATOMGIT_TOKEN 鉴权 git 拉取
               ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
-              token: ${{ secrets.GIT_TOKEN }}
+              token: ${{ secrets.ATOMGIT_TOKEN }}
 
           - name: Login to registry
             run: |
