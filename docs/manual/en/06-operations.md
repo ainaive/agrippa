@@ -111,14 +111,30 @@ Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/depl
 Releases up to and including `v0.2.0` shipped `infra/docker-compose.yml` with no `name:` key, so Compose derived the project name from the file's directory: `infra`. The stack is now explicitly `agrippa`. If your volumes are named `infra_pgdata` / `infra_artifacts` / `infra_workspaces` (`docker volume ls`), a plain `docker compose up -d` would build a **second, empty** stack beside the old one — and collide on the published port. Migrate once:
 
 ```sh
+# 0. ONLY if you already ran `docker compose up -d` on the new code, which
+#    created an empty agrippa stack. Confirm `docker volume ls` still shows your
+#    data under infra_* first — this deletes the new, empty volumes.
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
+
 # 1. stop the old stack — WITHOUT -v, which would delete the data
 docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
 
 # 2. copy each volume infra_X -> agrippa_X. Any image with cp works; postgres:17
 #    is already pulled. Run workspaces are disposable — pgdata and artifacts are
 #    the ones that matter.
+#
+#    The guard is not optional: `docker volume create` succeeds silently on an
+#    existing volume and `cp -a` does not remove files already there, so copying
+#    onto a started-then-abandoned stack would merge two Postgres clusters with
+#    different system identifiers — mixed WAL and catalog files, and no clean
+#    way back.
 for v in pgdata artifacts workspaces; do
-  docker volume create "agrippa_$v"
+  if docker volume inspect "agrippa_$v" >/dev/null 2>&1 &&
+     [ -n "$(docker run --rm -v "agrippa_$v:/to" postgres:17 sh -c 'ls -A /to')" ]; then
+    echo "agrippa_$v exists and is not empty — do step 0 first" >&2
+    exit 1
+  fi
+  docker volume create "agrippa_$v" >/dev/null
   docker run --rm -v "infra_$v:/from" -v "agrippa_$v:/to" postgres:17 \
     sh -c 'cd /from && cp -a . /to'
 done

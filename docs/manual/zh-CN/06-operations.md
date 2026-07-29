@@ -110,13 +110,28 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 `v0.2.0` 及更早版本的 `infra/docker-compose.yml` 没有 `name:` 键，Compose 会用文件所在目录名作为项目名，即 `infra`；现在项目名固定为 `agrippa`。若你的卷叫 `infra_pgdata` / `infra_artifacts` / `infra_workspaces`（`docker volume ls` 可查），直接执行 `docker compose up -d` 会在旧栈旁边再起一套**空的**新栈，并与其争抢对外端口。请先迁移一次：
 
 ```sh
+# 0. 仅当你已经在新代码上执行过 `docker compose up -d`、因而生成了一套空的
+#    agrippa 栈时才需要这一步。执行前先用 `docker volume ls` 确认数据仍在
+#    infra_* 下——这一步会删除那些新建的空卷。
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
+
 # 1. 停掉旧栈——不要加 -v，那会删掉数据
 docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
 
 # 2. 把每个卷从 infra_X 复制到 agrippa_X。任何带 cp 的镜像都行，postgres:17
 #    本地已有。执行工作区可丢弃，真正重要的是 pgdata 与 artifacts。
+#
+#    下面的检查不可省略：对已存在的卷执行 `docker volume create` 会静默成功，
+#    而 `cp -a` 也不会删除目标里已有的文件。若把旧集群复制到一个「启动过又弃用」
+#    的新栈上，就会把两个 system identifier 不同的 Postgres 集群混在一起——
+#    WAL 与系统目录文件交错，且没有干净的回退办法。
 for v in pgdata artifacts workspaces; do
-  docker volume create "agrippa_$v"
+  if docker volume inspect "agrippa_$v" >/dev/null 2>&1 &&
+     [ -n "$(docker run --rm -v "agrippa_$v:/to" postgres:17 sh -c 'ls -A /to')" ]; then
+    echo "agrippa_$v 已存在且非空——请先执行第 0 步" >&2
+    exit 1
+  fi
+  docker volume create "agrippa_$v" >/dev/null
   docker run --rm -v "infra_$v:/from" -v "agrippa_$v:/to" postgres:17 \
     sh -c 'cd /from && cp -a . /to'
 done

@@ -5,6 +5,11 @@
 # Ordering matters: the API restarts first and must pass /healthz (it migrates
 # and seeds the database on boot) before the worker restarts — schema changes
 # always land before code that expects them.
+#
+# Bun is deliberately NOT converged here: a BUN_VERSION change means re-running
+# install.sh. Replacing the runtime under a live service is a bigger step than
+# an update should take silently. The Codex CLI is converged, because it is a
+# self-contained binary the worker refuses to register without.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/agrippa}"
@@ -31,6 +36,13 @@ echo "==> bun install (frozen lockfile)"
 
 echo "==> build SPA (apps/web/dist)"
 "$BUN" run build
+
+# Before anything is restarted, so a provisioning failure aborts the update
+# with the old stack still running. This is also the step that gets the binary
+# onto VMs installed before Codex provisioning existed, and that lands a
+# CODEX_VERSION bump — install.sh is not re-run on updates.
+echo "==> Codex CLI"
+infra/vm/codex.sh
 
 echo "==> refresh systemd units"
 install -m 0644 infra/vm/agrippa-api.service infra/vm/agrippa-worker.service /etc/systemd/system/
