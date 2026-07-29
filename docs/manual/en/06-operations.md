@@ -119,7 +119,22 @@ docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
 # 1. stop the old stack — WITHOUT -v, which would delete the data
 docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
 
-# 2. copy each volume infra_X -> agrippa_X. Any image with cp works; postgres:17
+# 2. preflight the SOURCES before creating anything. Docker creates a missing
+#    named volume on the fly, so a typo here would mount an empty one, copy
+#    nothing, and leave you with a fresh empty database that passes /healthz —
+#    a migration that looks like it worked while your data sits elsewhere.
+for v in pgdata artifacts workspaces; do
+  docker volume inspect "infra_$v" >/dev/null 2>&1 || {
+    echo "infra_$v does not exist — check 'docker volume ls' for the real names" >&2
+    exit 1
+  }
+done
+docker run --rm -v infra_pgdata:/from postgres:17 test -f /from/PG_VERSION || {
+  echo "infra_pgdata has no PG_VERSION — that is not a Postgres data directory" >&2
+  exit 1
+}
+
+# 3. copy each volume infra_X -> agrippa_X. Any image with cp works; postgres:17
 #    is already pulled. Run workspaces are disposable — pgdata and artifacts are
 #    the ones that matter.
 #
@@ -139,11 +154,11 @@ for v in pgdata artifacts workspaces; do
     sh -c 'cd /from && cp -a . /to'
 done
 
-# 3. start under the new project name and verify before cleaning up
+# 4. start under the new project name and verify before cleaning up
 docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
 curl -fsS http://127.0.0.1:3000/healthz
 
-# 4. only once you're satisfied — this is the irreversible step
+# 5. only once you're satisfied — this is the irreversible step
 docker volume rm infra_pgdata infra_artifacts infra_workspaces
 ```
 

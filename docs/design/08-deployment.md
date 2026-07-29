@@ -21,7 +21,7 @@ infra/docker-compose.yml
 - `api` and `worker` are separate images (`infra/Dockerfile.api`, `infra/Dockerfile.worker`) built from the monorepo with Bun; the SPA is built at image build time and served statically by `api` (no separate web container, no CORS).
 - `worker` scales horizontally (`docker compose up --scale worker=3`); run concurrency = workers × slots.
 - Migrations run **in-process at the top of `apps/api/src/index.ts`**, before the listener opens, guarded by a Postgres advisory lock taken on a reserved connection; seeding of builtin resources and publication of builtin templates follow in the same block, both idempotent (checksum-guarded upserts). `AGRIPPA_MIGRATE_ON_BOOT=0` opts out. There is no entrypoint script — so with the default setting a healthy `/healthz` means all three finished; where the opt-out is set, it means only that the API is serving and can reach Postgres, and the schema is whatever was applied out of band.
-- The `worker` image additionally provisions the **Codex CLI** at `/opt/codex` (pinned by the `CODEX_VERSION` build arg, fetched from `NPM_REGISTRY`). The `codex-cli` executor spawns a literal `codex` binary, so without it `probeCodexCli()` fails, the executor never registers, and templates binding a slot to it — `swdev/requirement-delivery` — become un-submittable. The image build runs the same two flag checks the boot probe does, so a bad pin fails the build rather than degrading silently at runtime.
+- **Both topologies provision the Codex CLI** at `/opt/codex` (pinned by `CODEX_VERSION`, fetched from `NPM_REGISTRY`): the `worker` image at build time, and the VM via `infra/vm/codex.sh`, called from both `install.sh` and `deploy.sh` so updates converge it too. The `codex-cli` executor spawns a literal `codex` binary, so without it `probeCodexCli()` fails, the executor never registers, and templates binding a slot to it — `swdev/requirement-delivery` — become un-submittable. The image build runs the same two flag checks the boot probe does, so a bad pin fails the build rather than degrading silently at runtime.
 - `infra/docker-compose.dev.yml` starts **dependencies only** (postgres + redis) for local development; `api`/`worker`/`web` run via `bun dev` on the host.
 
 ## Configuration (env)
@@ -42,7 +42,7 @@ infra/docker-compose.yml
 | `ARTIFACT_STORAGE_ROOT` | large-artifact volume |
 | `AGRIPPA_PORT` | published port mapping; accepts an interface (`127.0.0.1:3000`) so the plain-HTTP API isn't exposed beside the TLS terminator |
 | `APT_MIRROR` | optional **build-time** mirror for the worker image's apt packages (e.g. `https://mirrors.aliyun.com` from a host where `deb.debian.org` is slow/blocked); no-op when empty |
-| `CODEX_VERSION` / `NPM_REGISTRY` | **build-time**: which Codex CLI the worker image installs, and where from (`https://registry.npmmirror.com` is the CN counterpart to `APT_MIRROR`) |
+| `CODEX_VERSION` / `NPM_REGISTRY` | which Codex CLI is installed and where from. **Build-time** for the image, **install/deploy-time** for the VM (`infra/vm/codex.sh`). Note `NPM_REGISTRY` is a URL (`https://registry.npmmirror.com`) while `APT_MIRROR` above is a bare host — both forms are accepted for each |
 
 Secrets policy: the master key and the deployment's **fallback** provider API keys live only in `api`/`worker` env (compose `env_file`), never in the DB; user-registered credentials (git tokens, MCP auth, and per-project provider API keys — ADR-0013) live encrypted in the `secrets` table keyed by `AGRIPPA_SECRET_KEY`. A project provider credential **overrides** the worker env for that provider; env auth remains the deployment-wide default for projects without one.
 
@@ -60,7 +60,7 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
 
 ## VM deployment (systemd, no Docker)
 
-`infra/vm/` codifies the same topology on a single Ubuntu 22.04/24.04 host: `install.sh` (idempotent bootstrap: Bun, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets, units), `deploy.sh` (update: `git pull --ff-only` → `bun install --frozen-lockfile` → SPA build → restart), `agrippa-api.service` / `agrippa-worker.service`, `env.example`, `nginx.conf.example`.
+`infra/vm/` codifies the same topology on a single Ubuntu 22.04/24.04 host: `install.sh` (idempotent bootstrap: Bun, Codex CLI, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets, units), `deploy.sh` (update: `git pull --ff-only` → `bun install --frozen-lockfile` → SPA build → Codex CLI → restart), `codex.sh` (versioned install behind an atomically-swapped symlink, shared by both), `agrippa-api.service` / `agrippa-worker.service`, `env.example`, `nginx.conf.example`.
 
 | Piece | Location | Compose equivalent |
 |---|---|---|

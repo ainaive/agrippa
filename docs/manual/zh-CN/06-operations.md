@@ -118,7 +118,21 @@ docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
 # 1. 停掉旧栈——不要加 -v，那会删掉数据
 docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
 
-# 2. 把每个卷从 infra_X 复制到 agrippa_X。任何带 cp 的镜像都行，postgres:17
+# 2. 先检查「源」卷。Docker 会自动创建不存在的具名卷，因此一旦名字写错，就会挂上
+#    一个空卷、什么也没复制，最后得到一个能通过 /healthz 的空数据库——看起来迁移
+#    成功了，实际数据还留在别处。
+for v in pgdata artifacts workspaces; do
+  docker volume inspect "infra_$v" >/dev/null 2>&1 || {
+    echo "infra_$v 不存在——请用 'docker volume ls' 核对真实卷名" >&2
+    exit 1
+  }
+done
+docker run --rm -v infra_pgdata:/from postgres:17 test -f /from/PG_VERSION || {
+  echo "infra_pgdata 中没有 PG_VERSION——它不是 Postgres 数据目录" >&2
+  exit 1
+}
+
+# 3. 把每个卷从 infra_X 复制到 agrippa_X。任何带 cp 的镜像都行，postgres:17
 #    本地已有。执行工作区可丢弃，真正重要的是 pgdata 与 artifacts。
 #
 #    下面的检查不可省略：对已存在的卷执行 `docker volume create` 会静默成功，
@@ -136,11 +150,11 @@ for v in pgdata artifacts workspaces; do
     sh -c 'cd /from && cp -a . /to'
 done
 
-# 3. 以新项目名启动，确认无误后再清理
+# 4. 以新项目名启动，确认无误后再清理
 docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
 curl -fsS http://127.0.0.1:3000/healthz
 
-# 4. 确认没问题后再执行这一步——不可逆
+# 5. 确认没问题后再执行这一步——不可逆
 docker volume rm infra_pgdata infra_artifacts infra_workspaces
 ```
 

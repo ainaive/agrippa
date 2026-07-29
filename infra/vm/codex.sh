@@ -30,7 +30,18 @@ case "$NPM_REGISTRY" in
 esac
 NPM_REGISTRY="${NPM_REGISTRY%/}"
 
-CODEX_DIR="$PREFIX/codex"
+# Versioned directories behind a symlink:
+#
+#   $PREFIX/codex-<version>/                real tree, one per version
+#   $PREFIX/codex          -> codex-<ver>   swapped with rename(2), atomically
+#   /usr/local/bin/codex   -> $PREFIX/codex/vendor/<triple>/bin/codex
+#
+# The old tree is never moved or removed until the new one is fully in place and
+# probed, so a failure anywhere leaves the running worker's `codex` working. And
+# because /usr/local/bin/codex resolves *through* $PREFIX/codex, an upgrade does
+# not rewrite it at all — there is no window where it dangles.
+CODEX_LINK="$PREFIX/codex"
+CODEX_DIR="$PREFIX/codex-${CODEX_VERSION}"
 
 [ "$(id -u)" -eq 0 ] || {
   echo "run as root: sudo $0" >&2
@@ -87,10 +98,42 @@ staged_bin="$(find "$staging/payload/vendor" -type f -name codex | head -n1)"
 "$staged_bin" exec --help | grep -q -- --ignore-user-config
 "$staged_bin" exec --help | grep -q -- --ignore-rules
 
-rm -rf "${CODEX_DIR}.previous"
-[ -e "$CODEX_DIR" ] && mv "$CODEX_DIR" "${CODEX_DIR}.previous"
+# Put the new tree in place under its own version, leaving any current one
+# untouched. Only after this succeeds does anything live change.
+rm -rf "$CODEX_DIR"
 mv "$staging/payload" "$CODEX_DIR"
-ln -sf "$(find "$CODEX_DIR/vendor" -type f -name codex | head -n1)" /usr/local/bin/codex
-rm -rf "${CODEX_DIR}.previous"
+
+# One-time conversion from the earlier layout, where $PREFIX/codex was a real
+# directory: mv -T refuses to replace a populated directory with a symlink.
+if [ -d "$CODEX_LINK" ] && [ ! -L "$CODEX_LINK" ]; then
+  rm -rf "${CODEX_LINK}.legacy"
+  mv "$CODEX_LINK" "${CODEX_LINK}.legacy"
+fi
+
+# Atomic swap: build the link beside its target, then rename over the old one.
+# A worker resolving the path concurrently sees either the old tree or the new
+# one, never a missing path.
+ln -sfn "codex-${CODEX_VERSION}" "${CODEX_LINK}.new"
+mv -T "${CODEX_LINK}.new" "$CODEX_LINK"
+rm -rf "${CODEX_LINK}.legacy"
+
+# Version-independent, so upgrades never touch it. Written only when missing or
+# pointing elsewhere, and even then via rename so it is never briefly absent.
+codex_target="$(find -H "$CODEX_LINK/vendor" -type f -name codex | head -n1)"
+[ -n "$codex_target" ] || {
+  echo "no codex binary under $CODEX_LINK/vendor" >&2
+  exit 1
+}
+if [ "$(readlink /usr/local/bin/codex || true)" != "$codex_target" ]; then
+  ln -sfn "$codex_target" /usr/local/bin/codex.new
+  mv -T /usr/local/bin/codex.new /usr/local/bin/codex
+fi
+
+# Prune superseded versions. Safe here: the swap already succeeded, and the
+# rollback guarantee comes from the ordering above, not from retaining ~310 MB
+# trees indefinitely.
+for old in "$PREFIX"/codex-*; do
+  [ "$old" = "$CODEX_DIR" ] || [ ! -d "$old" ] || rm -rf "$old"
+done
 
 echo "==> $(codex --version)"
