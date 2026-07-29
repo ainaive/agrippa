@@ -235,12 +235,15 @@ stack_ok() {
 git reset --hard -q "$sha"
 git --no-pager log -1 --format='    %h %s' | cat
 
-export AGRIPPA_VERSION="$short_sha"
+# Tag with the FULL sha, not the 7-char prefix: a prefix collision would
+# overwrite an existing tag, and if that tag were the rollback target the
+# rollback would silently restore the wrong image. Log messages stay short.
+export AGRIPPA_VERSION="$sha"
 log "build ($AGRIPPA_VERSION)"
 # Prove the tag reached compose before spending minutes building — the .env
 # file also defines AGRIPPA_VERSION, and shell precedence is the only reason
 # ours wins.
-compose config 2>/dev/null | grep -q "agrippa-api:${short_sha}" ||
+compose config 2>/dev/null | grep -q "agrippa-api:${sha}" ||
   rollback "AGRIPPA_VERSION did not reach compose; images would be mistagged"
 compose build || rollback "image build failed"
 
@@ -263,7 +266,7 @@ log "prune"
 for repo in agrippa-api agrippa-worker; do
   docker images --format '{{.Repository}}:{{.Tag}}' |
     grep "/${repo}:" |
-    grep -vE ":(${short_sha}|${previous}|latest)$" |
+    grep -vE ":(${sha}|${previous})$" |
     xargs -r docker rmi >/dev/null 2>&1 || true
 done
 
