@@ -34,6 +34,9 @@ stages:
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
+              token: ${{ atomgit.token }}
 
           - name: Ensure full history
             run: git fetch --prune --unshallow || true
@@ -88,6 +91,9 @@ stages:
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
+              token: ${{ atomgit.token }}
 
           - name: Cache Bun store
             uses: cache
@@ -139,6 +145,9 @@ stages:
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
+              token: ${{ atomgit.token }}
           - name: Build api image
             run: docker build -f infra/Dockerfile.api -t agrippa-api:ci .
           - name: Build worker image

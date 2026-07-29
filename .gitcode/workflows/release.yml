@@ -42,6 +42,9 @@ stages:
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
+              token: ${{ atomgit.token }}
 
           - name: Login to registry
             run: |
@@ -66,6 +69,9 @@ stages:
         steps:
           - name: Checkout
             uses: checkout
+            with:
+              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
+              token: ${{ atomgit.token }}
 
           - name: Login to registry
             run: |
