@@ -55,9 +55,14 @@ stages:
           - name: Check docker availability
             id: docker_check
             continue-on-error: true
-            run: docker info
+            run: |
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
           - name: Build and push api image
-            if: ${{ steps.docker_check.outcome == 'success' }}
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')
@@ -88,9 +93,14 @@ stages:
           - name: Check docker availability
             id: docker_check
             continue-on-error: true
-            run: docker info
+            run: |
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
           - name: Build and push worker image
-            if: ${{ steps.docker_check.outcome == 'success' }}
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               REGISTRY="${REGISTRY:-registry.gitcode.com}"
               OWNER=$(echo "${{ atomgit.repository_owner }}" | tr '[:upper:]' '[:lower:]')

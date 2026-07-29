@@ -97,10 +97,15 @@ stages:
           - name: Check docker availability
             id: docker_check
             continue-on-error: true
-            run: docker info
+            run: |
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
 
           - name: Start Postgres
-            if: ${{ steps.docker_check.outcome == 'success' }}
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               docker run -d --name postgres \
                 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
@@ -114,7 +119,7 @@ stages:
               docker exec postgres pg_isready -U postgres
 
           - name: Start Redis
-            if: ${{ steps.docker_check.outcome == 'success' }}
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: |
               docker run -d --name redis -p 6379:6379 redis:7
               for i in $(seq 1 30); do
@@ -141,10 +146,15 @@ stages:
           - name: Check docker availability
             id: docker_check
             continue-on-error: true
-            run: docker info
+            run: |
+              if docker info >/dev/null 2>&1; then
+                echo "available=true" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "available=false" >> "$ATOMGIT_OUTPUT"
+              fi
           - name: Build api image
-            if: ${{ steps.docker_check.outcome == 'success' }}
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: docker build -f infra/Dockerfile.api -t agrippa-api:ci .
           - name: Build worker image
-            if: ${{ steps.docker_check.outcome == 'success' }}
+            if: ${{ steps.docker_check.outputs.available == 'true' }}
             run: docker build -f infra/Dockerfile.worker -t agrippa-worker:ci .
