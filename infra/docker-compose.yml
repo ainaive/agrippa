@@ -2,6 +2,13 @@
 # Usage:
 #   cp infra/env/.env.example infra/env/.env   # fill in the secrets
 #   docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+#
+# Pinned explicitly: the project name otherwise defaults to the compose file's
+# directory, so the volumes below would be created as `infra_pgdata` etc. —
+# surprising to find when restoring a backup, and liable to collide with any
+# other stack living in an `infra/` directory.
+name: agrippa
+
 services:
   api:
     build:
@@ -18,6 +25,10 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET (openssl rand -base64 32)}
       # the API chooses the executor at submit, so it must see the same setting
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
+      # "0" skips the migrate + seed the API otherwise runs before it serves
+      AGRIPPA_MIGRATE_ON_BOOT: ${AGRIPPA_MIGRATE_ON_BOOT:-}
+      # SSE comment-frame interval; empty keeps the 15s default
+      AGRIPPA_SSE_KEEPALIVE_MS: ${AGRIPPA_SSE_KEEPALIVE_MS:-}
     volumes:
       # the API serves artifact downloads; it only needs the shared artifact
       # store (not run workspaces), and only reads it — mount read-only so a
@@ -47,16 +58,32 @@ services:
       dockerfile: infra/Dockerfile.worker
       args:
         # closer apt mirror for hosts where deb.debian.org is slow/blocked
-        # (e.g. APT_MIRROR=https://mirrors.aliyun.com in .env); no-op when empty
+        # (e.g. APT_MIRROR=mirrors.aliyun.com in .env); no-op when empty. A
+        # scheme is tolerated but only the host is used.
         APT_MIRROR: ${APT_MIRROR:-}
+        # the Codex CLI baked into the image, and where to fetch it from
+        # (e.g. NPM_REGISTRY=https://registry.npmmirror.com from CN); both fall
+        # back to the Dockerfile defaults when empty
+        CODEX_VERSION: ${CODEX_VERSION:-0.145.0}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     image: ghcr.io/ainaive/agrippa-worker:${AGRIPPA_VERSION:-latest}
     environment:
       DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:-agrippa}@postgres:5432/agrippa
       REDIS_URL: redis://redis:6379
       AGRIPPA_SECRET_KEY: ${AGRIPPA_SECRET_KEY:?set AGRIPPA_SECRET_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # deployment-wide fallback auth for the codex-cli executor's `openai`
+      # provider. Safe to leave empty: a keyless worker still registers
+      # codex-cli, and runs whose projects carry their own provider credential
+      # resolve without it (ADR-0013).
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
       WORKER_SLOTS: ${WORKER_SLOTS:-2}
+      # optional toggles; empty is the default in every case
+      AGRIPPA_MAX_ARTIFACT_BYTES: ${AGRIPPA_MAX_ARTIFACT_BYTES:-}
+      AGRIPPA_KEEP_WORKSPACES: ${AGRIPPA_KEEP_WORKSPACES:-}
+      AGRIPPA_SCM: ${AGRIPPA_SCM:-}
     volumes:
       - workspaces:/work/runs # throwaway per-run checkouts (worker only)
       - artifacts:/work/artifacts # shared with the API for downloads
@@ -65,6 +92,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    # the worker drains on SIGTERM (pg-boss graceful stop) before exiting; the
+    # 10s compose default would SIGKILL it mid-drain
+    stop_grace_period: 60s
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
 

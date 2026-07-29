@@ -20,7 +20,8 @@ infra/docker-compose.yml
 
 - `api` and `worker` are separate images (`infra/Dockerfile.api`, `infra/Dockerfile.worker`) built from the monorepo with Bun; the SPA is built at image build time and served statically by `api` (no separate web container, no CORS).
 - `worker` scales horizontally (`docker compose up --scale worker=3`); run concurrency = workers × slots.
-- Migrations run as an entrypoint step of `api` (`bun run db:migrate`) guarded by a Postgres advisory lock; seeding of builtin resources is idempotent (checksum-guarded upserts).
+- Migrations run **in-process at the top of `apps/api/src/index.ts`**, before the listener opens, guarded by a Postgres advisory lock taken on a reserved connection; seeding of builtin resources and publication of builtin templates follow in the same block, both idempotent (checksum-guarded upserts). `AGRIPPA_MIGRATE_ON_BOOT=0` opts out. There is no entrypoint script — so with the default setting a healthy `/healthz` means all three finished; where the opt-out is set, it means only that the API is serving and can reach Postgres, and the schema is whatever was applied out of band.
+- **Both topologies provision the Codex CLI** at `/opt/codex` (pinned by `CODEX_VERSION`, fetched from `NPM_REGISTRY`): the `worker` image at build time, and the VM via `infra/vm/codex.sh`, called from both `install.sh` and `deploy.sh` so updates converge it too. The `codex-cli` executor spawns a literal `codex` binary, so without it `probeCodexCli()` fails, the executor never registers, and templates binding a slot to it — `swdev/requirement-delivery` — become un-submittable. The image build runs the same two flag checks the boot probe does, so a bad pin fails the build rather than degrading silently at runtime.
 - `infra/docker-compose.dev.yml` starts **dependencies only** (postgres + redis) for local development; `api`/`worker`/`web` run via `bun dev` on the host.
 
 ## Configuration (env)
@@ -35,11 +36,13 @@ infra/docker-compose.yml
 | `AGRIPPA_SECRET_KEY` | AES-256-GCM key encrypting the `secrets` table — **back this up; losing it orphans stored credentials** |
 | `BETTER_AUTH_SECRET` | session signing |
 | `ANTHROPIC_API_KEY` | Claude executor (worker only) |
+| `OPENAI_API_KEY` / `CODEX_API_KEY` | Codex executor's `openai` provider (worker only); both optional — a keyless worker still registers `codex-cli` and defers runs needing env auth it lacks |
 | `WORKER_SLOTS` | run concurrency per worker (default 2) |
 | `WORKSPACE_ROOT` | per-run workspaces volume (default `/work/runs`) |
 | `ARTIFACT_STORAGE_ROOT` | large-artifact volume |
-| `WORKER_EGRESS_ALLOWLIST` | optional outbound-network restriction for agent Bash |
+| `AGRIPPA_PORT` | published port mapping; accepts an interface (`127.0.0.1:3000`) so the plain-HTTP API isn't exposed beside the TLS terminator |
 | `APT_MIRROR` | optional **build-time** mirror for the worker image's apt packages (e.g. `https://mirrors.aliyun.com` from a host where `deb.debian.org` is slow/blocked); no-op when empty |
+| `CODEX_VERSION` / `NPM_REGISTRY` | which Codex CLI is installed and where from. **Build-time** for the image, **install/deploy-time** for the VM (`infra/vm/codex.sh`). Note `NPM_REGISTRY` is a URL (`https://registry.npmmirror.com`) while `APT_MIRROR` above is a bare host — both forms are accepted for each |
 
 Secrets policy: the master key and the deployment's **fallback** provider API keys live only in `api`/`worker` env (compose `env_file`), never in the DB; user-registered credentials (git tokens, MCP auth, and per-project provider API keys — ADR-0013) live encrypted in the `secrets` table keyed by `AGRIPPA_SECRET_KEY`. A project provider credential **overrides** the worker env for that provider; env auth remains the deployment-wide default for projects without one.
 
@@ -49,13 +52,15 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
 
 - **First-run onboarding**: self-registration is closed (invite-only — see [05](05-api-and-auth.md#authentication)). The api/worker do **not** create users on boot. An operator runs `apps/api/src/cli/bootstrap-admin.ts` once (reads `AGRIPPA_BOOTSTRAP_EMAIL`/`PASSWORD` from the env file, creates the first `org_admin`, idempotent on email) — then signs in and invites members from the UI. Runbook in [Operations → First-run](../manual/en/06-operations.md#first-run-create-the-admin).
 - **Backup**: Postgres volume (pg_dump schedule is the operator's choice) + `ARTIFACT_STORAGE_ROOT` volume + the `AGRIPPA_SECRET_KEY`. Redis is disposable.
-- **Upgrade**: pull images → `docker compose up -d` → api entrypoint migrates. Workers drain gracefully (in-flight runs resume on new workers via step-granular resume — see [04](04-execution-runtime.md)).
-- **TLS / ingress**: out of scope; operators front the stack with their own reverse proxy. SSE requires the proxy to disable response buffering for `/api/v1/runs/*/events`.
-- **Health**: `GET /healthz` (api: DB ping). A per-worker heartbeat row for the admin UI is deferred past M1.
+- **Upgrade**: pull images → `docker compose up -d` → api migrates on boot. Workers drain gracefully (in-flight runs resume on new workers via step-granular resume — see [04](04-execution-runtime.md)); the compose `stop_grace_period` must exceed the drain, so it is set to 60s rather than the 10s default.
+- **TLS / ingress**: out of scope; operators front the stack with their own reverse proxy. SSE requires the proxy to disable response buffering for `/api/v1/runs/*/events`, or live progress arrives in bursts. The stream emits a comment frame every 15s (`AGRIPPA_SSE_KEEPALIVE_MS`) so an idle run — a long agent turn, or one parked on an approval — never looks like a dead connection; a generous `proxy_read_timeout` remains worth setting as defence in depth for intermediaries whose idle limits you do not control.
+- **Health**: `GET /healthz` (api: DB ping). A per-worker heartbeat row for the admin UI is deferred past M1. Executor availability is observable via `executor_registrations` (workers upsert at boot and on the 60s sweeper tick).
+- **Sandboxing under Docker — bubblewrap does not work, and that is the accepted posture.** The worker image installs bubblewrap, but under Docker's default profiles it cannot create the namespaces it needs, and both executors treat an unavailable sandbox as a **silent** degradation (the Claude SDK is configured `failIfUnavailable: false`). Measured on Ubuntu 24.04 / Docker 29: the default seccomp profile blocks namespace creation outright; with `seccomp=unconfined` the namespace is created but mount setup then fails (`Failed to make / slave`) without `CAP_SYS_ADMIN`. Restoring the inner sandbox therefore costs `seccomp=unconfined` **plus** `CAP_SYS_ADMIN` — dismantling most of the outer boundary to rebuild a weaker inner one, which is a bad trade. **The container is the boundary**: the container itself, the non-root `bun` user, `/app` staying root-owned, the throwaway per-run workspace, and the env allow-list that keeps `DATABASE_URL`/`AGRIPPA_SECRET_KEY` out of agent subprocesses. Deployments that want OS-level sandboxing on top should use the VM/systemd topology, where bwrap works. Probe with `docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true` if you need to confirm the state on a given host.
+- **Deferred**: an outbound-network allowlist for agent Bash. Previously listed here as a `WORKER_EGRESS_ALLOWLIST` env var; nothing implements it, so it is recorded as future work rather than configuration.
 
 ## VM deployment (systemd, no Docker)
 
-`infra/vm/` codifies the same topology on a single Ubuntu 22.04/24.04 host: `install.sh` (idempotent bootstrap: Bun, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets, units), `deploy.sh` (update: `git pull --ff-only` → `bun install --frozen-lockfile` → SPA build → restart), `agrippa-api.service` / `agrippa-worker.service`, `env.example`, `nginx.conf.example`.
+`infra/vm/` codifies the same topology on a single Ubuntu 22.04/24.04 host: `install.sh` (idempotent bootstrap: Bun, Codex CLI, Postgres 17 via PGDG, optional Redis 7, `agrippa` system user, env file with generated secrets, units), `deploy.sh` (update: `git pull --ff-only` → `bun install --frozen-lockfile` → SPA build → Codex CLI → restart), `codex.sh` (versioned install behind an atomically-swapped symlink, shared by both), `agrippa-api.service` / `agrippa-worker.service`, `env.example`, `nginx.conf.example`.
 
 | Piece | Location | Compose equivalent |
 |---|---|---|

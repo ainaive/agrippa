@@ -30,6 +30,7 @@ sudo /opt/agrippa/infra/vm/install.sh        # add --skip-redis to omit Redis
 The installer is idempotent and sets up everything on one box:
 
 - Bun, plus the worker's OS dependencies (`git`, `ripgrep`, `bubblewrap` for the agent sandbox)
+- the OpenAI Codex CLI at `/opt/codex` — the `codex-cli` executor spawns it directly, and without it the **Requirement Delivery** workflow cannot be submitted. `infra/vm/deploy.sh` reinstalls it on every update, so a version bump lands with a normal deploy
 - PostgreSQL 17 (PGDG) and Redis 7 (optional — without it, live streams fall back to polling)
 - an `agrippa` system user, data directories under `/var/lib/agrippa`
 - `/etc/agrippa/agrippa.env` with generated secrets — **back up `AGRIPPA_SECRET_KEY`**
