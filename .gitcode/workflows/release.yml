@@ -40,11 +40,12 @@ stages:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         steps:
+          - name: Configure git auth (private repo)
+            run: |
+              # checkout 插件不消费 with.token，故用 url.insteadOf 全局注入 ATOMGIT_TOKEN
+              git config --global url."https://x-access-token:${ATOMGIT_TOKEN}@gitcode.com/".insteadOf "https://gitcode.com/"
           - name: Checkout
             uses: checkout
-            with:
-              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
-              token: ${{ secrets.ATOMGIT_TOKEN }}
 
           - name: Login to registry
             run: |
@@ -67,11 +68,12 @@ stages:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         steps:
+          - name: Configure git auth (private repo)
+            run: |
+              # checkout 插件不消费 with.token，故用 url.insteadOf 全局注入 ATOMGIT_TOKEN
+              git config --global url."https://x-access-token:${ATOMGIT_TOKEN}@gitcode.com/".insteadOf "https://gitcode.com/"
           - name: Checkout
             uses: checkout
-            with:
-              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
-              token: ${{ secrets.ATOMGIT_TOKEN }}
 
           - name: Login to registry
             run: |

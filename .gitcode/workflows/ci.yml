@@ -32,11 +32,12 @@ stages:
         name: Lint and checks
         runs-on: [ubuntu-latest, x64, small]
         steps:
+          - name: Configure git auth (private repo)
+            run: |
+              # checkout 插件不消费 with.token，故用 url.insteadOf 全局注入 ATOMGIT_TOKEN
+              git config --global url."https://x-access-token:${ATOMGIT_TOKEN}@gitcode.com/".insteadOf "https://gitcode.com/"
           - name: Checkout
             uses: checkout
-            with:
-              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
-              token: ${{ secrets.ATOMGIT_TOKEN }}
 
           - name: Ensure full history
             run: git fetch --prune --unshallow || true
@@ -89,11 +90,12 @@ stages:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
           REDIS_URL: redis://localhost:6379
         steps:
+          - name: Configure git auth (private repo)
+            run: |
+              # checkout 插件不消费 with.token，故用 url.insteadOf 全局注入 ATOMGIT_TOKEN
+              git config --global url."https://x-access-token:${ATOMGIT_TOKEN}@gitcode.com/".insteadOf "https://gitcode.com/"
           - name: Checkout
             uses: checkout
-            with:
-              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
-              token: ${{ secrets.ATOMGIT_TOKEN }}
 
           - name: Cache Bun store
             uses: cache
@@ -143,11 +145,12 @@ stages:
         name: Docker images
         runs-on: [ubuntu-latest, x64, small]
         steps:
+          - name: Configure git auth (private repo)
+            run: |
+              # checkout 插件不消费 with.token，故用 url.insteadOf 全局注入 ATOMGIT_TOKEN
+              git config --global url."https://x-access-token:${ATOMGIT_TOKEN}@gitcode.com/".insteadOf "https://gitcode.com/"
           - name: Checkout
             uses: checkout
-            with:
-              # 私有仓库：用内置 ATOMGIT_TOKEN 显式认证拉取
-              token: ${{ secrets.ATOMGIT_TOKEN }}
           - name: Build api image
             run: docker build -f infra/Dockerfile.api -t agrippa-api:ci .
           - name: Build worker image
