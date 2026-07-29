@@ -44,7 +44,7 @@ function makeReq(
 function makeCtx(signal?: AbortSignal): ExecutionContext {
   return {
     signal: signal ?? new AbortController().signal,
-    budget: { record: () => {} },
+    usage: { record: () => {} },
     secrets: async () => {
       throw new Error("unused");
     },

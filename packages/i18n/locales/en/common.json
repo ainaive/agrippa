@@ -71,7 +71,7 @@
   },
   "firstProject": {
     "title": "Create your first project",
-    "hint": "Projects are where your team collaborates — they scope resources, budgets, and repositories.",
+    "hint": "Projects are where your team collaborates — they scope resources, usage limits, and repositories.",
     "name": "Project name",
     "slug": "Slug",
     "create": "Create project"

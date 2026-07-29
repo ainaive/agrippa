@@ -56,10 +56,11 @@ const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
 
 /**
  * Everything a new run derives from CURRENT project configuration: the
- * resource manifest, per-slot agent bindings and model resolution, and the
- * budget off the pinned compiled spec. Shared by submit and retry so the two
- * paths cannot drift — a retry is a re-submission of the pinned task
- * (ADR-0014); only the template version and params snapshot stay pinned.
+ * resource manifest, and per-slot agent bindings and model resolution. Shared
+ * by submit and retry so the two paths cannot drift — a retry is a
+ * re-submission of the pinned task (ADR-0014); only the template version and
+ * params snapshot stay pinned. Run limits are NOT here: the engine reads them
+ * from the pinned template_versions.compiled row, never from a copy.
  */
 async function resolveRunPlan(
   db: AppEnv["Variables"]["db"],
@@ -92,11 +93,7 @@ async function resolveRunPlan(
     overrides,
     { registeredExecutors: await liveExecutorIds(db) },
   );
-  return {
-    resourceManifest,
-    agentResolution,
-    budget: compiled.spec.budgets as unknown as Record<string, unknown>,
-  };
+  return { resourceManifest, agentResolution };
 }
 
 async function loadRunScoped(
@@ -353,7 +350,7 @@ export const executionRoutes = new Hono<AppEnv>()
         // every repoRef must reference a connection owned by this project
         await verifyRepoRefs(db, projectId, compiled.spec.inputs, parsed.data);
 
-        const { resourceManifest, agentResolution, budget } = await resolveRunPlan(
+        const { resourceManifest, agentResolution } = await resolveRunPlan(
           db,
           projectId,
           taskType,
@@ -388,7 +385,6 @@ export const executionRoutes = new Hono<AppEnv>()
               paramsSnapshot: parsed.data,
               modelResolution: agentResolution.modelResolution,
               resourceManifest,
-              budget,
               createdBy: user.id,
             })
             .returning();
@@ -491,7 +487,7 @@ export const executionRoutes = new Hono<AppEnv>()
     if (!version) throw AppError.notFound("Template version");
     const compiled = upgradeCompiledTemplate(version.compiled);
 
-    // a retry burns budget like any run — same hard-stop as submit
+    // a retry consumes tokens like any run — same hard-stop as submit
     await assertQuotaHeadroom(db, task.projectId);
 
     try {
@@ -500,7 +496,7 @@ export const executionRoutes = new Hono<AppEnv>()
       // config fix (grants, registry, credentials) heals the task here
       // instead of re-billing a full run into the same failure
       await verifyRepoRefs(db, task.projectId, compiled.spec.inputs, latest.paramsSnapshot);
-      const { resourceManifest, agentResolution, budget } = await resolveRunPlan(
+      const { resourceManifest, agentResolution } = await resolveRunPlan(
         db,
         task.projectId,
         taskType,
@@ -538,7 +534,6 @@ export const executionRoutes = new Hono<AppEnv>()
             paramsSnapshot: latest.paramsSnapshot,
             modelResolution: agentResolution.modelResolution,
             resourceManifest,
-            budget,
             createdBy: c.var.user.id,
           })
           .returning();
@@ -656,7 +651,7 @@ export const executionRoutes = new Hono<AppEnv>()
                 : null,
             };
           }),
-          budgets: spec.budgets,
+          limits: spec.limits,
           modelRoles: spec.models.roles,
         };
       }
@@ -675,20 +670,17 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(runSteps)
       .where(eq(runSteps.runId, run.id))
       .orderBy(asc(runSteps.seq), asc(runSteps.attempt));
-    // per-step spend lives in token_usage (per attempt); aggregate it into the
-    // response so the timeline can show cost without an N+1 from the SPA
+    // per-step consumption lives in token_usage (per attempt); aggregate it into
+    // the response so the timeline can show tokens without an N+1 from the SPA
     const usageRows = await c.var.db
       .select({
         stepId: tokenUsage.stepId,
-        costUsd: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
         tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
       })
       .from(tokenUsage)
       .where(eq(tokenUsage.runId, run.id))
       .groupBy(tokenUsage.stepId);
-    const usageByStep = new Map(
-      usageRows.map((u) => [u.stepId, { costUsd: Number(u.costUsd), tokens: Number(u.tokens) }]),
-    );
+    const usageByStep = new Map(usageRows.map((u) => [u.stepId, { tokens: Number(u.tokens) }]));
     return c.json(rows.map((row) => ({ ...row, usage: usageByStep.get(row.id) ?? row.usage })));
   })
   .post("/runs/:id/cancel", async (c) => {

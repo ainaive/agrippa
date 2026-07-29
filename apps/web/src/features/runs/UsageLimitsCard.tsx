@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Progress } from "@/components/ui/progress";
-import { formatCost, formatDuration } from "@/lib/format";
+import { formatDuration, formatTokens, formatTokensCompact } from "@/lib/format";
 import type { Run } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -32,28 +32,28 @@ function Meter({
   );
 }
 
-export function BudgetMeter({ run }: { run: Run }) {
+export function UsageLimitsCard({ run }: { run: Run }) {
   const { t } = useTranslation("runs");
-  const budgets = run.template?.budgets ?? run.budget;
-  const spent = run.usageTotals?.costUsd ?? 0;
-  const costLimit = budgets?.maxCostUsd ?? null;
+  const limits = run.template?.limits ?? null;
+  const used = run.usageTotals?.tokens ?? 0;
+  const tokenLimit = limits?.maxTokens ?? null;
 
   const elapsedMs = run.startedAt
     ? (run.finishedAt ? new Date(run.finishedAt).getTime() : Date.now()) -
       new Date(run.startedAt).getTime()
     : 0;
-  const durationLimit = budgets?.maxDurationMinutes ?? null;
-  const perPhase = Object.entries(budgets?.perPhase ?? {});
+  const durationLimit = limits?.maxDurationMinutes ?? null;
+  const perPhase = Object.entries(limits?.perPhase ?? {});
 
   return (
     <div className="space-y-3">
       <Meter
-        label={t("budget.cost")}
-        valueText={`${formatCost(spent)}${costLimit ? ` / ${formatCost(costLimit)}` : ""}`}
-        pct={costLimit ? (spent / costLimit) * 100 : null}
+        label={t("limits.tokens")}
+        valueText={`${formatTokens(used)}${tokenLimit ? ` / ${formatTokens(tokenLimit)}` : ""}`}
+        pct={tokenLimit ? (used / tokenLimit) * 100 : null}
       />
       <Meter
-        label={t("budget.duration")}
+        label={t("limits.duration")}
         valueText={`${run.startedAt ? formatDuration(run.startedAt, run.finishedAt) : "—"}${
           durationLimit ? ` / ${durationLimit}m` : ""
         }`}
@@ -61,11 +61,11 @@ export function BudgetMeter({ run }: { run: Run }) {
       />
       {perPhase.length > 0 ? (
         <div className="space-y-1 border-t pt-2">
-          <p className="text-xs font-medium text-muted-foreground">{t("budget.perPhase")}</p>
+          <p className="text-xs font-medium text-muted-foreground">{t("limits.perPhase")}</p>
           {perPhase.map(([phaseId, cap]) => (
             <div key={phaseId} className="flex justify-between text-xs text-muted-foreground">
               <span className="truncate">{phaseId}</span>
-              <span className="tabular-nums">{formatCost(cap.maxCostUsd)}</span>
+              <span className="tabular-nums">{formatTokensCompact(cap.maxTokens)}</span>
             </div>
           ))}
         </div>

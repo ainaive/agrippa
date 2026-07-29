@@ -65,8 +65,8 @@ phases:
           Write it bilingual-friendly: clear, plain language.
         produces: [status-report]
 
-budget:
-  maxCostUsd: 3
+limits:
+  maxTokens: 600000
   maxDurationMinutes: 20
 
 outputs:

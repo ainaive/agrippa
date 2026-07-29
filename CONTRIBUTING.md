@@ -53,7 +53,7 @@ bun run build                # SPA build
 
 ### Add a builtin model
 
-1. Append a row to `modelRows` in `packages/db/src/seed/index.ts` — every field: `provider`, `providerModelId`, `displayName`, `tier`, `contextWindow`, `inputCostPerMtok`, `outputCostPerMtok` (list pricing; the budget meter charges from these). Verify the id against the live provider first — ids can be auth-mode-dependent (e.g. the `gpt-*-codex` ids 400 under a ChatGPT-account Codex login).
+1. Append a row to `modelRows` in `packages/db/src/seed/index.ts` — every field: `provider`, `providerModelId`, `displayName`, `tier`, `contextWindow`, `rank` (selection preference within the tier, lower wins; builtins are spaced by 10 so a new model can slot between them). Verify the id against the live provider first — ids can be auth-mode-dependent (e.g. the `gpt-*-codex` ids 400 under a ChatGPT-account Codex login).
 2. `bun run db:seed` (or boot the api) — inserts are idempotent by provider model id.
 3. Grant it to projects that should use it (Settings → Resources). Org-specific one-offs can skip the seed entirely: admins add rows at `/admin/models`.
 

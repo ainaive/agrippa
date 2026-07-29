@@ -255,12 +255,12 @@ phases:
             ${artifacts.implementation-plan}
         produces: [pull-request]
 
-budget:
-  maxCostUsd: 15
+limits:
+  maxTokens: 3000000
   maxDurationMinutes: 120
   perPhase:
-    implement: { maxCostUsd: 6 }
-    review-round: { maxCostUsd: 5 }
+    implement: { maxTokens: 1200000 }
+    review-round: { maxTokens: 1000000 }
 
 outputs:
   - { key: questions, kind: json, required: false }

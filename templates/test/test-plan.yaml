@@ -66,8 +66,8 @@ phases:
           case id, precondition, steps, expected result, priority.
         produces: [test-plan, case-matrix]
 
-budget:
-  maxCostUsd: 3
+limits:
+  maxTokens: 600000
   maxDurationMinutes: 20
 
 outputs:

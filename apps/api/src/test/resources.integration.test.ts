@@ -55,11 +55,11 @@ describe.skipIf(!dbUp)("resource layer (registries, templates, grants)", () => {
     const detail = await jsonOf<{
       inputs: Array<{ key: string; type: string }>;
       templateVersion: { version: number } | null;
-      budgets: { maxCostUsd: number };
+      limits: { maxTokens: number };
     }>(await admin.request(`/api/v1/task-types/${bugFix?.id}`));
     expect(detail.templateVersion?.version).toBe(1);
     expect(detail.inputs.map((i) => i.key)).toContain("bugReport");
-    expect(detail.budgets.maxCostUsd).toBe(8);
+    expect(detail.limits.maxTokens).toBe(1_600_000);
   });
 
   it("repo connections accept gitcode, hide the token, and audit the provider", async () => {

@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { RunStatusIcon } from "@/components/RunStatusBadge";
-import { formatCost, formatDuration, lt } from "@/lib/format";
+import { formatDuration, formatTokensCompact, lt } from "@/lib/format";
 import type { Checkpoint, RunStep, RunTemplate } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -97,7 +97,7 @@ function StepRow({ step, attempts }: { step: RunStep; attempts: number }) {
         <p className="truncate text-sm font-medium">{step.stepId}</p>
         <p className="text-xs text-muted-foreground">
           {step.startedAt ? formatDuration(step.startedAt, step.finishedAt) : "—"}
-          {step.usage.costUsd ? ` · ${formatCost(step.usage.costUsd)}` : ""}
+          {step.usage.tokens != null ? ` · ${formatTokensCompact(step.usage.tokens)}` : ""}
           {attempts > 1 ? ` · ${t("steps.attempts", { count: attempts })}` : ""}
         </p>
       </div>

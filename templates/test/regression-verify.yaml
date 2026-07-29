@@ -77,8 +77,8 @@ phases:
           single-line verdict: PASS, FAIL, or PASS-WITH-FLAKES.
         produces: [verdict-report]
 
-budget:
-  maxCostUsd: 4
+limits:
+  maxTokens: 800000
   maxDurationMinutes: 30
 
 outputs:

@@ -88,8 +88,8 @@ export type ModelResolutionEntry = {
   modelId: string;
   provider: string;
   providerModelId: string;
-  inputCostPerMtok: number;
-  outputCostPerMtok: number;
+  /** Selection preference within the tier — lower wins (ADR-0015). */
+  rank: number;
 };
 
 export type ModelResolution = Record<string, ModelResolutionEntry>;
@@ -100,11 +100,10 @@ export type GrantedModelRow = {
   provider: string;
   providerModelId: string;
   tier: ModelTier;
-  inputCostPerMtok: string | null;
-  outputCostPerMtok: string | null;
+  rank: number;
 };
 
-/** role → cheapest model for its tier chain from a pre-bucketed candidate set. */
+/** role → most-preferred model for its tier chain from a pre-bucketed candidate set. */
 function resolveRolesFrom(
   candidates: GrantedModelRow[],
   roleSpecs: CompiledTemplate["spec"]["models"]["roles"],
@@ -116,8 +115,11 @@ function resolveRolesFrom(
     list.push(model);
     byTier.set(model.tier, list);
   }
+  // ties matter: `rank` defaults to 100 for every admin-created model, so
+  // without a second key a project granted several of them would resolve
+  // differently run to run
   for (const list of byTier.values()) {
-    list.sort((a, b) => Number(a.inputCostPerMtok ?? 0) - Number(b.inputCostPerMtok ?? 0));
+    list.sort((a, b) => a.rank - b.rank || (a.providerModelId < b.providerModelId ? -1 : 1));
   }
   const resolution: ModelResolution = {};
   for (const [role, policy] of Object.entries(roleSpecs)) {
@@ -131,8 +133,7 @@ function resolveRolesFrom(
       modelId: model.id,
       provider: model.provider,
       providerModelId: model.providerModelId,
-      inputCostPerMtok: Number(model.inputCostPerMtok ?? 0),
-      outputCostPerMtok: Number(model.outputCostPerMtok ?? 0),
+      rank: model.rank,
     };
   }
   return { resolution };
@@ -148,8 +149,8 @@ function resolveRolesFrom(
  * Candidates are the executor's catalog providers minus those whose catalog
  * auth policy demands a project credential the project doesn't have; each
  * remaining candidate must satisfy ALL the slot's roles (tier → fallback,
- * cheapest in tier). Ties rank: has a project credential, then lowest total
- * input cost over the resolved roles, then provider id — deterministic.
+ * most-preferred in tier). Ties rank: has a project credential, then lowest
+ * total rank over the resolved roles, then provider id — deterministic.
  *
  * `providers === "*"` (demo/fake or an uncataloged custom executor) keeps the
  * legacy mixed-provider resolution with no credential gating, so token-free
@@ -186,7 +187,7 @@ export function resolveSlotModels(args: {
     );
   }
 
-  const successes: Array<{ provider: string; resolution: ModelResolution; totalCost: number }> = [];
+  const successes: Array<{ provider: string; resolution: ModelResolution; totalRank: number }> = [];
   const credentialOnlyBlocked: string[] = [];
   const reasons: string[] = [];
   for (const provider of providers) {
@@ -198,11 +199,11 @@ export function resolveSlotModels(args: {
     const needsCredential =
       providerAuthPolicy(provider, catalog) === "project" && !credentialed.has(provider);
     if ("resolution" in result && !needsCredential) {
-      const totalCost = Object.values(result.resolution).reduce(
-        (sum, entry) => sum + entry.inputCostPerMtok,
+      const totalRank = Object.values(result.resolution).reduce(
+        (sum, entry) => sum + entry.rank,
         0,
       );
-      successes.push({ provider, resolution: result.resolution, totalCost });
+      successes.push({ provider, resolution: result.resolution, totalRank });
     } else if ("resolution" in result) {
       credentialOnlyBlocked.push(provider);
       reasons.push(`provider ${provider} — requires a project credential`);
@@ -233,7 +234,7 @@ export function resolveSlotModels(args: {
     const aCred = credentialed.has(a.provider) ? 0 : 1;
     const bCred = credentialed.has(b.provider) ? 0 : 1;
     if (aCred !== bCred) return aCred - bCred;
-    if (a.totalCost !== b.totalCost) return a.totalCost - b.totalCost;
+    if (a.totalRank !== b.totalRank) return a.totalRank - b.totalRank;
     return a.provider < b.provider ? -1 : 1;
   });
   return (successes[0] as (typeof successes)[number]).resolution;
@@ -283,7 +284,7 @@ export function slotRoleSets(compiled: CompiledTemplate): Map<string, Set<string
 }
 
 /**
- * All-roles resolution against a project's grants — role → tier → cheapest
+ * All-roles resolution against a project's grants — role → tier → lowest rank
  * granted active model, frozen into runs.model_resolution at submit. Kept as
  * the general-purpose entry point (compliance fixtures seed runs with it);
  * slot-scoped submission goes through resolveSlotModels via

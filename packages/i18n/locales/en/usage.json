@@ -1,9 +1,9 @@
 {
   "title": "Usage",
-  "period": "Spend and token consumption for {{period}}.",
-  "totalCost": "Total cost",
+  "period": "Token consumption for {{period}}.",
   "totalTokens": "Total tokens",
-  "daily": "Daily spend",
+  "remaining": "Remaining this month",
+  "daily": "Daily tokens",
   "byModel": "By model",
   "byTaskType": "By task type",
   "empty": "No data yet.",

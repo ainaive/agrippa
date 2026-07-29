@@ -4,6 +4,8 @@
 **Status:** Approved (design) — pending implementation plan
 **Scope:** `packages/orchestration` (source format only), 6 builtin templates, docs, tests. No runtime/engine/API/DB changes.
 
+> **Merge note (2026-07-29):** after this spec was written, `origin/main` re-denominated budgets as token usage limits (ADR-0015, `spec.budgets`→`spec.limits`, `maxCostUsd`→`maxTokens`). The v3 format adopted that vocabulary at merge time — the shipped v3 key is `limits`/`maxTokens`, not `budget`/`maxCostUsd` as shown in the original design blocks below. This doc is kept as the 2026-07-28 design record.
+
 ## 1. Goal
 
 Replace the K8s-style nested source format (`apiVersion` / `kind` / `metadata` / `spec`) with a flat, GitHub-Actions-Workflow-style declarative format for orchestration templates. Flatten unnecessary nesting so templates are more direct to write and read, without changing anything the engine, API, or DB depend on.
@@ -153,7 +155,7 @@ Key shape (validated against the file):
 
 Convert to v3: `templates/pm/status-report.yaml`, `templates/pm/plan-breakdown.yaml`, `templates/swdev/requirement-delivery.yaml`, `templates/swdev/requirements-dev.yaml`, `templates/test/test-plan.yaml`, `templates/test/regression-verify.yaml`.
 
-Keep on v1: `templates/swdev/bug-localize-fix.yaml` — the most complex v1 template (subagents + phase approval + promptFile); keeping it ensures the v1→v2 upgrade path has continuous real-fixture coverage, and avoids cascading breakage of the `mutate()`-based test suite (Appendix A). Rationale recorded in CHANGELOG + ADR-0015.
+Keep on v1: `templates/swdev/bug-localize-fix.yaml` — the most complex v1 template (subagents + phase approval + promptFile); keeping it ensures the v1→v2 upgrade path has continuous real-fixture coverage, and avoids cascading breakage of the `mutate()`-based test suite (Appendix A). Rationale recorded in CHANGELOG + ADR-0016.
 
 Because `compileTemplate` computes the checksum from the source YAML and the compiled IR is shape-identical, re-seeding publishes new immutable versions for the 6 changed builtins; runs that pinned an older version keep resolving their stored v2 IR. No migration.
 
@@ -172,7 +174,7 @@ Add a `describe("v3 format")` block reusing existing `issuesOf` / `resolveFile` 
 
 - `docs/design/02-orchestration-template.md` — add a v3 section; mark v3 as the recommended authoring format, v1/v2 still accepted.
 - `docs/manual/en/05-template-authoring.md` **and** `docs/manual/zh-CN/05-template-authoring.md` — rewrite the annotated examples to v3; keep a short "legacy v1/v2 still supported" note. Both locales move in the same commit (AGENTS.md requirement).
-- `docs/adr/0015-v3-flat-authoring-format.md` — new ADR: v3 is source-only sugar, v2 IR unchanged, rationale for flat, the `bug-localize-fix` fixture decision.
+- `docs/adr/0016-v3-flat-authoring-format.md` — new ADR: v3 is source-only sugar, v2 IR unchanged, rationale for flat, the `bug-localize-fix` fixture decision.
 - `ARCHITECTURE.md` — note v3 as the authoring format.
 - `CHANGELOG.md` — `[Unreleased]` entry, including the rationale for keeping `bug-localize-fix.yaml` on v1.
 
@@ -193,7 +195,7 @@ Add a `describe("v3 format")` block reusing existing `issuesOf` / `resolveFile` 
 6. Convert `templates/swdev/requirement-delivery.yaml` (only multi-agent; phases verbatim).
 7. Convert the remaining 3 (`requirements-dev`, `test-plan`, `regression-verify`).
 8. Add the v3 test block to `compile.test.ts`.
-9. Update docs: `docs/design/02`, both `05-template-authoring.md` locales, ADR-0015, `ARCHITECTURE.md`, `CHANGELOG.md`.
+9. Update docs: `docs/design/02`, both `05-template-authoring.md` locales, ADR-0016, `ARCHITECTURE.md`, `CHANGELOG.md`.
 10. Final verification — all four gates.
 
 ## 7. Risks & mitigations

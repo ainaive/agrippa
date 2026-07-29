@@ -98,7 +98,7 @@ export type StepExecutionRequest = {
 
 export type NormalizedErrorCode =
   | "aborted"
-  | "budget_exceeded"
+  | "usage_limit_exceeded"
   | "timeout"
   | "model_error"
   | "tool_error"
@@ -143,16 +143,16 @@ export type Logger = {
 };
 
 export type ExecutionContext = {
-  /** Cancellation ∪ timeout ∪ budget-abort, composed by the engine. */
+  /** Cancellation ∪ timeout ∪ usage-limit abort, composed by the engine. */
   signal: AbortSignal;
-  budget: BudgetRecorder;
+  usage: UsageRecorder;
   secrets: SecretResolver;
   logger: Logger;
 };
 
-/** The slice of BudgetMeter executors see. */
-export type BudgetRecorder = {
-  record(usage: UsageDelta & { costUsd: number }): void;
+/** The slice of UsageMeter executors see. */
+export type UsageRecorder = {
+  record(usage: UsageDelta): void;
 };
 
 export type ExecutorCapabilities = {

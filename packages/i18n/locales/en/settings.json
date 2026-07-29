@@ -76,7 +76,6 @@
     "noModels": "No models registered for this provider."
   },
   "quota": {
-    "costLimit": "Monthly cost limit (USD)",
     "tokenLimit": "Monthly token limit",
     "hardStop": "Hard stop when exhausted",
     "save": "Save quota",

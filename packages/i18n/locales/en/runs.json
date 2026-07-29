@@ -71,9 +71,9 @@
   "steps": {
     "attempts": "{{count}} attempts"
   },
-  "budget": {
-    "title": "Budget",
-    "cost": "Cost",
+  "limits": {
+    "title": "Usage limits",
+    "tokens": "Tokens",
     "duration": "Duration",
     "perPhase": "Per-phase caps"
   },
@@ -86,14 +86,13 @@
   "dashboard": {
     "openTasks": "Active runs",
     "pendingApprovals": "Pending approvals",
-    "spend": "Spend",
+    "tokens": "Tokens used",
     "total": "Total tasks",
     "recent": "Recent tasks",
     "newTask": "New task",
     "viewAll": "View all",
-    "byModel": "Spend by model",
-    "noSpend": "No spend this month yet.",
-    "tokensCount": "{{formattedCount}} tokens",
+    "byModel": "Tokens by model",
+    "noUsage": "No usage this month yet.",
     "empty": "No tasks yet — pick one from the catalog."
   },
   "table": {

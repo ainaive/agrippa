@@ -2,7 +2,7 @@
 
 Guidance for AI coding agents (Codex, Claude Code, Cursor, …) working in this repository. This file is the single source of truth — CLAUDE.md imports it.
 
-Agrippa (硅基工坊 / Silicon Workshop) is a team-oriented agent work platform: users pick a **task type** from a scenario catalog, fill an auto-generated form, and the platform executes it in the background — a preset **Faber** agent walks a versioned **orchestration template** (phases, steps, approvals, budgets), delegating each agent step to a pluggable **executor** (first: Claude Agent SDK). See [ARCHITECTURE.md](ARCHITECTURE.md) for the map and `docs/design/` for the full design.
+Agrippa (硅基工坊 / Silicon Workshop) is a team-oriented agent work platform: users pick a **task type** from a scenario catalog, fill an auto-generated form, and the platform executes it in the background — a preset **Faber** agent walks a versioned **orchestration template** (phases, steps, approvals, usage limits), delegating each agent step to a pluggable **executor** (first: Claude Agent SDK). See [ARCHITECTURE.md](ARCHITECTURE.md) for the map and `docs/design/` for the full design.
 
 ## Commands
 
@@ -41,7 +41,7 @@ apps/      web (Vite React SPA) · api (Hono REST+SSE) · worker (pg-boss + engi
 packages/  core (domain vocab, zod schemas, run state machine)
            db (Drizzle schema + migrations + seed + secrets crypto)
            orchestration (template compiler, expression lang, engine, queue, buses)
-           executor-core (Executor interface, BudgetMeter, FakeExecutor)
+           executor-core (Executor interface, UsageMeter, FakeExecutor)
            executor-claude (Claude Agent SDK executor)
            i18n (en/zh-CN resources) · api-client (SPA client types)
 templates/ builtin agrippa/v1 YAML templates + shared prompts/skills
@@ -71,8 +71,9 @@ templates/ builtin agrippa/v1 YAML templates + shared prompts/skills
 - **Test DB reset must drop the `drizzle` schema too** — the migrator journals there; dropping only `public` makes migrations silently no-op on the next run. `freshTestDb()` in `apps/api/src/test/helpers.ts` does this correctly; reuse it.
 - **One shared DB pool per test process.** A pool per fixture exhausts Postgres `max_connections`. Both test helper modules keep a module-level shared pool — follow that pattern.
 - **Advisory locks are session-scoped.** `migrateDb` acquires/releases `pg_advisory_lock` on a single *reserved* connection (`db.$client.reserve()`); a pooled acquire/release pair lands on different connections and deadlocks the next boot.
-- **Engine error semantics**: `RunFailure`/`BudgetExceededError` finalize the run; *unexpected* errors rethrow on purpose so pg-boss retries and the engine resumes step-granularly. Don't "fix" that by catching everything.
+- **Engine error semantics**: `RunFailure`/`UsageLimitExceededError` finalize the run; *unexpected* errors rethrow on purpose so pg-boss retries and the engine resumes step-granularly. Don't "fix" that by catching everything.
 - **`AGRIPPA_SECRET_KEY`** (32-byte base64) is required whenever secrets are written (MCP auth, repo tokens); test helpers auto-generate one.
+- **Split column adds from column drops** into separate migrations when both hit the same table. A backfill that reads the old columns has to run before they go, and keeping the two apart also stops `drizzle-kit generate` from having to ask whether a column was added or renamed — that prompt needs a TTY. `0010_model_rank` (add + backfill) and `0011_drop_money` (drop) are the worked example.
 - **FakeExecutor is the compliance contract** — a new executor must behave under `packages/orchestration/src/engine/engine.integration.test.ts` exactly as it does.
 
 ## Docs

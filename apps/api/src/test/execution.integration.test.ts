@@ -215,7 +215,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
         slug: string;
         version: number;
         phases: Array<Record<string, unknown>>;
-        budgets: Record<string, unknown>;
+        limits: Record<string, unknown>;
         modelRoles: Record<string, unknown>;
       };
     }>(await viewer.request(`/api/v1/runs/${runId}`));
@@ -296,12 +296,12 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
   it("exposes steps and downloadable artifacts", async () => {
     const steps = await jsonOf<
-      Array<{ stepId: string; status: string; usage: { costUsd?: number; tokens?: number } }>
+      Array<{ stepId: string; status: string; usage: { tokens?: number } }>
     >(await viewer.request(`/api/v1/runs/${runId}/steps`));
     const rootCause = steps.find((s) => s.stepId === "find-root-cause");
     expect(rootCause?.status).toBe("succeeded");
-    // per-step spend is aggregated from token_usage into the response
-    expect(typeof rootCause?.usage.costUsd).toBe("number");
+    // per-step consumption is aggregated from token_usage into the response
+    expect(typeof rootCause?.usage.tokens).toBe("number");
 
     const artifacts = await jsonOf<Array<{ id: string; artifactKey: string }>>(
       await viewer.request(`/api/v1/runs/${runId}/artifacts`),
@@ -317,7 +317,6 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
   it("reports usage grouped by model, task type, and day", async () => {
     const usage = await jsonOf<{
-      costUsd: number;
       tokens: number;
       byModel: Array<{ model: string; tokens: number }>;
       byTaskType: Array<{ taskTypeNameI18n: Record<string, string> | null; tokens: number }>;
@@ -393,14 +392,13 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
   it("usage reports current-period totals and hard-stop quota blocks new submissions", async () => {
     const usage = await jsonOf<{
-      costUsd: number;
       tokens: number;
       byModel: Array<{ model: string }>;
     }>(await admin.request(`/api/v1/projects/${projectId}/usage`));
     expect(usage.tokens).toBeGreaterThan(0); // the succeeded run recorded usage
     expect(usage.byModel.length).toBeGreaterThan(0);
 
-    // exhaust the quota below current spend → submit rejected before persisting
+    // exhaust the quota below current consumption → submit rejected before persisting
     await admin.request(`/api/v1/projects/${projectId}/quota`, {
       method: "PUT",
       json: { tokenLimit: 1, hardStop: true },
@@ -526,7 +524,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       ],
     });
 
-    // a retry burns budget like any run — the quota hard-stop applies
+    // a retry consumes tokens like any run — the quota hard-stop applies
     await admin.request(`/api/v1/projects/${projectId}/quota`, {
       method: "PUT",
       json: { tokenLimit: 1, hardStop: true },

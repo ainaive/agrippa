@@ -38,7 +38,7 @@
 | `docs/design/02-orchestration-template.md` | format spec | Modify |
 | `docs/manual/en/05-template-authoring.md` | authoring guide | Modify |
 | `docs/manual/zh-CN/05-template-authoring.md` | authoring guide (zh) | Modify |
-| `docs/adr/0015-v3-flat-authoring-format.md` | decision record | Create |
+| `docs/adr/0016-v3-flat-authoring-format.md` | decision record | Create |
 | `ARCHITECTURE.md` | overview template mention | Modify |
 | `CHANGELOG.md` | unreleased entry | Modify |
 
@@ -58,7 +58,7 @@
 Append this block to `packages/orchestration/src/template-schema.ts` immediately before the `/** "45m" | "24h" | "2d" → minutes */` comment above `durationToMinutes`:
 
 ```ts
-// ── agrippa/v3 flat authoring format (ADR-0015) ───────────────────────────────
+// ── agrippa/v3 flat authoring format (ADR-0016) ───────────────────────────────
 
 /**
  * v3 flat authoring format (GitHub-Actions-style). Both single-agent
@@ -1344,7 +1344,7 @@ Update the title line (line 1) and the "Two authoring versions exist" paragraph 
 Replace the line 7 paragraph with:
 
 ```markdown
-Three authoring versions exist: `agrippa/v3` (the recommended flat format — top-level `slug`/`scenario`/`faber`/`slots`/`models`/`budget`/`outputs`, no `metadata`/`spec` wrappers; [ADR-0015](../adr/0015-v3-flat-authoring-format.md)), `agrippa/v2` (agent slots, checkpoint steps, bounded loops, SCM actions — [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)), and `agrippa/v1` (linear phases, phase-level approvals — [ADR-0006](../adr/0006-yaml-template-format.md)). All three compile to one v2-shaped IR (`CompiledTemplate`); pure `upgradeV1ToV2` and `normalizeV3ToCompiled` run at compile time, and `upgradeCompiledTemplate` normalizes stored compiled rows, so v1/v3 templates keep working unchanged and no data migration ever happens. **Author new templates in v3.**
+Three authoring versions exist: `agrippa/v3` (the recommended flat format — top-level `slug`/`scenario`/`faber`/`slots`/`models`/`budget`/`outputs`, no `metadata`/`spec` wrappers; [ADR-0016](../adr/0016-v3-flat-authoring-format.md)), `agrippa/v2` (agent slots, checkpoint steps, bounded loops, SCM actions — [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)), and `agrippa/v1` (linear phases, phase-level approvals — [ADR-0006](../adr/0006-yaml-template-format.md)). All three compile to one v2-shaped IR (`CompiledTemplate`); pure `upgradeV1ToV2` and `normalizeV3ToCompiled` run at compile time, and `upgradeCompiledTemplate` normalizes stored compiled rows, so v1/v3 templates keep working unchanged and no data migration ever happens. **Author new templates in v3.**
 ```
 
 - [ ] **Step 2: Add a v3 section**
@@ -1352,7 +1352,7 @@ Three authoring versions exist: `agrippa/v3` (the recommended flat format — to
 After the `## agrippa/v2 additions` section (which ends before `## Full Example`), insert a new section:
 
 ```markdown
-## `agrippa/v3` flat authoring format ([ADR-0015](../adr/0015-v3-flat-authoring-format.md))
+## `agrippa/v3` flat authoring format ([ADR-0016](../adr/0016-v3-flat-authoring-format.md))
 
 v3 is a **source-only** flattening of the v2 format — the IR is identical, so the engine, API, and DB are unchanged. New templates should be authored in v3; v1/v2 remain accepted.
 
@@ -1507,17 +1507,17 @@ approvals, singular budget). v1/v2 noted as still accepted."
 
 ---
 
-### Task 11: Write ADR-0015
+### Task 11: Write ADR-0016
 
 **Files:**
-- Create: `docs/adr/0015-v3-flat-authoring-format.md`
+- Create: `docs/adr/0016-v3-flat-authoring-format.md`
 
 - [ ] **Step 1: Create the ADR**
 
-Create `docs/adr/0015-v3-flat-authoring-format.md`:
+Create `docs/adr/0016-v3-flat-authoring-format.md`:
 
 ```markdown
-# ADR-0015: agrippa/v3 — Flat Authoring Format
+# ADR-0016: agrippa/v3 — Flat Authoring Format
 
 - Status: accepted · Date: 2026-07-28
 - Complements ADR-0006 (v1) and ADR-0010 (v2); does not amend either.
@@ -1555,8 +1555,8 @@ Introduce `version: 3` (integer) as a flat, GitHub-Actions-style authoring forma
 - [ ] **Step 2: Commit**
 
 ```bash
-git add docs/adr/0015-v3-flat-authoring-format.md
-git commit -m "docs(adr): ADR-0015 — agrippa/v3 flat authoring format
+git add docs/adr/0016-v3-flat-authoring-format.md
+git commit -m "docs(adr): ADR-0016 — agrippa/v3 flat authoring format
 
 Records v3 as source-only sugar over the v2 IR: top-level keys, wrappers
 removed, faber/slots exclusive, phase approvals explicit. v1/v2 stay
@@ -1576,7 +1576,7 @@ accepted; bug-localize-fix.yaml kept on v1 as the upgrade-path fixture."
 In `ARCHITECTURE.md`, replace the `templates/` row (line 33) text:
 
 ```markdown
-| `templates/` | Builtin templates (6 × `agrippa/v3` + the `swdev.bug-localize-fix.yaml` v1 fixture), shared subagent prompts, builtin skills. Compiled + published at boot, checksum-guarded. Author new templates in v3 (ADR-0015); v1/v2 still accepted. |
+| `templates/` | Builtin templates (6 × `agrippa/v3` + the `swdev.bug-localize-fix.yaml` v1 fixture), shared subagent prompts, builtin skills. Compiled + published at boot, checksum-guarded. Author new templates in v3 (ADR-0016); v1/v2 still accepted. |
 ```
 
 - [ ] **Step 2: Add the CHANGELOG entry**
@@ -1584,7 +1584,7 @@ In `ARCHITECTURE.md`, replace the `templates/` row (line 33) text:
 In `CHANGELOG.md`, under `## [Unreleased]` → `### Added`, add this entry at the top of the `Added` list:
 
 ```markdown
-- **Template format v3 — flat authoring format (ADR-0015)** — templates can now be authored in a flat, GitHub-Actions-style `version: 3` format with no `apiVersion`/`kind`/`metadata`/`spec` wrappers: top-level `slug`/`scenario`/`name`, `faber`-or-`slots` agent declaration, flat `skills`/`mcpServers`/`subagents`, `models` (no `.roles` wrapper), singular `budget`, and `outputs` (no `.artifacts` wrapper). v3 is source-only — `normalizeV3ToCompiled` flattens it into the unchanged v2 IR (`CompiledTemplate`), so the engine, API, and DB are untouched; `compileTemplate` routes on `version: 3` before the existing `apiVersion` branches. Six builtins converted (`pm/status-report`, `pm/plan-breakdown`, `swdev/requirement-delivery`, `swdev/requirements-dev`, `test/test-plan`, `test/regression-verify`); `swdev/bug-localize-fix.yaml` is intentionally kept on v1 as the v1→v2 upgrade-path fixture. v1/v2 sources keep working; the bilingual template-authoring manual and `docs/design/02` now teach v3 first.
+- **Template format v3 — flat authoring format (ADR-0016)** — templates can now be authored in a flat, GitHub-Actions-style `version: 3` format with no `apiVersion`/`kind`/`metadata`/`spec` wrappers: top-level `slug`/`scenario`/`name`, `faber`-or-`slots` agent declaration, flat `skills`/`mcpServers`/`subagents`, `models` (no `.roles` wrapper), singular `budget`, and `outputs` (no `.artifacts` wrapper). v3 is source-only — `normalizeV3ToCompiled` flattens it into the unchanged v2 IR (`CompiledTemplate`), so the engine, API, and DB are untouched; `compileTemplate` routes on `version: 3` before the existing `apiVersion` branches. Six builtins converted (`pm/status-report`, `pm/plan-breakdown`, `swdev/requirement-delivery`, `swdev/requirements-dev`, `test/test-plan`, `test/regression-verify`); `swdev/bug-localize-fix.yaml` is intentionally kept on v1 as the v1→v2 upgrade-path fixture. v1/v2 sources keep working; the bilingual template-authoring manual and `docs/design/02` now teach v3 first.
 ```
 
 - [ ] **Step 3: Commit**
@@ -1633,7 +1633,7 @@ Verify against the design spec's completion checklist:
 - v3 schema validates both `faber` and `slots` modes (tests pass).
 - `compileTemplate` routes `version: 3` (test passes).
 - Tests cover v3 single-agent, multi-agent, and validation errors.
-- Docs updated: `docs/design/02`, both `05-template-authoring.md` locales, ADR-0015, `ARCHITECTURE.md`, `CHANGELOG.md`.
+- Docs updated: `docs/design/02`, both `05-template-authoring.md` locales, ADR-0016, `ARCHITECTURE.md`, `CHANGELOG.md`.
 - All bilingual fields carry both `en` and `zh-CN`.
 
 - [ ] **Step 6: Final commit (if any doc/format fixups were needed during gates)**

@@ -10,6 +10,7 @@ import {
   isLoopNode,
   type TemplateDoc,
   type TemplateDocV3,
+  type TemplateLimits,
   templateDocSchema,
   templateDocV2Schema,
   templateDocV3Schema,
@@ -37,6 +38,25 @@ const ALLOWED_ROOTS = new Set(["inputs", "steps", "run", "project", "checkpoints
 
 export function skillSlugOfRef(ref: string): string {
   return ref.split("@")[0] as string;
+}
+
+/**
+ * Run limits, tolerating pre-token specs.
+ *
+ * Versions published before limits were denominated in tokens carry
+ * `spec.budgets` with USD caps. The duration cap survives the move verbatim;
+ * the cost caps cannot be converted, because deriving tokens from a dollar
+ * figure needs a price the registry no longer stores. Those runs keep only
+ * their duration cap and the project token quota — deliberately, rather than
+ * inventing a token ceiling nobody authored.
+ *
+ * Permanent, not transitional: builtins republish on boot, but admin-authored
+ * versions and every run pinned to one keep their original compiled jsonb.
+ */
+function normalizeLimits(spec: { limits?: unknown; budgets?: unknown }): TemplateLimits {
+  if (spec.limits) return spec.limits as TemplateLimits;
+  const legacy = (spec.budgets ?? {}) as { maxDurationMinutes?: number };
+  return { maxDurationMinutes: legacy.maxDurationMinutes, perPhase: {} };
 }
 
 /**
@@ -90,7 +110,7 @@ export function upgradeV1ToV2(doc: TemplateDoc): CompiledTemplate {
           ),
         ],
       })),
-      budgets: spec.budgets,
+      limits: normalizeLimits(spec),
       outputs: spec.outputs,
     },
   };
@@ -103,8 +123,19 @@ export function upgradeV1ToV2(doc: TemplateDoc): CompiledTemplate {
  */
 export function upgradeCompiledTemplate(raw: unknown): CompiledTemplate {
   const apiVersion = (raw as { apiVersion?: unknown } | null)?.apiVersion;
-  if (apiVersion === "agrippa/v2") return raw as CompiledTemplate;
-  return upgradeV1ToV2(raw as TemplateDoc);
+  if (apiVersion !== "agrippa/v2") return upgradeV1ToV2(raw as TemplateDoc);
+  // v2 rows are stored validated, so they are cast rather than re-parsed. Rows
+  // published before limits were tokens have no `spec.limits` at all and would
+  // leave the engine dereferencing undefined — those get normalized; anything
+  // current passes through untouched (this runs on every run load).
+  const compiled = raw as CompiledTemplate;
+  if (compiled.spec?.limits) return compiled;
+  // drop the legacy key rather than spreading it forward — the upgraded IR
+  // must not carry USD figures the product no longer has a meaning for
+  const { budgets: _legacy, ...spec } = compiled.spec as CompiledTemplate["spec"] & {
+    budgets?: unknown;
+  };
+  return { ...compiled, spec: { ...spec, limits: normalizeLimits(compiled.spec) } };
 }
 
 /**
@@ -148,7 +179,7 @@ function normalizeV3ToCompiled(doc: TemplateDocV3): CompiledTemplate {
         allowProjectOverride: doc.allowProjectOverride,
       },
       phases: doc.phases,
-      budgets: doc.budget,
+      limits: doc.limits,
       outputs: {
         artifacts: doc.outputs,
         summary: doc.summary,
@@ -204,6 +235,11 @@ export function compileTemplate(sourceYaml: string, options: CompileOptions = {}
   }
 
   const issues: string[] = [];
+  // zod strips unknown keys, so a draft still written against the old format
+  // would compile silently with no cap at all — say so instead.
+  if ((raw as { spec?: { budgets?: unknown } } | null)?.spec?.budgets !== undefined) {
+    issues.push("spec.budgets was renamed to spec.limits and is now denominated in tokens");
+  }
   const spec = doc.spec;
   const slotNames = Object.keys(spec.agents);
   const defaultSlot = slotNames[0] as string;
@@ -338,10 +374,10 @@ export function compileTemplate(sourceYaml: string, options: CompileOptions = {}
     issues.push(`outputs.summary.from '${spec.outputs.summary.from}' is not a declared artifact`);
   }
 
-  const budgetablePhaseIds = new Set([...phases.map((p) => p.phase.id)]);
-  for (const phaseId of Object.keys(spec.budgets.perPhase)) {
-    if (!budgetablePhaseIds.has(phaseId)) {
-      issues.push(`budgets.perPhase: unknown phase '${phaseId}'`);
+  const limitablePhaseIds = new Set([...phases.map((p) => p.phase.id)]);
+  for (const phaseId of Object.keys(spec.limits.perPhase)) {
+    if (!limitablePhaseIds.has(phaseId)) {
+      issues.push(`limits.perPhase: unknown phase '${phaseId}'`);
     }
   }
 

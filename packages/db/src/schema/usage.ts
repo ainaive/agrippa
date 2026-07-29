@@ -1,4 +1,4 @@
-import { bigint, index, integer, numeric, pgTable, uuid } from "drizzle-orm/pg-core";
+import { bigint, index, integer, pgTable, uuid } from "drizzle-orm/pg-core";
 import { idCol, tstz } from "./_helpers";
 import { orgs } from "./orgs";
 import { projects } from "./projects";
@@ -6,8 +6,8 @@ import { models } from "./registry";
 import { runSteps, runs } from "./runs";
 
 /**
- * Keyed by (run, step, attempt): a retried step re-incurs cost, and the
- * budget meter sums persisted rows on resume without double-counting.
+ * Keyed by (run, step, attempt): a retried step consumes tokens again, and the
+ * usage meter sums persisted rows on resume without double-counting.
  */
 export const tokenUsage = pgTable(
   "token_usage",
@@ -29,7 +29,6 @@ export const tokenUsage = pgTable(
     outputTokens: bigint("output_tokens", { mode: "number" }).notNull().default(0),
     cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }).notNull().default(0),
     cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }).notNull().default(0),
-    costUsd: numeric("cost_usd", { precision: 12, scale: 6 }).notNull().default("0"),
     occurredAt: tstz("occurred_at").notNull().defaultNow(),
   },
   (t) => [

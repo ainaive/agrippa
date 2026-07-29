@@ -1,7 +1,7 @@
-# ADR-0015: agrippa/v3 — Flat Authoring Format
+# ADR-0016: agrippa/v3 — Flat Authoring Format
 
 - Status: accepted · Date: 2026-07-28
-- Complements ADR-0006 (v1) and ADR-0010 (v2); does not amend either.
+- Complements ADR-0006 (v1) and ADR-0010 (v2); adopts the `spec.limits` vocabulary from ADR-0015 (tokens-as-the-unit-of-account); does not amend any of them.
 
 ## Context
 
@@ -13,8 +13,8 @@ The IR is stable: `CompiledTemplate` (the v2 shape) is what the engine, API, and
 
 Introduce `version: 3` (integer) as a flat, GitHub-Actions-style authoring format alongside v1/v2. v3 is **source-only**: `normalizeV3ToCompiled` flattens a v3 doc into the unchanged `CompiledTemplate` at compile time, and `upgradeCompiledTemplate` (which normalizes stored compiled rows) is unchanged because stored rows hold the v2 IR, which is what v3 compiles to.
 
-1. **Top-level keys.** `metadata.*` and `spec.*` are promoted to the top level: `slug`, `scenario`, `name`, `description`, `faber`/`slots`, `inputs`, `workspace`, `skills`, `mcpServers`, `subagents`, `models`, `allowProjectOverride`, `phases`, `budget`, `outputs`, `summary`. `apiVersion` + `kind` collapse to `version: 3`.
-2. **Wrappers removed.** `spec.resources` → top-level `skills`/`mcpServers`/`subagents`; `spec.models.roles` → `models`; `spec.models.allowProjectOverride` → `allowProjectOverride`; `spec.budgets` → `budget` (singular); `spec.outputs.artifacts` → `outputs`; `spec.outputs.summary` → `summary`.
+1. **Top-level keys.** `metadata.*` and `spec.*` are promoted to the top level: `slug`, `scenario`, `name`, `description`, `faber`/`slots`, `inputs`, `workspace`, `skills`, `mcpServers`, `subagents`, `models`, `allowProjectOverride`, `phases`, `limits`, `outputs`, `summary`. `apiVersion` + `kind` collapse to `version: 3`.
+2. **Wrappers removed.** `spec.resources` → top-level `skills`/`mcpServers`/`subagents`; `spec.models.roles` → `models`; `spec.models.allowProjectOverride` → `allowProjectOverride`; `spec.limits` → `limits`; `spec.outputs.artifacts` → `outputs`; `spec.outputs.summary` → `summary`.
 3. **Agent declaration is exclusive.** A v3 template declares exactly one of `faber` (single-agent) or `slots` (multi-agent), enforced by a root `z.refine`. Single-agent compiles to one non-overridable `main` slot bound to `EXECUTOR_DEFAULT_SENTINEL` — identical to the v1 upgrade — so single-agent v3 and upgraded v1 produce the same IR.
 4. **Phase-level approvals are explicit.** v1's phase-level `approval:` is gone (v3 `phases` use the v2 step schema). Authors write the gate as a `kind: checkpoint` step at the head of the phase — exactly what `upgradeV1ToV2` synthesizes for v1, so a converted template yields the same IR.
 5. **v1/v2 stay accepted.** `compileTemplate` routes on `version: 3` first, then the existing `apiVersion` branches. No v1/v2 source changes; the v1→v2 upgrade path stays exercised by the kept-v1 `bug-localize-fix.yaml` fixture.

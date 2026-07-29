@@ -41,8 +41,8 @@ export interface StepExecutionRequest {
 }
 
 export interface ExecutionContext {
-  signal: AbortSignal;              // cancellation ∪ timeout ∪ budget-abort (composed)
-  budget: BudgetMeter;              // record(usage) — throws BudgetExceededError at the cap
+  signal: AbortSignal;              // cancellation ∪ timeout ∪ usage-limit abort (composed)
+  usage: UsageRecorder;             // record(usage) — throws UsageLimitExceededError at the cap
   secrets: SecretResolver;          // lazy resolution; executor never sees the vault
   logger: Logger;
 }
@@ -52,7 +52,7 @@ Contract rules:
 
 1. The returned stream **must** terminate with exactly one `step.completed` or `step.failed`.
 2. The executor **must** stop promptly when `ctx.signal` aborts, emitting `step.failed` with `error.code = "aborted"`.
-3. The executor **must** emit `usage` events as they become known (not only at the end) — budget enforcement depends on it.
+3. The executor **must** emit `usage` events as they become known (not only at the end) — usage-limit enforcement depends on it.
 4. The executor **must not** write outside `workspaceDir` (tool policy enforces; the executor also self-constrains).
 5. The executor **must not** import `@agrippa/db` or reach the database — all inputs arrive in the request; all outputs leave as events.
 6. If `capabilities.resume` is true, `step.started.sessionId` must be a handle that `resumeSessionId` can later restore.
@@ -76,9 +76,9 @@ export type ExecutorEvent =
   | { type: "step.failed"; error: NormalizedError };
 ```
 
-The engine consumes this stream and: appends each event to `run_events` (assigning per-run `seq`), publishes it to Redis for live SSE, updates the `run_steps` projection, records `token_usage` rows, and feeds `usage` into the `BudgetMeter`. Executors know nothing about persistence or transport.
+The engine consumes this stream and: appends each event to `run_events` (assigning per-run `seq`), publishes it to Redis for live SSE, updates the `run_steps` projection, records `token_usage` rows, and feeds `usage` into the `UsageMeter`. Executors know nothing about persistence or transport.
 
-`NormalizedError` carries a stable `code` (`aborted` | `budget_exceeded` | `timeout` | `model_error` | `tool_error` | `contract_violation` | `internal`), an en/zh-localizable message key, and provider detail for debugging.
+`NormalizedError` carries a stable `code` (`aborted` | `usage_limit_exceeded` | `timeout` | `model_error` | `tool_error` | `contract_violation` | `internal`), an en/zh-localizable message key, and provider detail for debugging.
 
 ## Claude Agent SDK Mapping
 
@@ -135,4 +135,4 @@ Capabilities: `{ subagents: false, mcp: false, skills: false, resume: true, stre
 
 ## FakeExecutor — the Compliance Contract
 
-`@agrippa/executor-core` ships a `FakeExecutor` that replays a scripted `ExecutorEvent[]` with configurable delays, mid-stream failures, abort latency, and usage patterns. The **engine integration suite runs entirely against it** (approval pause/resume, budget abort, crash-resume, cancellation mid-step) and doubles as the compliance spec any future executor must satisfy. It is built **before** the Claude executor — the SDK executor then has a contract to conform to, not the other way around.
+`@agrippa/executor-core` ships a `FakeExecutor` that replays a scripted `ExecutorEvent[]` with configurable delays, mid-stream failures, abort latency, and usage patterns. The **engine integration suite runs entirely against it** (approval pause/resume, usage-limit abort, crash-resume, cancellation mid-step) and doubles as the compliance spec any future executor must satisfy. It is built **before** the Claude executor — the SDK executor then has a contract to conform to, not the other way around.

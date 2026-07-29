@@ -146,7 +146,7 @@ async function seedFixtures(dbUrl: string): Promise<Fixtures> {
   });
   await api(`/api/v1/projects/${project.id}/quota`, {
     method: "PUT",
-    body: JSON.stringify({ costLimitUsd: 50, tokenLimit: null, hardStop: true }),
+    body: JSON.stringify({ tokenLimit: 10_000_000, hardStop: true }),
   });
 
   const taskTypes = await api<Array<{ id: string; slug: string }>>(

@@ -28,8 +28,6 @@ import {
   users,
 } from "@agrippa/db";
 import {
-  BudgetExceededError,
-  BudgetMeter,
   collectEnvSecretValues,
   createSecretRedactor,
   type ExecutionContext,
@@ -42,6 +40,8 @@ import {
   type SecretRedactor,
   type StepExecutionRequest,
   type UsageDelta,
+  UsageLimitExceededError,
+  UsageMeter,
 } from "@agrippa/executor-core";
 import { and, eq, gte, inArray, max, ne, sql } from "drizzle-orm";
 import { upgradeCompiledTemplate } from "../compile";
@@ -66,7 +66,7 @@ type AgentStep = TemplateStepV2 & { kind: "agent" };
 type SystemStep = TemplateStepV2 & { kind: "system" };
 type CheckpointStep = TemplateStepV2 & { kind: "checkpoint" };
 
-type AbortReason = "cancelled" | "timed_out" | "budget_exceeded";
+type AbortReason = "cancelled" | "timed_out" | "usage_limit_exceeded";
 
 /** A run's per-slot execution binding, resolved once at pickup. */
 type SlotBinding = {
@@ -155,7 +155,7 @@ function jsonValue(value: unknown): unknown {
 /**
  * Executes (or resumes) one run to its next stopping point: a terminal state
  * or a waiting_approval pause. Steps are the idempotency unit — on resume,
- * succeeded/skipped steps are skipped and the budget meter re-initializes
+ * succeeded/skipped steps are skipped and the usage meter re-initializes
  * from persisted token_usage totals (docs/design/04-execution-runtime.md).
  */
 export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOutcome> {
@@ -246,7 +246,7 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
 }
 
 class RunEngine {
-  private meter!: BudgetMeter;
+  private meter!: UsageMeter;
   private readonly abort = new AbortController();
   private abortReason: AbortReason | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -254,7 +254,8 @@ class RunEngine {
   private workspaceDir = "";
   private stepRows = new Map<string, StepRow>(); // `${stepId}#${iteration}` → latest attempt row
   private stepOutputs: Record<string, { outputs: Record<string, unknown> }> = {};
-  private modelPrices = new Map<string, { input: number; output: number; modelId?: string }>();
+  /** providerModelId → registry model id, for attributing token_usage rows. */
+  private modelIds = new Map<string, string>();
   private currentStepRowId: string | null = null;
   private currentIteration = 1;
   private producedArtifacts = new Set<string>();
@@ -282,11 +283,7 @@ class RunEngine {
     private readonly catalog: ProviderCatalog,
   ) {
     for (const entry of this.allResolutionEntries()) {
-      this.modelPrices.set(entry.providerModelId, {
-        input: entry.inputCostPerMtok,
-        output: entry.outputCostPerMtok,
-        modelId: entry.modelId,
-      });
+      this.modelIds.set(entry.providerModelId, entry.modelId);
     }
     for (const { phase } of flattenPhases(template.spec.phases)) {
       for (const step of phase.steps) {
@@ -437,50 +434,47 @@ class RunEngine {
       this.checkpointResponses[row.checkpointId] = this.responseOf(row);
     }
 
-    // budget meter from persisted totals — no double counting across resume
+    // usage meter from persisted totals — no double counting across resume
     const [usageTotals] = await db
       .select({
-        cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
         tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
       })
       .from(tokenUsage)
       .where(eq(tokenUsage.runId, run.id));
-    // per-phase spend, rebuilt by phase so per-phase budgets survive a resume
-    // (usage rows carry a step id; run_steps carries the phase)
+    // per-phase consumption, rebuilt by phase so per-phase limits survive a
+    // resume (usage rows carry a step id; run_steps carries the phase)
     const perPhaseRows = await db
       .select({
         phaseId: runSteps.phaseId,
-        cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
+        tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
       })
       .from(tokenUsage)
       .innerJoin(runSteps, eq(tokenUsage.stepId, runSteps.id))
       .where(eq(tokenUsage.runId, run.id))
       .groupBy(runSteps.phaseId);
-    const perPhaseSpent = Object.fromEntries(perPhaseRows.map((r) => [r.phaseId, Number(r.cost)]));
-    const budgets = this.template.spec.budgets;
+    const perPhaseUsed = Object.fromEntries(perPhaseRows.map((r) => [r.phaseId, Number(r.tokens)]));
+    const limits = this.template.spec.limits;
     const quota = await this.quotaHeadroom();
-    this.meter = new BudgetMeter(
+    this.meter = new UsageMeter(
       {
-        maxCostUsd: budgets.maxCostUsd,
-        perPhaseCostUsd: Object.fromEntries(
-          Object.entries(budgets.perPhase).map(([k, v]) => [k, v.maxCostUsd]),
+        maxTokens: limits.maxTokens,
+        perPhaseTokens: Object.fromEntries(
+          Object.entries(limits.perPhase).map(([k, v]) => [k, v.maxTokens]),
         ),
-        quotaCostUsd: quota.costUsd,
         quotaTokens: quota.tokens,
       },
       {
-        costUsd: Number(usageTotals?.cost ?? 0),
         tokens: Number(usageTotals?.tokens ?? 0),
-        perPhaseCostUsd: perPhaseSpent,
+        perPhaseTokens: perPhaseUsed,
       },
     );
 
-    // duration budget survives resume: deadline anchors to the original start
-    if (budgets.maxDurationMinutes && this.run.startedAt) {
+    // duration limit survives resume: deadline anchors to the original start
+    if (limits.maxDurationMinutes && this.run.startedAt) {
       const deadline =
-        this.run.startedAt.getTime() + budgets.maxDurationMinutes * 60_000 - Date.now();
+        this.run.startedAt.getTime() + limits.maxDurationMinutes * 60_000 - Date.now();
       if (deadline <= 0)
-        throw new RunFailure("timeout", "run duration budget exhausted", "timed_out");
+        throw new RunFailure("timeout", "run duration limit exhausted", "timed_out");
       this.timeoutTimer = setTimeout(() => this.triggerAbort("timed_out"), deadline);
     }
 
@@ -521,20 +515,19 @@ class RunEngine {
 
   /**
    * Remaining project quota headroom for *this* run, refreshed at each step
-   * boundary so concurrent runs see each other's spend. Counts the current
+   * boundary so concurrent runs see each other's consumption. Counts the current
    * month (matching the submit-time gate in apps/api usage.ts) and excludes
    * this run's own persisted usage — the meter already carries that, so
    * including it here would double-count on resume.
    */
-  private async quotaHeadroom(): Promise<{ costUsd?: number; tokens?: number }> {
+  private async quotaHeadroom(): Promise<{ tokens?: number }> {
     const [quota] = await this.db
       .select()
       .from(projectQuotas)
       .where(eq(projectQuotas.projectId, this.run.projectId));
-    if (!quota?.hardStop) return {};
+    if (!quota?.hardStop || quota.tokenLimit === null) return {};
     const [spent] = await this.db
       .select({
-        cost: sql<string>`coalesce(sum(${tokenUsage.costUsd}), 0)`,
         tokens: sql<string>`coalesce(sum(${tokenUsage.inputTokens} + ${tokenUsage.outputTokens}), 0)`,
       })
       .from(tokenUsage)
@@ -545,14 +538,7 @@ class RunEngine {
           gte(tokenUsage.occurredAt, sql`date_trunc('month', now())`),
         ),
       );
-    const headroom: { costUsd?: number; tokens?: number } = {};
-    if (quota.costLimitUsd !== null) {
-      headroom.costUsd = Math.max(0, Number(quota.costLimitUsd) - Number(spent?.cost ?? 0));
-    }
-    if (quota.tokenLimit !== null) {
-      headroom.tokens = Math.max(0, quota.tokenLimit - Number(spent?.tokens ?? 0));
-    }
-    return headroom;
+    return { tokens: Math.max(0, quota.tokenLimit - Number(spent?.tokens ?? 0)) };
   }
 
   // ── Main loop ────────────────────────────────────────────────────────────────
@@ -662,9 +648,9 @@ class RunEngine {
       }
       await this.checkInterrupts();
       // re-read project quota each step so concurrent runs can't collectively
-      // overspend by each checking only a stale start-of-run snapshot
+      // exceed it by each checking only a stale start-of-run snapshot
       const quota = await this.quotaHeadroom();
-      this.meter.refreshQuota(quota.costUsd, quota.tokens);
+      this.meter.refreshQuota(quota.tokens);
       this.meter.check();
       if (step.kind === "checkpoint") {
         const outcome = await this.runCheckpointStep(phase, step, iteration, loop);
@@ -1234,7 +1220,7 @@ class RunEngine {
     const request = await this.buildRequest(step, row, attempt);
     const ctx: ExecutionContext = {
       signal: this.abort.signal,
-      budget: {
+      usage: {
         record: () => {}, // engine records via usage events; executors may also call this
       },
       secrets: async () => {
@@ -1259,11 +1245,23 @@ class RunEngine {
         try {
           await this.recordUsage(event, row, attempt);
         } catch (err) {
-          if (err instanceof BudgetExceededError) {
-            this.triggerAbort("budget_exceeded");
-          } else {
-            throw err;
+          // Abort so the executor stops streaming, then propagate as a step
+          // failure. Propagating matters because the step-boundary
+          // checkInterrupts is NOT reached after the run's final step (runFlow
+          // goes straight to finalize), so swallowing this would let a run that
+          // blew its limit finish as 'succeeded'. Propagating *as StepFailed*
+          // matters because that is the only branch executeStepWithRetry closes
+          // the row out on — and its abortReason check fires before the retry
+          // and onFailure:continue branches, so a blown limit is never retried
+          // nor shrugged off.
+          if (err instanceof UsageLimitExceededError) {
+            this.triggerAbort("usage_limit_exceeded");
+            throw new StepFailed(err.message, {
+              code: "usage_limit_exceeded",
+              message: err.message,
+            });
           }
+          throw err;
         }
       }
     }
@@ -1657,10 +1655,6 @@ class RunEngine {
   }
 
   private async recordUsage(event: UsageDelta, row: StepRow, attempt: number): Promise<void> {
-    const prices = this.modelPrices.get(event.model);
-    const costUsd =
-      ((prices?.input ?? 0) * event.inputTokens + (prices?.output ?? 0) * event.outputTokens) /
-      1_000_000;
     // persisted first: the meter re-initializes from these rows on resume
     await this.db.insert(tokenUsage).values({
       orgId: this.refs.orgId,
@@ -1668,14 +1662,13 @@ class RunEngine {
       runId: this.run.id,
       stepId: row.id,
       attempt,
-      modelId: prices?.modelId ?? null,
+      modelId: this.modelIds.get(event.model) ?? null,
       inputTokens: event.inputTokens,
       outputTokens: event.outputTokens,
       cacheReadTokens: event.cacheReadTokens,
       cacheWriteTokens: event.cacheWriteTokens,
-      costUsd: costUsd.toFixed(6),
     });
-    this.meter.record({ ...event, costUsd });
+    this.meter.record(event);
   }
 
   private async insertStepRow(
@@ -1804,9 +1797,9 @@ class RunEngine {
       case "cancelled":
         return new RunFailure("cancelled", "run cancelled", "cancelled");
       case "timed_out":
-        return new RunFailure("timeout", "run duration budget exhausted", "timed_out");
+        return new RunFailure("timeout", "run duration limit exhausted", "timed_out");
       default:
-        return new RunFailure("budget_exceeded", "budget exhausted");
+        return new RunFailure("usage_limit_exceeded", "usage limit exhausted");
     }
   }
 
@@ -1844,8 +1837,8 @@ class RunEngine {
       await this.finalize(status, { code: err.code, message: err.message });
       return status;
     }
-    if (err instanceof BudgetExceededError) {
-      await this.finalize("failed", { code: "budget_exceeded", message: err.message });
+    if (err instanceof UsageLimitExceededError) {
+      await this.finalize("failed", { code: "usage_limit_exceeded", message: err.message });
       return "failed";
     }
     // Unexpected errors (infra blips, crashes) rethrow: the run stays
@@ -1861,11 +1854,10 @@ class RunEngine {
     status: RunStatus,
     error: { code: string; message: string } | null,
   ): Promise<void> {
-    const snapshot = this.meter?.snapshot() ?? { costUsd: 0, tokens: 0, perPhaseCostUsd: {} };
+    const snapshot = this.meter?.snapshot() ?? { tokens: 0, perPhaseTokens: {} };
     const usageTotals = {
-      costUsd: snapshot.costUsd,
       tokens: snapshot.tokens,
-      perPhaseCostUsd: snapshot.perPhaseCostUsd,
+      perPhaseTokens: snapshot.perPhaseTokens,
     };
     const from = this.run.status;
     let finalStatus = status;
