@@ -52,7 +52,14 @@ die() {
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0"
 [ -f "$COMPOSE_FILE" ] || die "no compose file at $COMPOSE_FILE"
 [ -f "$ENV_FILE" ] || die "no env file at $ENV_FILE"
+
+# The dumps below are a full copy of production, and this host also runs Janus
+# as an unprivileged `janus` user that the deploy design treats as untrusted.
+# An inherited 022 umask would write them 0644 in a 0755 directory — readable by
+# exactly the account the root-owned tree exists to keep out.
+umask 077
 mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
 
 compose() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 
@@ -98,13 +105,17 @@ short_sha="${sha:0:7}"
 # back to the running image tag when it is absent (the first SHA-tagged deploy).
 if [ -s "$LAST_GOOD" ]; then
   previous_sha="$(cat "$LAST_GOOD")"
-  previous="${previous_sha:0:7}"
+  previous="$previous_sha"
 else
+  # No state file yet (first deploy under this script). The image tag is the
+  # rollback target, but HEAD *is* the configuration currently deployed — record
+  # it too, so a first-deploy failure restores config instead of leaving the
+  # failed commit's compose file in place.
   previous="$(docker inspect --format '{{.Config.Image}}' agrippa-api-1 2>/dev/null | sed 's/.*://')" || previous=""
   [ -n "$previous" ] || previous="latest"
-  previous_sha=""
+  previous_sha="$(git rev-parse --verify HEAD 2>/dev/null || true)"
 fi
-log "deploying $short_sha (rollback target: $previous)"
+log "deploying $short_sha (rollback target: ${previous:0:12})"
 
 # ── database dump, before the new API can migrate ───────────────────────────
 # Rollback restores code and config; it cannot undo a migration. This is what
@@ -125,6 +136,25 @@ else
   log "database dump skipped (postgres not running)"
 fi
 
+# Printed on EVERY failure path, not just the recoverable one. The case that
+# most needs it is the one where the rolled-back stack is *also* unhealthy —
+# typically because an irreversible migration already ran — and that is exactly
+# where the old code fell through without saying anything.
+#
+# The procedure stops the application first: pg_restore --clean drops objects
+# the running api and worker still hold connections to.
+restore_hint() {
+  [ -n "$dump" ] || return 0
+  cat >&2 <<HINT
+
+The database was NOT rolled back. If $short_sha applied a migration, restore it:
+  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE stop api worker
+  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE exec -T postgres \\
+    pg_restore -U agrippa -d agrippa --clean --if-exists < $dump
+  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE start api worker
+HINT
+}
+
 rollback() {
   local reason="$1"
   echo "$reason; rolling back to $previous" >&2
@@ -140,19 +170,17 @@ rollback() {
   fi
 
   export AGRIPPA_VERSION="$previous"
-  compose up -d ||
-    die "ROLLBACK FAILED — instance is down; '$previous' did not start.${dump:+ DB dump: $dump}"
+  compose up -d || {
+    restore_hint
+    die "ROLLBACK FAILED — instance is down; '${previous:0:12}' did not start"
+  }
+  # Said on both outcomes: the operator cannot tell from here whether a
+  # migration ran, and silence would read as "the database is fine".
+  restore_hint
   if stack_ok; then
-    if [ -n "$dump" ]; then
-      # Say this even when the deploy carried no migration: the operator cannot
-      # tell from here, and silence would read as "the database is fine".
-      echo "NOTE: the database was NOT rolled back. If $short_sha applied a migration, restore with:" >&2
-      echo "  docker compose -f $COMPOSE_FILE --env-file $ENV_FILE exec -T postgres \\" >&2
-      echo "    pg_restore -U agrippa -d agrippa --clean --if-exists < $dump" >&2
-    fi
-    die "rolled back to $previous after a failed deploy of $short_sha"
+    die "rolled back to ${previous:0:12} after a failed deploy of $short_sha"
   fi
-  die "ROLLBACK UNHEALTHY — instance is down; '$previous' also fails verification.${dump:+ DB dump: $dump}"
+  die "ROLLBACK UNHEALTHY — instance is down; '${previous:0:12}' also fails verification"
 }
 
 # ── verification: both services, using the stack's own signals ──────────────
@@ -163,11 +191,25 @@ api_ok() {
   [ "$(compose ps --format '{{.Health}}' api 2>/dev/null | head -n1)" = "healthy" ]
 }
 
-# The worker has no HTTP surface and no healthcheck, but it upserts into
-# executor_registrations at boot. A row newer than the deploy start proves it
-# came up AND registered its executors — stronger than process liveness.
+# The worker has no HTTP surface and no healthcheck, so verify two things.
+#
+# A fresh executor_registrations row alone is NOT enough: the worker registers
+# (apps/worker/src/index.ts) before it starts its pg-boss consumers, so it can
+# register and then die during consumer setup and still look deployed. And
+# registrations are global per executor, so with WORKER_REPLICAS > 1 one healthy
+# replica would mask the rest. Also require every expected replica to be
+# running — compose sets no restart policy, so a crashed worker leaves an exited
+# container that this catches.
+#
+# Residual gap, accepted: a worker that stays up but wedges *after* registering
+# is not detected. Closing that needs a readiness signal written after
+# boss.work() returns, which is an apps/worker change.
 worker_ok() {
-  local since="$1" n
+  local since="$1" n running expected
+  expected="$(grep -E '^WORKER_REPLICAS=' "$ENV_FILE" | tail -n1 | cut -d= -f2)"
+  expected="${expected:-1}"
+  running="$(compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -cx worker || true)"
+  [ "$running" -eq "$expected" ] 2>/dev/null || return 1
   n="$(compose exec -T postgres psql -U agrippa -d agrippa -tAc \
     "select count(*) from executor_registrations where registered_at > to_timestamp($since);" 2>/dev/null | tr -d '[:space:]')"
   [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null
