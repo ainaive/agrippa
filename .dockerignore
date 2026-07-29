@@ -3,12 +3,19 @@
 # host-native node_modules, which `bun install --frozen-lockfile` would then
 # build on top of inside a Linux image. CI never noticed because it builds from
 # a fresh checkout.
+#
+# Patterns are matched from the context root, so an unqualified `.env` covers
+# only the root copy. Everything that must never be shipped is therefore listed
+# in its `**/` form too — `COPY apps ./apps` would otherwise pull in a
+# git-ignored apps/api/.env.local.
 node_modules
 **/node_modules
 
 # Built output — the API image builds the SPA itself (`bun run build`)
+dist
 **/dist
 *.tsbuildinfo
+**/*.tsbuildinfo
 
 .git
 .github
@@ -17,8 +24,14 @@ node_modules
 # is safe to keep.
 .env
 .env.*
+**/.env
+**/.env.*
 !.env.example
+!**/.env.example
 
 coverage
+**/coverage
 *.log
+**/*.log
 .DS_Store
+**/.DS_Store

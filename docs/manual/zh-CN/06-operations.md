@@ -76,6 +76,7 @@ sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
 | `AGRIPPA_KEEP_WORKSPACES` | worker | 设为 `1` 保留已结束执行的工作区，便于排查 |
 | `AGRIPPA_MAX_ARTIFACT_BYTES` | worker | 单个产出物大小上限（默认 25 MiB）。非正数或无法解析的值会回退到默认值，而不是取消上限 |
 | `AGRIPPA_SCM` | worker | 设为 `fake` 时用伪造的分支/推送/PR 代替真实远端操作——用于演示 |
+| `AGRIPPA_SSE_KEEPALIVE_MS` | api | 执行事件流发送保活注释帧的间隔（默认 15000 毫秒）。仅当中间层回收空闲连接更快时才需要调小 |
 | `PORT` | api | 监听端口（默认 3000） |
 | `AGRIPPA_PORT` | compose | 对外发布的端口映射，可带网卡地址。反向代理之后请用 `127.0.0.1:3000`，否则明文 HTTP 的 API 会监听 `0.0.0.0` |
 
@@ -103,6 +104,32 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 ## 升级与扩容
 
 拉取新镜像后 `docker compose up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
+
+### 从「compose 项目未命名」时期的部署升级
+
+`v0.2.0` 及更早版本的 `infra/docker-compose.yml` 没有 `name:` 键，Compose 会用文件所在目录名作为项目名，即 `infra`；现在项目名固定为 `agrippa`。若你的卷叫 `infra_pgdata` / `infra_artifacts` / `infra_workspaces`（`docker volume ls` 可查），直接执行 `docker compose up -d` 会在旧栈旁边再起一套**空的**新栈，并与其争抢对外端口。请先迁移一次：
+
+```sh
+# 1. 停掉旧栈——不要加 -v，那会删掉数据
+docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
+
+# 2. 把每个卷从 infra_X 复制到 agrippa_X。任何带 cp 的镜像都行，postgres:17
+#    本地已有。执行工作区可丢弃，真正重要的是 pgdata 与 artifacts。
+for v in pgdata artifacts workspaces; do
+  docker volume create "agrippa_$v"
+  docker run --rm -v "infra_$v:/from" -v "agrippa_$v:/to" postgres:17 \
+    sh -c 'cd /from && cp -a . /to'
+done
+
+# 3. 以新项目名启动，确认无误后再清理
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+curl -fsS http://127.0.0.1:3000/healthz
+
+# 4. 确认没问题后再执行这一步——不可逆
+docker volume rm infra_pgdata infra_artifacts infra_workspaces
+```
+
+其余一切不变：镜像相同、env 文件相同、数据相同，变的只是资源的命名空间。
 
 升级到首次引入平台自有 Git 快照（ADR-0012）的版本前，请先排空仍在进行的**仓库型**执行。旧工作区没有可信的平台 gitdir，新 worker 恢复时会按设计以 `workspace_lost` 失败关闭；非仓库型执行不受影响。后续升级仍保持正常的步骤粒度续跑行为。
 

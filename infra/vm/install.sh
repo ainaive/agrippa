@@ -17,6 +17,8 @@
 #   APP_DIR (/opt/agrippa)  DATA_DIR (/var/lib/agrippa)
 #   ENV_FILE (/etc/agrippa/agrippa.env)
 #   BUN_VERSION (keep in step with the oven/bun tag in infra/Dockerfile.*)
+#   CODEX_VERSION (keep in step with the ARG default in infra/Dockerfile.worker)
+#   NPM_REGISTRY (mirror for the Codex download, e.g. registry.npmmirror.com)
 set -euo pipefail
 
 AGRIPPA_REPO_URL="${AGRIPPA_REPO_URL:-https://github.com/ainaive/agrippa}"
@@ -25,6 +27,8 @@ APP_DIR="${APP_DIR:-/opt/agrippa}"
 DATA_DIR="${DATA_DIR:-/var/lib/agrippa}"
 ENV_FILE="${ENV_FILE:-/etc/agrippa/agrippa.env}"
 BUN_VERSION="${BUN_VERSION:-1.3.14}"
+CODEX_VERSION="${CODEX_VERSION:-0.145.0}"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}"
 
 SKIP_REDIS=0
 for arg in "$@"; do
@@ -81,6 +85,44 @@ log "Bun ${BUN_VERSION} → /usr/local/bin/bun"
 if ! /usr/local/bin/bun --version 2>/dev/null | grep -qx "$BUN_VERSION"; then
   curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}"
 fi
+
+# The codex-cli executor spawns a literal `codex` binary, and no workspace
+# dependency provides one — `bun install` cannot supply it. Without this the
+# executor never registers and swdev/requirement-delivery, whose reviewer slot
+# pins `executor: codex-cli`, is un-submittable on a VM install. Mirrors the
+# block in infra/Dockerfile.worker; re-run this script to change versions, the
+# same way BUN_VERSION lands.
+log "Codex CLI ${CODEX_VERSION} → /opt/codex"
+if ! codex --version 2>/dev/null | grep -qx "codex-cli ${CODEX_VERSION}"; then
+  case "$(dpkg --print-architecture)" in
+    amd64) codex_plat=linux-x64 ;;
+    arm64) codex_plat=linux-arm64 ;;
+    *)
+      echo "unsupported architecture for the codex CLI: $(dpkg --print-architecture)" >&2
+      exit 1
+      ;;
+  esac
+  curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 -o /tmp/codex.tgz \
+    "${NPM_REGISTRY}/@openai/codex/-/codex-${CODEX_VERSION}-${codex_plat}.tgz"
+  rm -rf /opt/codex
+  mkdir -p /opt/codex
+  # npm tarballs nest their payload under package/; the vendor tree is kept
+  # whole because the binary finds its siblings relative to its own realpath
+  tar -xzf /tmp/codex.tgz -C /opt/codex --strip-components=1
+  rm -f /tmp/codex.tgz
+  chmod -R a+rX /opt/codex
+  codex_bin="$(find /opt/codex/vendor -type f -name codex | head -n1)"
+  [ -n "$codex_bin" ] || {
+    echo "no codex binary in the vendor tree" >&2
+    exit 1
+  }
+  ln -sf "$codex_bin" /usr/local/bin/codex
+fi
+# the same two checks probeCodexCli() runs at worker boot, where failing them
+# means the executor silently does not register
+codex --version >/dev/null
+codex exec --help | grep -q -- --ignore-user-config
+codex exec --help | grep -q -- --ignore-rules
 
 log "System user + data directories"
 getent passwd agrippa >/dev/null ||

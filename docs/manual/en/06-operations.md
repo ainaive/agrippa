@@ -77,6 +77,7 @@ Documented in `infra/env/.env.example`; the full set:
 | `AGRIPPA_KEEP_WORKSPACES` | worker | `1` keeps finished run workspaces on disk for debugging |
 | `AGRIPPA_MAX_ARTIFACT_BYTES` | worker | Per-artifact size cap (default 25 MiB). A non-positive or unparseable value falls back to the default rather than lifting the cap |
 | `AGRIPPA_SCM` | worker | `fake` fabricates branch/push/PR instead of touching a real remote — for demos |
+| `AGRIPPA_SSE_KEEPALIVE_MS` | api | Interval between run-stream keepalive comment frames (default 15000). Lower only for an intermediary that reaps idle connections faster |
 | `PORT` | api | Listen port (default 3000) |
 | `AGRIPPA_PORT` | compose | Published port mapping. Accepts an interface — use `127.0.0.1:3000` behind a reverse proxy, or the plain-HTTP API binds `0.0.0.0` |
 
@@ -104,6 +105,33 @@ A registered executor still needs a credential for the provider a step resolves 
 ## Upgrades & scaling
 
 Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
+
+### Upgrading from a deployment created before the compose project was named
+
+Releases up to and including `v0.2.0` shipped `infra/docker-compose.yml` with no `name:` key, so Compose derived the project name from the file's directory: `infra`. The stack is now explicitly `agrippa`. If your volumes are named `infra_pgdata` / `infra_artifacts` / `infra_workspaces` (`docker volume ls`), a plain `docker compose up -d` would build a **second, empty** stack beside the old one — and collide on the published port. Migrate once:
+
+```sh
+# 1. stop the old stack — WITHOUT -v, which would delete the data
+docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
+
+# 2. copy each volume infra_X -> agrippa_X. Any image with cp works; postgres:17
+#    is already pulled. Run workspaces are disposable — pgdata and artifacts are
+#    the ones that matter.
+for v in pgdata artifacts workspaces; do
+  docker volume create "agrippa_$v"
+  docker run --rm -v "infra_$v:/from" -v "agrippa_$v:/to" postgres:17 \
+    sh -c 'cd /from && cp -a . /to'
+done
+
+# 3. start under the new project name and verify before cleaning up
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+curl -fsS http://127.0.0.1:3000/healthz
+
+# 4. only once you're satisfied — this is the irreversible step
+docker volume rm infra_pgdata infra_artifacts infra_workspaces
+```
+
+Nothing else changes: same images, same env file, same data. Only the resource namespace moves.
 
 When upgrading to the release that introduced platform-owned Git snapshots (ADR-0012), first drain active **repository-backed** runs. Older checkouts do not contain the trusted platform gitdir and deliberately fail closed as `workspace_lost` on a new worker; non-repository runs are unaffected. Later upgrades retain normal step-granular resume behavior.
 

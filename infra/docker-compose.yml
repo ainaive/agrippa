@@ -27,6 +27,8 @@ services:
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
       # "0" skips the migrate + seed the API otherwise runs before it serves
       AGRIPPA_MIGRATE_ON_BOOT: ${AGRIPPA_MIGRATE_ON_BOOT:-}
+      # SSE comment-frame interval; empty keeps the 15s default
+      AGRIPPA_SSE_KEEPALIVE_MS: ${AGRIPPA_SSE_KEEPALIVE_MS:-}
     volumes:
       # the API serves artifact downloads; it only needs the shared artifact
       # store (not run workspaces), and only reads it — mount read-only so a
