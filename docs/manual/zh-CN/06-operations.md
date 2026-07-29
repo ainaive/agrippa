@@ -119,10 +119,16 @@ Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode �
 因此脚本会在每次部署前做一次 `pg_dump`，存放于 `/var/lib/agrippa-deploy`（目录 `0700`、转储文件 `0600`，保留最近 5 份——它们是生产数据的完整副本，而本机上还运行着非特权的 CI 用户）。任何失败都会打印还原步骤，而不是让人误以为数据库也一并还原了：
 
 ```sh
-docker compose ... stop api worker      # pg_restore --clean 需要先断开应用连接
-docker compose ... exec -T postgres pg_restore -U agrippa -d agrippa --clean --if-exists < <dump>
-docker compose ... start api worker
+# 部署失败时会打印所用的转储文件路径；请把它赋给变量，而不是照抄占位符
+DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
+
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env stop api worker
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec -T postgres \
+  pg_restore -U agrippa -d agrippa --clean --if-exists < "$DUMP"
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env start api worker
 ```
+
+先停掉应用不是可选项：`pg_restore --clean` 无法删除 api 与 worker 仍持有连接的对象。
 
 只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**已有 worker 注册了执行器时，部署才算成功。副本数之所以重要，是因为 worker 在开始消费队列之前就会先注册，仅凭一条新注册记录会放过一个启动途中就挂掉的 worker。已知残留缺口：worker 起来了但注册后卡死，这种情况检测不到。
 

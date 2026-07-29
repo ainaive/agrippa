@@ -164,7 +164,16 @@ rollback() {
   # defaults and Dockerfiles all come from the tree, so re-upping old images
   # against the failed commit's config would be a mismatched state.
   if [ -n "$previous_sha" ]; then
-    git reset --hard -q "$previous_sha" || echo "WARNING: could not restore tree to $previous" >&2
+    # Fatal, not a warning: continuing would start the previous images against
+    # the FAILED commit's compose file — the exact config/image mismatch this
+    # restore exists to prevent. Better to stop with the tree visibly wrong
+    # than to bring the stack up in a state nobody can reason about.
+    git reset --hard -q "$previous_sha" || {
+      restore_hint
+      die "ROLLBACK ABORTED — could not restore the tree to ${previous_sha:0:12}; \
+the stack was NOT restarted and is still on ${short_sha}'s config. Fix the working \
+tree in $APP_DIR, then re-run this script."
+    }
   else
     echo "WARNING: no recorded last-good commit; config stays at $short_sha" >&2
   fi
@@ -206,12 +215,21 @@ api_ok() {
 # boss.work() returns, which is an apps/worker change.
 worker_ok() {
   local since="$1" n running expected
-  expected="$(grep -E '^WORKER_REPLICAS=' "$ENV_FILE" | tail -n1 | cut -d= -f2)"
+  # Take digits only: the env file may carry an inline comment or CRLF endings,
+  # and a non-numeric value would make the comparison below error out on every
+  # attempt rather than compare anything.
+  expected="$(sed -nE 's/^WORKER_REPLICAS=[[:space:]]*([0-9]+).*/\1/p' "$ENV_FILE" | tail -n1)"
   expected="${expected:-1}"
   running="$(compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -cx worker || true)"
   [ "$running" -eq "$expected" ] 2>/dev/null || return 1
-  n="$(compose exec -T postgres psql -U agrippa -d agrippa -tAc \
-    "select count(*) from executor_registrations where registered_at > to_timestamp($since);" 2>/dev/null | tr -d '[:space:]')"
+  # Bounded: a wedged Postgres would otherwise block here indefinitely, and the
+  # caller's HEALTH_TIMEOUT loop cannot fire while this command hangs.
+  # statement_timeout goes through PGOPTIONS, not an inline `set`: a `set`
+  # statement prints "SET" to stdout, which would corrupt the count this reads.
+  n="$(compose exec -T -e PGCONNECT_TIMEOUT=5 -e PGOPTIONS='-c statement_timeout=10s' \
+    postgres psql -U agrippa -d agrippa -tAc \
+    "select count(*) from executor_registrations where registered_at > to_timestamp($since);" \
+    2>/dev/null | tr -d '[:space:]')"
   [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null
 }
 

@@ -120,10 +120,16 @@ Two things it will not do. It **only deploys commits reachable from the `deploy`
 The script therefore takes a `pg_dump` before every deploy, into `/var/lib/agrippa-deploy` (mode `0700`, dumps `0600`, last 5 retained — they are a full copy of production and the host also runs an unprivileged CI user). On any failure it prints the restore procedure rather than implying the schema came back:
 
 ```sh
-docker compose ... stop api worker      # pg_restore --clean needs the app's connections gone
-docker compose ... exec -T postgres pg_restore -U agrippa -d agrippa --clean --if-exists < <dump>
-docker compose ... start api worker
+# the deploy prints the dump path it took; assign it rather than pasting a placeholder
+DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
+
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env stop api worker
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec -T postgres \
+  pg_restore -U agrippa -d agrippa --clean --if-exists < "$DUMP"
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env start api worker
 ```
+
+Stopping the app first is not optional: `pg_restore --clean` cannot drop objects the api and worker still hold connections to.
 
 A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** a worker has registered its executors. The replica count matters because the worker registers before it starts consuming the queue, so a fresh registration alone would pass a worker that died during startup. Residual gap: a worker that stays up but wedges after registering is not detected.
 
