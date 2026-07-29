@@ -126,6 +126,6 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 | 提交被拒 `executor_unavailable` | 没有任何在线 worker 注册过该执行器。若是 `codex-cli`，执行 `docker compose logs worker \| grep -i codex`——原因字符串直接来自 CLI 探测。 |
 | 执行停在 `queued`，且事件里提到服务商鉴权被延后 | worker 没有该步骤所解析服务商的可用凭证——把密钥加进 worker 环境变量，或在设置 → 模型服务商中添加项目凭证。 |
 | `healthz` 返回 503 | api 连不上 Postgres——检查 `DATABASE_URL` 与 postgres 服务。 |
-| （Docker）怀疑沙箱未生效 | Docker 默认的 seccomp 配置可能拦截 bubblewrap 所需的命名空间操作，而沙箱会**静默降级**。用 `docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true` 探测；若失败，需明确决定是接受"容器即边界"，还是放宽 worker 的 `security_opt`。 |
+| （Docker）怀疑沙箱未生效 | 属预期：在 Docker 默认配置下 bubblewrap **无法**创建命名空间，沙箱会静默降级。要恢复它需要同时放开 `seccomp=unconfined` 与 `CAP_SYS_ADMIN`，这比接受"容器即边界"更不划算（见 [design/08](../../design/08-deployment.md)）。需要操作系统级沙箱请改用 VM 部署方式。探测命令：`docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true`。 |
 | （虚拟机）worker 卡在「activating」 | 其 `ExecStartPre` 正在等待 api 的 `/healthz`（最长 120 秒）——用 `journalctl -u agrippa-api` 排查 api 为何不健康。 |
 | （虚拟机）Ubuntu 24.04 上智能体命令失败，或怀疑沙箱失效 | AppArmor 的 `apparmor_restrict_unprivileged_userns` 可能拦截 bubblewrap——而没有 bwrap 时沙箱会**静默**降级。用 `sudo -u agrippa bwrap --unshare-all --ro-bind / / /bin/true` 探测；若失败，放行非特权用户命名空间（或为 bwrap 安装 AppArmor 配置文件）后重启 worker。 |
