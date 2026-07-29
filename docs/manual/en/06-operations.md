@@ -16,20 +16,24 @@
 Self-registration is **closed** — the instance is invite-only, so the very first user can't sign up. Create the org admin out-of-band, exactly once, then sign in:
 
 ```sh
-# Docker: the env file is infra/env/.env
-# VM: /etc/agrippa/agrippa.env
-AGRIPPA_BOOTSTRAP_EMAIL=you@example.com
-AGRIPPA_BOOTSTRAP_PASSWORD='choose-a-strong-password'
-```
-
-```sh
-# Docker — run the script in the api image against the live compose stack:
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm \
+# Docker — pass the two values to the container directly. Compose's --env-file
+# only feeds interpolation of the compose file itself, so putting them there
+# would NOT reach the process; and keeping them in the api service's
+# environment: would park an admin password in a long-lived container.
+read -r -s -p 'admin password: ' PW; echo
+docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec \
+  -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
   api bun apps/api/src/cli/bootstrap-admin.ts
+unset PW
 
-# VM (from /opt/agrippa, reading /etc/agrippa/agrippa.env):
-sudo -u agrippa bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
+# VM (from /opt/agrippa, reading /etc/agrippa/agrippa.env for DATABASE_URL):
+sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
+  AGRIPPA_BOOTSTRAP_PASSWORD='choose-a-strong-password' \
+  bun --env-file=/etc/agrippa/agrippa.env apps/api/src/cli/bootstrap-admin.ts
 ```
+
+Use `run --rm --no-deps api …` instead of `exec` if the api container isn't up yet.
 
 The script is idempotent on email (re-running with the same address is a no-op), hashes the password with the same routine the login flow uses, and writes an audit row. After it prints `org_admin created`, sign in at the instance URL. Subsequent members join only via invitation (Admin → Members) — see [Administration](04-administration.md#accounts--onboarding).
 
@@ -59,7 +63,11 @@ Documented in `infra/env/.env.example`; the full set:
 | `BETTER_AUTH_SECRET` | api | **Required.** Session signing secret |
 | `AGRIPPA_BASE_URL` | api | Public URL of the instance |
 | `ANTHROPIC_API_KEY` | worker | Claude executor credential — the deployment-wide fallback; a project's own provider credential (Settings → Providers) overrides it for that provider |
-| `AGRIPPA_EXECUTOR` | api | Default executor for new runs: `claude-agent-sdk` or `fake` (token-free demo) |
+| `OPENAI_API_KEY` · `CODEX_API_KEY` | worker | Same, for the Codex executor's `openai` provider. Both optional: a keyless worker still registers `codex-cli`, and a project credential always wins |
+| `AGRIPPA_EXECUTOR` | api | Default executor for slots that don't declare one: `claude-agent-sdk`, `codex-cli`, or `fake` (token-free demo) |
+| `CODEX_VERSION` | build | Codex CLI version baked into the worker image (default 0.145.0, floor 0.122) |
+| `NPM_REGISTRY` | build | Where to fetch the Codex CLI from — `https://registry.npmmirror.com` from CN hosts |
+| `APT_MIRROR` | build | Closer Debian mirror for the worker image build |
 | `WORKER_SLOTS` | worker | Concurrent runs per worker (default 2) |
 | `WORKSPACE_ROOT` | worker | Per-run checkout directory (default `/work/runs` in the image) |
 | `ARTIFACT_STORAGE_ROOT` | worker | Large-artifact storage (>64 KB; smaller ones live in Postgres) |
@@ -67,7 +75,25 @@ Documented in `infra/env/.env.example`; the full set:
 | `AGRIPPA_WEB_DIST` | api | SPA dist directory to serve (set in the api image) |
 | `AGRIPPA_MIGRATE_ON_BOOT` | api | `0` disables boot-time migrate/seed |
 | `AGRIPPA_KEEP_WORKSPACES` | worker | `1` keeps finished run workspaces on disk for debugging |
+| `AGRIPPA_MAX_ARTIFACT_BYTES` | worker | Per-artifact size cap (default 25 MiB). A non-positive or unparseable value falls back to the default rather than lifting the cap |
+| `AGRIPPA_SCM` | worker | `fake` fabricates branch/push/PR instead of touching a real remote — for demos |
 | `PORT` | api | Listen port (default 3000) |
+| `AGRIPPA_PORT` | compose | Published port mapping. Accepts an interface — use `127.0.0.1:3000` behind a reverse proxy, or the plain-HTTP API binds `0.0.0.0` |
+
+## Executors
+
+Workers register the executors they can actually run, at boot and on a 60 s heartbeat, into `executor_registrations`; the API refuses to accept a submission for an executor no worker has. `claude-agent-sdk` and `fake` always register. `codex-cli` registers only if a Codex CLI new enough for `codex exec --ignore-user-config` / `--ignore-rules` is on the worker's `PATH` — the worker image installs one at `/opt/codex` and its build fails if that check doesn't pass.
+
+This matters because **Requirement Delivery** binds its reviewer slot to `codex-cli`. Check after any deploy:
+
+```sh
+docker compose logs worker | grep -i codex
+docker compose exec worker codex --version
+docker compose exec -T postgres psql -U agrippa -d agrippa \
+  -c "select executor_id, registered_at from executor_registrations order by 1;"
+```
+
+A registered executor still needs a credential for the provider a step resolves to. `openai` takes worker env (`OPENAI_API_KEY`), so does `anthropic`; `dashscope` and org-registered custom providers are **project-credential only**. Note that `dashscope` cannot back a `codex-cli` slot at all — its catalog entry serves the `anthropic` wire protocol only, because Codex ≥ 0.122 dropped the chat wire API Bailian's OpenAI-compatible mode speaks. Point such a slot at a provider that serves the `openai` protocol, or at `claude-agent-sdk`.
 
 ## Backup — three things
 
@@ -98,6 +124,9 @@ Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (
 | `git.push` fails / `pr.open needs a stored repo credential` | Publishing needs a token even for public repos (anonymous HTTPS is read-only) — add a connection with a token that has contents + pull-request write access. |
 | `pr.open is not supported for provider 'generic-git'` | The branch was pushed but only GitHub/GitLab/GitCode connections can create the PR — recreate the connection with the right provider, or open the PR manually. |
 | Need to inspect what an agent actually did on disk | Set `AGRIPPA_KEEP_WORKSPACES=1` on the worker and re-run; workspaces persist under `WORKSPACE_ROOT/<runId>`. |
+| Submission rejected `executor_unavailable` | No live worker registered that executor. For `codex-cli`, check `docker compose logs worker \| grep -i codex` — the reason string comes straight from the CLI probe. |
+| Run sits `queued` with a deferral event mentioning provider auth | The worker has no usable credential for the provider that step resolved to — add the key to worker env, or a project credential under Settings → Providers. |
 | `healthz` returns 503 | The api can't reach Postgres — check `DATABASE_URL` and the postgres service. |
+| (Docker) sandboxing is suspect | Docker's default seccomp profile can block the namespace operations bubblewrap needs, and the sandbox then degrades **silently**. Probe with `docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true`; if it fails, decide explicitly whether to accept the container as the boundary or to relax `security_opt` on the worker. |
 | (VM) worker stuck in "activating" | Its `ExecStartPre` is waiting for the api's `/healthz` (up to 120 s) — check `journalctl -u agrippa-api` for why the api isn't healthy. |
 | (VM) agent commands fail, or sandboxing is suspect on Ubuntu 24.04 | AppArmor's `apparmor_restrict_unprivileged_userns` can block bubblewrap — and without bwrap the sandbox degrades **silently**. Probe with `sudo -u agrippa bwrap --unshare-all --ro-bind / / /bin/true`; if it fails, allow unprivileged user namespaces (or install a bwrap AppArmor profile) and restart the worker. |

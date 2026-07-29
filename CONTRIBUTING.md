@@ -23,7 +23,14 @@ Prefer one terminal? `bun run dev` at the repo root starts all three (api + work
 
 Bun loads `.env` / `.env.local` natively from the directory you start it in — no dotenv, no `export`s — and `.env.local` is git-ignored, so secrets can't be committed. Create it **once and keep it**: `AGRIPPA_SECRET_KEY` encrypts credentials you store in dev (repo tokens, MCP auth), and a fresh key per shell — the old `export $(openssl rand …)` workflow — silently orphans them. Plain `export`s still work if you prefer; they take precedence over the file.
 
-The first account you sign up becomes the org admin. Real agent runs need `AGRIPPA_EXECUTOR=claude-agent-sdk` plus `ANTHROPIC_API_KEY` (worker env).
+Self-registration is closed, so create the first org admin out of band — it signs in at the normal login page, and everyone else joins by invitation from Admin → Members:
+
+```sh
+AGRIPPA_BOOTSTRAP_EMAIL=you@example.com AGRIPPA_BOOTSTRAP_PASSWORD=at-least-8-chars \
+  bun apps/api/src/cli/bootstrap-admin.ts
+```
+
+Real agent runs need `AGRIPPA_EXECUTOR=claude-agent-sdk` plus `ANTHROPIC_API_KEY` (worker env); the Codex reviewer slot additionally needs the Codex CLI on `PATH` and `OPENAI_API_KEY`.
 
 ## Quality gates
 
