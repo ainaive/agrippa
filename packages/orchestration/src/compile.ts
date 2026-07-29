@@ -4,13 +4,16 @@ import { parse as parseYaml } from "yaml";
 import { expressionRoots, extractPlaceholders, normalizeConditionExpression } from "./expression";
 import {
   AGENT_STEP_DEFAULT_SLOT,
+  type AgentSlot,
   type CompiledTemplate,
   flattenPhases,
   isLoopNode,
   type TemplateDoc,
+  type TemplateDocV3,
   type TemplateLimits,
   templateDocSchema,
   templateDocV2Schema,
+  templateDocV3Schema,
 } from "./template-schema";
 
 export class TemplateValidationError extends Error {
@@ -136,6 +139,56 @@ export function upgradeCompiledTemplate(raw: unknown): CompiledTemplate {
 }
 
 /**
+ * Pure v3 → v2 IR normalization: flatten the v3 authoring format into the
+ * CompiledTemplate shape the engine and API consume. Single-agent templates
+ * get one non-overridable `main` slot (mirroring upgradeV1ToV2); multi-agent
+ * templates pass `slots` through verbatim. v3 is source-only — the IR is the
+ * same v2 shape, so nothing downstream changes.
+ */
+function normalizeV3ToCompiled(doc: TemplateDocV3): CompiledTemplate {
+  const isSingleAgent = doc.faber !== undefined;
+  return {
+    apiVersion: "agrippa/v2",
+    kind: "OrchestrationTemplate",
+    metadata: {
+      slug: doc.slug,
+      scenario: doc.scenario,
+      name: doc.name,
+      description: doc.description,
+    },
+    spec: {
+      agents: isSingleAgent
+        ? {
+            [AGENT_STEP_DEFAULT_SLOT]: {
+              label: { en: "Agent", "zh-CN": "智能体" },
+              faber: doc.faber as string,
+              executor: EXECUTOR_DEFAULT_SENTINEL,
+              overridable: false,
+            },
+          }
+        : (doc.slots as Record<string, AgentSlot>),
+      inputs: doc.inputs,
+      workspace: doc.workspace,
+      resources: {
+        skills: doc.skills,
+        mcpServers: doc.mcpServers,
+        subagents: doc.subagents,
+      },
+      models: {
+        roles: doc.models,
+        allowProjectOverride: doc.allowProjectOverride,
+      },
+      phases: doc.phases,
+      limits: doc.limits,
+      outputs: {
+        artifacts: doc.outputs,
+        summary: doc.summary,
+      },
+    },
+  };
+}
+
+/**
  * Parse YAML → zod-validate (v1 or v2) → upgrade v1 to the v2 IR → semantic
  * checks → resolve promptFiles.
  * Throws TemplateValidationError listing every issue found (not just the first).
@@ -148,9 +201,18 @@ export function compileTemplate(sourceYaml: string, options: CompileOptions = {}
     throw new TemplateValidationError([`invalid YAML: ${(err as Error).message}`]);
   }
 
+  const version = (raw as { version?: unknown } | null)?.version;
   const apiVersion = (raw as { apiVersion?: unknown } | null)?.apiVersion;
   let doc: CompiledTemplate;
-  if (apiVersion === "agrippa/v1") {
+  if (version === 3) {
+    const parsed = templateDocV3Schema.safeParse(raw);
+    if (!parsed.success) {
+      throw new TemplateValidationError(
+        parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`),
+      );
+    }
+    doc = normalizeV3ToCompiled(parsed.data);
+  } else if (apiVersion === "agrippa/v1") {
     const parsed = templateDocSchema.safeParse(raw);
     if (!parsed.success) {
       throw new TemplateValidationError(
@@ -167,7 +229,9 @@ export function compileTemplate(sourceYaml: string, options: CompileOptions = {}
     }
     doc = parsed.data;
   } else {
-    throw new TemplateValidationError(["apiVersion must be 'agrippa/v1' or 'agrippa/v2'"]);
+    throw new TemplateValidationError([
+      "version must be 3, or apiVersion must be 'agrippa/v1' or 'agrippa/v2'",
+    ]);
   }
 
   const issues: string[] = [];

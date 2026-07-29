@@ -30,7 +30,7 @@ Browser (SPA) ──REST──▶ api ──singleton-keyed send──▶ pg-bos
 | `apps/api` | Hono: better-auth, RBAC middleware, registries, template publishing, task submission (grant + quota gating), run lifecycle, approvals, artifacts, SSE, audit log. Serves the built SPA in production. Never imports executors. |
 | `apps/worker` | pg-boss consumers around the engine; real deps: `GitWorkspaceManager` (clone with scrubbed credentials), `GitScmService` (branch/push/PR via provider REST — ADR-0011), `DbResourceMaterializer` (skills → disk, MCP + secrets), `DiskArtifactStore`, `DemoExecutor` (token-free, loop-round-aware), checkpoint-expiry handler, reconciliation sweeper. Registers executors and asserts them against core's `EXECUTOR_CATALOG` at boot. |
 | `apps/web` | React SPA: TanStack Router/Query, shadcn/ui (GitLab-style sidebar shell, indigo/violet tokens, light+dark), react-i18next. The load-bearing piece is `TaskParamsForm` — rendered from compiled template inputs, so new task types need zero frontend work. |
-| `templates/` | Builtin templates (6 × agrippa/v1 + the agrippa/v2 `swdev.requirement-delivery` flagship), shared subagent prompts, builtin skills. Compiled + published at boot, checksum-guarded. |
+| `templates/` | Builtin templates (6 × `agrippa/v3` + the `swdev.bug-localize-fix.yaml` v1 fixture), shared subagent prompts, builtin skills. Compiled + published at boot, checksum-guarded. Author new templates in v3 (ADR-0016); v1/v2 still accepted. |
 
 Dependency direction is enforced by `scripts/check-deps.ts` (runtime deps only).
 

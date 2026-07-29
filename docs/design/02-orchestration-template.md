@@ -1,10 +1,10 @@
-# 02 — Orchestration Template Format (`agrippa/v1` & `agrippa/v2`)
+# 02 — Orchestration Template Format (`agrippa/v1`, `agrippa/v2`, `agrippa/v3`)
 
 > Status: living · Last updated: 2026-07-23
 
 Templates are the contract between the scenario layer (auto-generated forms), the orchestration engine (phases, checkpoints, usage limits), and executors (single-step agent invocations). They are authored in **YAML**, compiled to **zod-validated JSON**, and published as **immutable versions** ([ADR-0006](../adr/0006-yaml-template-format.md)).
 
-Two authoring versions exist: `agrippa/v1` (linear phases, phase-level approvals) and `agrippa/v2` (agent slots, checkpoint steps, bounded loops, SCM actions — [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)). Both compile to one v2-shaped IR (`CompiledTemplate`); a pure `upgradeV1ToV2` runs at compile time and when loading stored compiled rows, so v1 templates keep working unchanged and no data migration ever happens.
+Three authoring versions exist: `agrippa/v3` (the recommended flat format — top-level `slug`/`scenario`/`faber`/`slots`/`models`/`limits`/`outputs`, no `metadata`/`spec` wrappers; [ADR-0016](../adr/0016-v3-flat-authoring-format.md)), `agrippa/v2` (agent slots, checkpoint steps, bounded loops, SCM actions — [ADR-0010](../adr/0010-agrippa-v2-slots-checkpoints-loops.md)), and `agrippa/v1` (linear phases, phase-level approvals — [ADR-0006](../adr/0006-yaml-template-format.md)). All three compile to one v2-shaped IR (`CompiledTemplate`); pure `upgradeV1ToV2` and `normalizeV3ToCompiled` run at compile time, and `upgradeCompiledTemplate` normalizes stored compiled rows, so v1/v3 templates keep working unchanged and no data migration ever happens. **Author new templates in v3.**
 
 ## Lifecycle
 
@@ -228,6 +228,43 @@ Decisions store a structured `response` on the checkpoint row, exposed as the `c
 ### System actions & new expression roots
 
 `kind: system` actions in v2: `workspace.checkout`, `git.branch`, `git.push`, `pr.open` (the latter three require a `readWrite` workspace and run through the platform SCM service — [ADR-0011](../adr/0011-codex-executor-and-platform-scm.md)). Each takes an interpolable `with:` map; `pr.open` must produce exactly one `link` artifact and appends the accepted-findings waiver section to the PR body. New context roots: `checkpoints.<id>`, `artifacts.<key>` (latest inline content), plus `run.workBranch` and `run.taskTitle`.
+
+## `agrippa/v3` flat authoring format ([ADR-0016](../adr/0016-v3-flat-authoring-format.md))
+
+v3 is a **source-only** flattening of the v2 format — the IR is identical, so the engine, API, and DB are unchanged. New templates should be authored in v3; v1/v2 remain accepted.
+
+Top level (no `apiVersion`/`kind`/`metadata`/`spec`):
+
+```yaml
+version: 3
+slug: <scenario-slug>.<template-slug>     # was metadata.slug
+scenario: <scenario slug>                  # was metadata.scenario
+name: { en: "...", zh-CN: "..." }          # both locales always
+description: { en: "...", zh-CN: "..." }
+
+faber: <faber-slug>                        # single-agent (was spec.faber)
+# OR, for multi-agent:
+slots:                                     # was spec.agents
+  <slot-id>: { label, faber, executor, overridable }
+
+inputs: [...]                              # was spec.inputs (unchanged)
+workspace: { repo, ref, access }           # was spec.workspace (unchanged)
+
+skills: [...]                              # was spec.resources.skills
+mcpServers: [...]                          # was spec.resources.mcpServers
+subagents: [...]                           # was spec.resources.subagents
+
+models:                                    # was spec.models.roles (wrapper removed)
+  <role>: { tier, fallback }
+allowProjectOverride: true                 # was spec.models.allowProjectOverride
+
+phases: [...]                              # was spec.phases (phase + loop nodes)
+limits: { maxTokens, maxDurationMinutes, perPhase }  # was spec.limits
+outputs: [{ key, kind, required }]         # was spec.outputs.artifacts (wrapper removed)
+summary: { from: <key> }                   # was spec.outputs.summary
+```
+
+A v3 template declares **exactly one** of `faber` or `slots` (root-level `z.refine`). Single-agent compiles to one non-overridable `main` slot, identical to the v1 upgrade. A v1 phase-level `approval:` must be written in v3 as a `kind: checkpoint` step at the head of the phase (the compiler does this automatically for v1; v3 authors do it explicitly). See `templates/pm/status-report.yaml` (single-agent) and `templates/swdev/requirement-delivery.yaml` (multi-agent) for working references.
 
 ## Full Example — `templates/swdev/bug-localize-fix.yaml`
 

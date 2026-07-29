@@ -1,105 +1,102 @@
-apiVersion: agrippa/v1
-kind: OrchestrationTemplate
-metadata:
-  slug: swdev.requirements-dev
-  scenario: software-development
-  name: { en: "Requirements Development", zh-CN: "需求开发" }
-  description:
-    en: "Turn a requirement into a clarified design and an implementation plan for the codebase."
-    zh-CN: "将需求转化为清晰的设计与针对代码库的实现方案。"
-spec:
-  faber: forge
+version: 3
+slug: swdev.requirements-dev
+scenario: software-development
+name: { en: "Requirements Development", zh-CN: "需求开发" }
+description:
+  en: "Turn a requirement into a clarified design and an implementation plan for the codebase."
+  zh-CN: "将需求转化为清晰的设计与针对代码库的实现方案。"
 
-  inputs:
-    - key: requirement
-      type: text
-      required: true
-      label: { en: "Requirement", zh-CN: "需求描述" }
-      ui: { widget: textarea, rows: 10 }
-    - key: repo
-      type: repoRef
-      required: true
-      label: { en: "Repository", zh-CN: "代码仓库" }
-    - key: branch
-      type: string
-      default: main
-      label: { en: "Base branch", zh-CN: "基准分支" }
+faber: forge
 
-  workspace:
-    repo: ${inputs.repo}
-    ref: ${inputs.branch}
-    access: readOnly
+inputs:
+  - key: requirement
+    type: text
+    required: true
+    label: { en: "Requirement", zh-CN: "需求描述" }
+    ui: { widget: textarea, rows: 10 }
+  - key: repo
+    type: repoRef
+    required: true
+    label: { en: "Repository", zh-CN: "代码仓库" }
+  - key: branch
+    type: string
+    default: main
+    label: { en: "Base branch", zh-CN: "基准分支" }
 
-  resources:
-    subagents:
-      - id: code-locator
-        description: "Explores the codebase to ground the design in reality"
-        promptFile: _shared/prompts/code-locator.md
-        tools: [Read, Grep, Glob]
+workspace:
+  repo: ${inputs.repo}
+  ref: ${inputs.branch}
+  access: readOnly
+
+subagents:
+  - id: code-locator
+    description: "Explores the codebase to ground the design in reality"
+    promptFile: _shared/prompts/code-locator.md
+    tools: [Read, Grep, Glob]
+    model: { role: analysis }
+
+models:
+  planning: { tier: strong, fallback: [balanced] }
+  analysis: { tier: balanced }
+  fast: { tier: fast }
+
+phases:
+  - id: clarify
+    name: { en: "Clarify", zh-CN: "澄清" }
+    steps:
+      - id: setup
+        kind: system
+        action: workspace.checkout
+      - id: clarify-requirement
+        kind: agent
         model: { role: analysis }
+        instructions: |
+          Analyze the requirement against the codebase. List ambiguities with your
+          recommended resolution for each, affected areas of the code, and the
+          acceptance criteria you infer.
+          --- REQUIREMENT ---
+          ${inputs.requirement}
+        produces: [clarification-notes]
 
-  models:
-    roles:
-      planning: { tier: strong, fallback: [balanced] }
-      analysis: { tier: balanced }
-      fast: { tier: fast }
+  - id: design
+    name: { en: "Design", zh-CN: "设计" }
+    steps:
+      - id: draft-design
+        kind: agent
+        model: { role: planning }
+        subagents: [code-locator]
+        instructions: |
+          Produce a design proposal grounded in the existing code: approach,
+          affected modules with file references, data/API changes, alternatives
+          considered, and risks.
+        produces: [design-proposal]
 
-  phases:
-    - id: clarify
-      name: { en: "Clarify", zh-CN: "澄清" }
-      steps:
-        - id: setup
-          kind: system
-          action: workspace.checkout
-        - id: clarify-requirement
-          kind: agent
-          model: { role: analysis }
-          instructions: |
-            Analyze the requirement against the codebase. List ambiguities with your
-            recommended resolution for each, affected areas of the code, and the
-            acceptance criteria you infer.
-            --- REQUIREMENT ---
-            ${inputs.requirement}
-          produces: [clarification-notes]
+  - id: plan
+    name: { en: "Plan", zh-CN: "规划" }
+    steps:
+      - id: approve-design
+        kind: checkpoint
+        checkpoint:
+          kind: approval
+          title: { en: "Approve the design proposal", zh-CN: "确认设计方案" }
+          present: [design-proposal]
+          timeout: 48h
+          onTimeout: cancel
+      - id: implementation-plan
+        kind: agent
+        model: { role: planning }
+        instructions: |
+          Turn the approved design into an ordered implementation plan:
+          steps with file-level detail, test strategy, and verification criteria
+          a reviewer can check.
+        produces: [implementation-plan]
 
-    - id: design
-      name: { en: "Design", zh-CN: "设计" }
-      steps:
-        - id: draft-design
-          kind: agent
-          model: { role: planning }
-          subagents: [code-locator]
-          instructions: |
-            Produce a design proposal grounded in the existing code: approach,
-            affected modules with file references, data/API changes, alternatives
-            considered, and risks.
-          produces: [design-proposal]
+limits:
+  maxTokens: 1200000
+  maxDurationMinutes: 40
 
-    - id: plan
-      name: { en: "Plan", zh-CN: "规划" }
-      approval:
-        checkpoint: approve-design
-        title: { en: "Approve the design proposal", zh-CN: "确认设计方案" }
-        present: [design-proposal]
-        timeout: 48h
-        onTimeout: cancel
-      steps:
-        - id: implementation-plan
-          kind: agent
-          model: { role: planning }
-          instructions: |
-            Turn the approved design into an ordered implementation plan:
-            steps with file-level detail, test strategy, and verification criteria
-            a reviewer can check.
-          produces: [implementation-plan]
-
-  limits:
-    maxTokens: 1200000
-    maxDurationMinutes: 40
-
-  outputs:
-    artifacts:
-      - { key: clarification-notes, kind: markdown, required: false }
-      - { key: design-proposal, kind: markdown, required: true }
-      - { key: implementation-plan, kind: markdown, required: true }
-    summary: { from: implementation-plan }
+outputs:
+  - { key: clarification-notes, kind: markdown, required: false }
+  - { key: design-proposal, kind: markdown, required: true }
+  - { key: implementation-plan, kind: markdown, required: true }
+summary: { from: implementation-plan }

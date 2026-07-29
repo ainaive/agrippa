@@ -10,44 +10,46 @@ The editor's version list lets you **open any historical version** (editing an o
 
 ## A minimal template, annotated
 
+The v3 flat format is the recommended way to author templates; v1/v2 sources are still accepted. See [docs/design/02](../../design/02-orchestration-template.md) for the full spec.
+
 ```yaml
-apiVersion: agrippa/v1
-kind: OrchestrationTemplate
-metadata:
-  slug: swdev.my-task            # <scenario-prefix>.<name>, must match the template head
-  scenario: software-development # must match the head's scenario
-  name: { en: "My Task", zh-CN: "我的任务" }        # BOTH locales, always
-  description: { en: "...", zh-CN: "……" }
-spec:
-  faber: forge                   # default preset agent
+version: 3
+slug: swdev.my-task            # <scenario-prefix>.<name>, must match the template head
+scenario: software-development # must match the head's scenario
+name: { en: "My Task", zh-CN: "我的任务" }        # BOTH locales, always
+description: { en: "...", zh-CN: "……" }
 
-  inputs:                        # ⇒ auto-generates the submission form
-    - key: goal
-      type: text                 # string|text|number|boolean|select|repoRef|docRef
-      required: true
-      label: { en: "Goal", zh-CN: "目标" }
-      ui: { widget: textarea, rows: 6 }
+faber: forge                   # default preset agent (single-agent)
 
-  models:
-    roles:                       # roles → tiers; resolved to granted models at submit
-      planning: { tier: strong, fallback: [balanced] }
-      fast: { tier: fast }
+inputs:                        # ⇒ auto-generates the submission form
+  - key: goal
+    type: text                 # string|text|number|boolean|select|repoRef|docRef
+    required: true
+    label: { en: "Goal", zh-CN: "目标" }
+    ui: { widget: textarea, rows: 6 }
 
-  phases:
-    - id: work
-      name: { en: "Work", zh-CN: "执行" }
-      steps:
-        - id: do-it
-          kind: agent
-          model: { role: planning }
-          instructions: |
-            Accomplish this goal: ${inputs.goal}
-          produces: [result]     # artifact keys this step must create
+models:                        # roles → tiers; resolved to granted models at submit
+  planning: { tier: strong, fallback: [balanced] }
+  fast: { tier: fast }
 
-  outputs:
-    artifacts:
-      - { key: result, kind: markdown, required: true }   # run fails without it
-    summary: { from: result }
+phases:
+  - id: work
+    name: { en: "Work", zh-CN: "执行" }
+    steps:
+      - id: do-it
+        kind: agent
+        model: { role: planning }
+        instructions: |
+          Accomplish this goal: ${inputs.goal}
+        produces: [result]     # artifact keys this step must create
+
+limits:
+  maxTokens: 600000
+  maxDurationMinutes: 40
+
+outputs:
+  - { key: result, kind: markdown, required: true }   # run fails without it
+summary: { from: result }
 ```
 
 ## Inputs → form widgets
@@ -67,9 +69,9 @@ spec:
 ## Execution plan
 
 - **Phases** group steps for the timeline and are the attachment point for approvals. **Steps run sequentially.**
-- Step kinds: `agent` (one agent invocation — instructions, `model: {role}`, optional `subagents`/`skills`/`mcpServers` drawn from `spec.resources`) and `system` (platform action; currently `workspace.checkout`).
+- Step kinds: `agent` (one agent invocation — instructions, `model: {role}`, optional `subagents`/`skills`/`mcpServers` drawn from the template's declared `skills`/`mcpServers`/`subagents`) and `system` (platform action: `workspace.checkout`, `git.branch`, `git.push`, `pr.open` — v2).
 - **Workspace**: declare `workspace: { repo: ${inputs.myRepo}, ref: ..., access: readOnly|readWrite }` and add a `kind: system, action: workspace.checkout` step where the clone should happen.
-- **Control flow** — deliberately small: `when: <expression>` (skip the step when falsy), `retry: { max: N }` (same-step retries), `onFailure: continue` (record the failure, move on). There are no loops — that's a governance decision (ADR-0006).
+- **Control flow** — deliberately small: `when: <expression>` (skip the step when falsy), `retry: { max: N }` (same-step retries), `onFailure: continue` (record the failure, move on). Multi-agent templates declare `slots:` instead of `faber:`; bounded loops (`kind: loop`) and checkpoint steps (`kind: checkpoint`) are available in v3/v2 (ADR-0010); unbounded/general loops remain a governance decision (ADR-0006).
 - **Optional integrations**: mark an MCP server `optional: true` in `resources`, then gate steps with `requires: { mcpServers: [name] }` — the step is skipped, not failed, when it's unavailable.
 
 ## Expressions
@@ -81,12 +83,20 @@ spec:
 ```yaml
 phases:
   - id: build
-    approval:                          # gate BEFORE this phase runs
-      checkpoint: approve-plan
-      title: { en: "Approve the plan", zh-CN: "确认方案" }
-      present: [draft-plan]            # artifacts shown to the approver
-      timeout: 48h                     # then: cancel | reject | approve
-      onTimeout: cancel
+    steps:
+      - id: approve-plan                # gate BEFORE the build runs (was phase-level approval:)
+        kind: checkpoint
+        checkpoint:
+          kind: approval
+          title: { en: "Approve the plan", zh-CN: "确认方案" }
+          present: [draft-plan]         # artifacts shown to the approver
+          timeout: 48h                  # then: cancel | reject | approve
+          onTimeout: cancel
+      - id: do-build
+        kind: agent
+        model: { role: planning }
+        instructions: "build it"
+        produces: [built]
 
 limits:
   maxTokens: 1200000
@@ -95,7 +105,7 @@ limits:
     build: { maxTokens: 600000 }
 ```
 
-Artifacts: agents write files to `.agrippa/artifacts/<key>` in the workspace (the platform tells them to, listing each expected key); `patch`-kind artifacts are generated automatically from the workspace diff. Every `produces:` key must be declared in `outputs.artifacts`, and every `required: true` artifact must be produced by some step — the compiler checks the wiring, the engine enforces delivery.
+Artifacts: agents write files to `.agrippa/artifacts/<key>` in the workspace (the platform tells them to, listing each expected key); `patch`-kind artifacts are generated automatically from the workspace diff. Every `produces:` key must be declared in `outputs`, and every `required: true` artifact must be produced by some step — the compiler checks the wiring, the engine enforces delivery.
 
 ## Validation checklist
 

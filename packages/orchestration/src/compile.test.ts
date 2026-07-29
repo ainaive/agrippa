@@ -415,3 +415,102 @@ describe("template compiler (agrippa/v2)", () => {
     expect(issuesOf(source).join()).toContain("unknown artifact 'nonexistent'");
   });
 });
+
+// ── agrippa/v3 flat authoring format ─────────────────────────────────────────
+
+describe("v3 format", () => {
+  it("rejects v3 with both faber and slots", () => {
+    const source = `
+version: 3
+slug: test.both
+scenario: test
+name: { en: "Bad", zh-CN: "坏" }
+description: { en: "Bad", zh-CN: "坏" }
+faber: navigator
+slots:
+  main: { label: { en: "X", zh-CN: "X" }, faber: navigator, executor: default }
+models: { a: { tier: fast } }
+phases:
+  - id: p
+    name: { en: "P", zh-CN: "P" }
+    steps:
+      - { id: s, kind: agent, model: { role: a }, instructions: "do stuff", produces: [] }
+outputs:
+  - { key: out, kind: markdown, required: true }
+`;
+    expect(issuesOf(source).join()).toContain("faber");
+  });
+
+  it("rejects v3 with neither faber nor slots", () => {
+    const source = `
+version: 3
+slug: test.none
+scenario: test
+name: { en: "Bad", zh-CN: "坏" }
+description: { en: "Bad", zh-CN: "坏" }
+models: { a: { tier: fast } }
+phases:
+  - id: p
+    name: { en: "P", zh-CN: "P" }
+    steps:
+      - { id: s, kind: agent, model: { role: a }, instructions: "do stuff", produces: [] }
+outputs:
+  - { key: out, kind: markdown, required: true }
+`;
+    expect(issuesOf(source).join()).toContain("faber");
+  });
+
+  it("rejects a source with neither version nor apiVersion", () => {
+    const source = `
+slug: test.no-version
+scenario: test
+name: { en: "T", zh-CN: "T" }
+description: { en: "T", zh-CN: "T" }
+faber: navigator
+models: { a: { tier: fast } }
+phases:
+  - id: p
+    name: { en: "P", zh-CN: "P" }
+    steps:
+      - { id: s, kind: agent, model: { role: a }, instructions: "x", produces: [] }
+outputs:
+  - { key: out, kind: markdown, required: true }
+`;
+    expect(issuesOf(source).join()).toContain("version");
+  });
+
+  it("compiles a v3 single-agent template", () => {
+    const source = readFileSync(path.join(TEMPLATES_DIR, "pm/status-report.yaml"), "utf8");
+    const { compiled } = compileTemplate(source, { resolveFile });
+    expect(compiled.metadata.slug).toBe("pm.status-report");
+    expect(compiled.spec.agents).toHaveProperty("main");
+    expect(compiled.spec.models.roles).toHaveProperty("analysis");
+    expect(compiled.spec.outputs.artifacts).toHaveLength(2);
+  });
+
+  it("upgradeCompiledTemplate is idempotent on v3-compiled output", () => {
+    const source = readFileSync(path.join(TEMPLATES_DIR, "pm/status-report.yaml"), "utf8");
+    const { compiled } = compileTemplate(source, { resolveFile });
+    expect(upgradeCompiledTemplate(compiled)).toBe(compiled);
+  });
+
+  it("compiles a v3 multi-agent template", () => {
+    const source = readFileSync(
+      path.join(TEMPLATES_DIR, "swdev/requirement-delivery.yaml"),
+      "utf8",
+    );
+    const { compiled } = compileTemplate(source, { resolveFile });
+    expect(compiled.metadata.slug).toBe("swdev.requirement-delivery");
+    expect(Object.keys(compiled.spec.agents)).toEqual(["implementer", "reviewer"]);
+    const loops = compiled.spec.phases.filter((n) => "kind" in n && n.kind === "loop");
+    expect(loops.length).toBeGreaterThan(0);
+  });
+
+  it("v1 template still works alongside v3", () => {
+    const v1Source = readFileSync(path.join(TEMPLATES_DIR, "swdev/bug-localize-fix.yaml"), "utf8");
+    const v1Compiled = compileTemplate(v1Source, { resolveFile });
+    expect(v1Compiled.compiled.metadata.slug).toBe("swdev.bug-localize-fix");
+    expect(Object.keys(v1Compiled.compiled.spec.agents)).toEqual(["main"]);
+    expect(upgradeCompiledTemplate(v1Compiled.compiled)).toBe(v1Compiled.compiled);
+  });
+});
