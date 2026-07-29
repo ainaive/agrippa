@@ -4,15 +4,16 @@
 #
 # 迁移要点（AtomGit Action 仍处测试阶段，部分能力需等价替代）：
 #   1. 工作流目录 .github/workflows/ → .gitcode/workflows/
-#   2. 采用 AtomGit Action 特有的 stages 维度（mapping 形式）：阶段间串行、阶段内 job 并行
-#      verify_stage（lint/类型/依赖方向/模板/commitlint）→ build_stage（test 与 docker 镜像并行）
-#   3. runs-on 标签改为三段式 {os},{arch},{flavor}，如 [ubuntu-latest, x64, small]
+#   2. 用 stages 维度（单 stage，ci + docker 两 job 并行），结构贴近 GitHub 原版
+#   3. runs-on 标签改为三段式 {os},{arch},{flavor}，如 [ubuntu-latest, x64, medium]
 #   4. 上下文 github.* → atomgit.*；系统变量 GITHUB_* → ATOMGIT_*（用 $ATOMGIT_PATH 注入 bun）
 #   5. AtomGit Action 不支持 services: 服务容器，改用 docker run 启动 postgres/redis
 #   6. Runner 镜像未预装 Bun，改用官方安装脚本；用 cache 插件缓存 bun 全局缓存
-#   7. checkout 未文档化 fetch-depth，故用 git fetch --unshallow 兜底取完整历史
+#   7. 私有仓库：checkout 用 PAT 密钥 secrets.GIT_TOKEN 鉴权（内置 ATOMGIT_TOKEN 不行），
+#      ref 取 PR 合并提交或推送 sha
 #   8. commitlint PR 范围：AtomGit 上下文无 base.sha，只有 base.ref，故先 fetch base 再取 head.sha
 #   9. permissions 作用域为 repository（非 contents/packages）
+#   10. bun install 走国内镜像 registry.npmmirror.com（仅工作流内写 .npmrc，不污染仓库）
 
 name: CI
 
@@ -25,17 +26,19 @@ permissions:
   repository: read
 
 stages:
-  verify_stage:
-    name: 检查
+  ci_stage:
+    name: CI
     jobs:
-      verify:
-        name: Lint and checks
-        runs-on: [ubuntu-latest, x64, small]
+      ci:
+        name: Lint, test and build
+        runs-on: [ubuntu-latest, x64, medium]
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
+          REDIS_URL: redis://localhost:6379
         steps:
           - name: Checkout
             uses: checkout
             with:
-              # 私有仓库：内置 ATOMGIT_TOKEN 无法鉴权 git 拉取，改用 PAT 密钥 GIT_TOKEN
               ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
               token: ${{ secrets.GIT_TOKEN }}
 
@@ -56,7 +59,10 @@ stages:
               echo "$HOME/.bun/bin" >> "$ATOMGIT_PATH"
 
           - name: Install
-            run: bun install --frozen-lockfile
+            timeout-minutes: 10
+            run: |
+              [ -f .npmrc ] || echo "registry=https://registry.npmmirror.com" > .npmrc
+              bun install --frozen-lockfile
 
           - name: Lint and format (biome)
             run: bunx biome ci .
@@ -79,39 +85,6 @@ stages:
           - name: Commitlint (pushed commit)
             if: ${{ atomgit.event_name == 'push' }}
             run: bunx commitlint --last
-
-  build_stage:
-    name: 构建与测试
-    jobs:
-      test:
-        name: Test and build
-        runs-on: [ubuntu-latest, x64, medium]
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
-          REDIS_URL: redis://localhost:6379
-        steps:
-          - name: Checkout
-            uses: checkout
-            with:
-              # 私有仓库：内置 ATOMGIT_TOKEN 无法鉴权 git 拉取，改用 PAT 密钥 GIT_TOKEN
-              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
-              token: ${{ secrets.GIT_TOKEN }}
-
-          - name: Cache Bun store
-            uses: cache
-            with:
-              path: ~/.bun/install/cache
-              key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-              restore-keys: |
-                bun-${{ runner.os }}-
-
-          - name: Install Bun
-            run: |
-              curl -fsSL https://bun.sh/install | bash
-              echo "$HOME/.bun/bin" >> "$ATOMGIT_PATH"
-
-          - name: Install
-            run: bun install --frozen-lockfile
 
           - name: Start Postgres
             run: |
@@ -148,7 +121,6 @@ stages:
           - name: Checkout
             uses: checkout
             with:
-              # 私有仓库：内置 ATOMGIT_TOKEN 无法鉴权 git 拉取，改用 PAT 密钥 GIT_TOKEN
               ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
               token: ${{ secrets.GIT_TOKEN }}
           - name: Build api image
