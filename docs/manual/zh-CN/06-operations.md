@@ -122,6 +122,8 @@ Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode �
 
 Janus 并非通过 `sudo` 获得 root。它的服务启用了 `NoNewPrivileges`，该标志会被每个流水线步骤继承且子进程无法解除，因此 setuid 在其中永久失效——无论 sudoers 规则怎么写，`sudo` 都无法工作。流水线改为启动一个 oneshot systemd 单元 `agrippa-deploy@<sha>.service`，由一条 polkit 规则授权，且该规则仅限这一个单元与 `start` 这一个动作；部署日志写入 `/var/log/agrippa-deploy/<sha>.log`，再由流水线回读打印。参见 [`infra/janus/README.md`](https://github.com/ainaive/agrippa/blob/main/infra/janus/README.md)。
 
+打印出来的命令会显式指定 Compose 项目名（`-p`）。它们本就是要粘贴到一个全新 shell 中执行的，若不指定，就会根据工作树里的 Compose 文件解析项目名——如果这次部署是在 `COMPOSE_PROJECT_NAME` 下运行的，那解析出的将是另一套栈，而非刚刚失败的这一套。
+
 因此脚本会在每次部署前做一次 `pg_dump`，存放于 `/var/lib/agrippa-deploy`（目录 `0700`、转储文件 `0600`，保留最近 5 份——它们是生产数据的完整副本，而本机上还运行着非特权的 CI 用户）。任何失败都会打印还原步骤，而不是让人误以为数据库也一并还原了：
 
 ```sh

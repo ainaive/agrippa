@@ -123,6 +123,8 @@ Two things it will not do. It **only deploys commits reachable from the `deploy`
 
 Janus does not reach root through `sudo`. Its service runs with `NoNewPrivileges`, which every pipeline step inherits and which makes setuid a permanent no-op, so `sudo` cannot work there whatever the sudoers rule says. The pipeline instead starts a oneshot systemd unit, `agrippa-deploy@<sha>.service`, authorized by a polkit rule scoped to that one unit and the `start` verb alone; the deploy log is written to `/var/log/agrippa-deploy/<sha>.log` and printed back into the pipeline. See [`infra/janus/README.md`](https://github.com/ainaive/agrippa/blob/main/infra/janus/README.md).
 
+The printed commands name the compose project explicitly (`-p`). They are meant to be pasted into a fresh shell, and without that they would resolve the project from the compose file in the tree — a different stack than the one that just failed, if the deploy ran under `COMPOSE_PROJECT_NAME`.
+
 The script therefore takes a `pg_dump` before every deploy, into `/var/lib/agrippa-deploy` (mode `0700`, dumps `0600`, last 5 retained — they are a full copy of production and the host also runs an unprivileged CI user). On any failure it prints the restore procedure rather than implying the schema came back:
 
 ```sh

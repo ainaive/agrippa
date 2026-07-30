@@ -50,6 +50,15 @@ KEEP_DUMPS="${KEEP_DUMPS:-5}"
 
 COMPOSE_FILE="$APP_DIR/infra/docker-compose.yml"
 ENV_FILE="$APP_DIR/infra/env/.env"
+# Name the project explicitly rather than letting compose resolve it from the
+# file's `name:`. The restore procedure printed on failure is copy-pasted by an
+# operator into a shell that may not share this one's environment, and without
+# -p it resolves against whatever `name:` the tree happens to carry — which is
+# the WRONG STACK if this deploy was run with COMPOSE_PROJECT_NAME set. Found by
+# running the restore drill against a throwaway stack: the printed commands
+# would have dropped the production database.
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:/{print $2; exit}' "$COMPOSE_FILE")}"
+[ -n "$COMPOSE_PROJECT" ] || die "could not determine the compose project name from $COMPOSE_FILE"
 LAST_GOOD="$STATE_DIR/last-good"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -70,7 +79,7 @@ umask 077
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 
-compose() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+compose() { docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 
 # Only one deploy at a time. Janus's `concurrency:` already serializes webhook
 # runs, but a manual invocation bypasses Janus entirely — and two concurrent
@@ -159,7 +168,7 @@ restore_hint() {
 The database was NOT rolled back. If $short_sha applied a migration, restore it:
 
   DUMP=$dump
-  C="docker compose -f $COMPOSE_FILE --env-file $ENV_FILE"
+  C="docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE --env-file $ENV_FILE"
 
   \$C stop api worker                       # dropdb needs zero connections
   \$C exec -T postgres dropdb -U agrippa --if-exists agrippa

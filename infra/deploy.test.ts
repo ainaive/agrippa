@@ -159,7 +159,10 @@ beforeEach(async () => {
 
   // a real repo: reachability is enforced with git, so it must be genuine
   await mkdir(path.join(appDir, "infra", "env"), { recursive: true });
-  writeFileSync(path.join(appDir, "infra", "docker-compose.yml"), "services:\n  api:\n");
+  writeFileSync(
+    path.join(appDir, "infra", "docker-compose.yml"),
+    "name: agrippa\nservices:\n  api:\n",
+  );
   writeFileSync(path.join(appDir, "infra", "env", ".env"), "AGRIPPA_PORT=127.0.0.1:3001\n");
   git(appDir, "init", "-q", "-b", "main");
   git(appDir, "add", "-A");
@@ -355,6 +358,31 @@ describe("infra/deploy.sh", () => {
     // the archive holds, so it cannot remove tables a failed migration added.
     // (The surrounding prose explains that, so match the command, not the word.)
     expect(r.stderr).not.toContain("-d agrippa --clean");
+  }, 20_000);
+
+  it("names the compose project in the printed restore commands", async () => {
+    // The restore procedure is copy-pasted by an operator into a shell that does
+    // not share the deploy's environment. Without -p, `docker compose -f <file>`
+    // resolves the project from that file's `name:` — so the commands act on
+    // whatever stack the tree names, not the one that just failed.
+    //
+    // Found by drilling the restore against a throwaway stack on the live host:
+    // the deploy ran under COMPOSE_PROJECT_NAME, and the printed commands would
+    // have dropped the PRODUCTION database instead of the drill's. Every step
+    // reported success while targeting the wrong stack, which is the worst
+    // possible shape for a recovery procedure.
+    const r = await run({ STUB_UP_RC: "1" });
+    expect(r.stderr).toContain("-p agrippa");
+    // and the deploy's own invocations are pinned the same way
+    expect(r.log).toContain("-p agrippa");
+  }, 20_000);
+
+  it("honours COMPOSE_PROJECT_NAME in both the commands and the hint", async () => {
+    // A deploy run against a non-default project must not print commands that
+    // silently target the default one.
+    const r = await run({ COMPOSE_PROJECT_NAME: "agrippadrill", STUB_UP_RC: "1" });
+    expect(r.stderr).toContain("-p agrippadrill");
+    expect(r.log).toContain("-p agrippadrill");
   }, 20_000);
 
   it("detaches HEAD instead of dragging the checked-out branch along", async () => {

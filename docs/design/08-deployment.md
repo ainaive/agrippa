@@ -69,6 +69,10 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
   deploy would force-move that branch, and a stray `git pull` would advance the tree past the
   running images — compose config, `.env` defaults and Dockerfiles are read from that tree, so
   manual compose commands would then use config that does not match what is running.
+  Every compose invocation, and the restore procedure it prints, names the project explicitly
+  (`-p`): the procedure is copy-pasted into a shell that does not share the deploy's environment,
+  and without it the commands resolve against whatever `name:` the tree carries — the wrong stack
+  entirely if the deploy ran under `COMPOSE_PROJECT_NAME`.
   Verification covers **both** services: the api's compose healthcheck, and a fresh
   `executor_registrations` heartbeat proving the worker registered its executors. Rollback restores
   the previous commit's *code and config*, not the database — the api migrates on boot before it is
