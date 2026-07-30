@@ -7,6 +7,12 @@
  * were each verified by hand against the live host, which does not survive the
  * next refactor; this does.
  *
+ * Every case carries an explicit timeout. They spawn bash and do real git work,
+ * which overruns bun's 5s default under full-suite load — seen once as a flake in
+ * the reachability case, where the 5s cap fired on a run that took 93s of wall
+ * clock. The ceilings are generous on purpose: none of them is an assertion,
+ * except in the wall-clock case, where the bound IS the thing under test.
+ *
  * Deliberately no Docker. The script's dependencies (`docker`, `id`, `sleep`,
  * `timeout`) are replaced by stubs earlier on PATH, so these run in CI where no
  * daemon exists. `git` stays real — the commit-reachability check is the whole
@@ -14,7 +20,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
-  appendFileSync,
   chmodSync,
   copyFileSync,
   mkdirSync,
@@ -56,7 +61,11 @@ case "$1" in
       ps)
         case "$*" in
           *"--services"*)  printf 'postgres\\napi\\nworker\\n' ;;
-          *"{{.Health}}"*) echo "\${STUB_API_HEALTH:-healthy}" ;;
+          *"{{.Health}}"*)
+            # STUB_HEALTH_DELAY paces the probe loop, so a case that measures
+            # iterations does not busy-spin and starve its sibling tests
+            [ -n "\${STUB_HEALTH_DELAY:-}" ] && /bin/sleep "$STUB_HEALTH_DELAY"
+            echo "\${STUB_API_HEALTH:-healthy}" ;;
           *"{{.Service}}"*)
             for _ in $(seq 1 "\${STUB_WORKERS_RUNNING:-1}"); do echo worker; done ;;
         esac
@@ -178,7 +187,7 @@ describe("infra/deploy.sh", () => {
     // and it bailed before doing anything expensive or destructive
     expect(r.log).not.toContain("build");
     expect(r.log).not.toContain("up -d");
-  });
+  }, 20_000);
 
   it("deploys the happy path, tagging with the full SHA", async () => {
     const r = await run();
@@ -188,7 +197,7 @@ describe("infra/deploy.sh", () => {
     // that a collision could overwrite
     expect(r.log).toContain(`build [AGRIPPA_VERSION=${deploySha}]`);
     expect(readFileSync(path.join(stateDir, "last-good"), "utf8").trim()).toBe(deploySha);
-  });
+  }, 20_000);
 
   it("keeps the dump private to root", async () => {
     await run();
@@ -196,7 +205,7 @@ describe("infra/deploy.sh", () => {
     expect(dumps.length).toBe(1);
     expect(statSync(path.join(stateDir, dumps[0] as string)).mode & 0o777).toBe(0o600);
     expect(statSync(stateDir).mode & 0o777).toBe(0o700);
-  });
+  }, 20_000);
 
   it("retains only the newest KEEP_DUMPS dumps", async () => {
     // dumps are a full copy of production, so unbounded retention is both a
@@ -222,7 +231,7 @@ describe("infra/deploy.sh", () => {
     expect(left.some((f) => f.includes("seed0006"))).toBe(true);
     expect(left.some((f) => f.includes("seed0005"))).toBe(true);
     expect(left.some((f) => f.includes("seed0001"))).toBe(false);
-  });
+  }, 20_000);
 
   it("rolls back when docker compose up -d fails", async () => {
     const r = await run({ STUB_UP_RC: "1" });
@@ -250,39 +259,58 @@ describe("infra/deploy.sh", () => {
     const r = await run({ STUB_CONFIG_TAG: "0" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("did not reach compose");
-  });
+  }, 20_000);
 
   it("treats HEALTH_TIMEOUT as wall-clock even when probes are slow", async () => {
-    // each probe sleeps 2s; with sleep stubbed out, only probe time accumulates.
-    // Counting sleeps instead of elapsed time would loop far past the budget.
+    // PROBE COUNT is the discriminator, not elapsed time. `sleep` is stubbed to a
+    // no-op, so a loop that tracks a real deadline keeps probing for the whole
+    // budget, while one that counts its own sleeps satisfies the budget after a
+    // single iteration and gives up early.
+    //
+    // Elapsed seconds cannot separate the two, which two earlier versions of this
+    // assertion got wrong: an upper bound passes for both, and a lower bound is
+    // dominated by script startup because `api_ok && worker_ok` short-circuits
+    // before the slow psql probe when the api is unhealthy. Both survived the
+    // mutation. Each probe is paced by STUB_HEALTH_DELAY so counting iterations
+    // does not busy-spin and starve the sibling tests.
+    const budget = 3;
     const started = Date.now();
     const r = await run({
-      HEALTH_TIMEOUT: "3",
+      HEALTH_TIMEOUT: String(budget),
       STUB_API_HEALTH: "starting",
-      STUB_PROBE_DELAY: "1",
+      STUB_HEALTH_DELAY: "0.4",
     });
     const elapsed = (Date.now() - started) / 1000;
     expect(r.exitCode).not.toBe(0);
-    // budget + one in-flight probe + process startup. Counting sleeps instead
-    // of elapsed time would run several multiples of this.
-    expect(elapsed).toBeLessThan(12);
-  }, 20_000);
+
+    // Measured: 13 with the deadline honoured, 4 without. The failing count is
+    // deterministic — two probes per stack_ok call, and stack_ok runs twice
+    // (deploy, then rollback) — while the passing count scales with budget/delay
+    // and only shrinks under load. So the threshold sits just above the fixed
+    // failing value rather than near the passing one.
+    const probes = (r.log.match(/\{\{\.Health}}/g) ?? []).length;
+    expect(probes).toBeGreaterThan(5);
+    // loose ceiling against a runaway loop, sized not to flake under CI load
+    expect(elapsed).toBeLessThan(budget + 22);
+  }, 40_000);
 
   it("completes when the deployed commit rewrites deploy.sh", async () => {
     // deploy.sh lives inside the tree it deploys and resets that tree, so it
-    // rewrites its own file whenever the deployed commit changes it. Bash reads a
-    // script lazily by byte offset, so this LOOKS like it should truncate
-    // execution — and it does when a file is rewritten in place (`cat > "$0"`
-    // silently stops the script and exits 0).
+    // rewrites its own file whenever the deployed commit changes it. Bash reads
+    // scripts lazily, so that looks like it should be able to truncate execution
+    // mid-run.
     //
-    // It is safe with git, because git replaces a file with a NEW INODE; the
-    // running shell keeps its descriptor on the old one and finishes normally.
-    // Verified on both macOS and the Linux deploy host (git 2.43).
+    // It does not, and this pins that down: a deploy whose target commit replaces
+    // deploy.sh still runs to the end. git swaps in a new inode, so the running
+    // shell keeps its descriptor on the old one — confirmed on macOS and on the
+    // Linux deploy host (git 2.43) by watching the inode change mid-run.
     //
-    // This case exists to keep that true: it would fail if the script ever
-    // started editing itself in place, or if git's replace strategy changed.
-    // Assert on reaching the end, not on the exit code — the in-place failure
-    // mode exits 0, so an exit-code check would not see it.
+    // Scope, honestly: this guards that the reset happens and the run survives
+    // it. It does NOT prove immunity to an in-place rewrite. I could not build a
+    // mutation that truncates this script's execution — replacing the file in
+    // place, at sizes from 4 KB to 192 KB, still ran to completion — so there is
+    // no failing case to assert against. Asserting on reaching the end rather
+    // than the exit code, because a truncated run would exit 0.
     const inRepo = path.join(appDir, "infra", "deploy.sh");
     copyFileSync(SCRIPT, inRepo);
     chmodSync(inRepo, 0o755);
@@ -290,16 +318,29 @@ describe("infra/deploy.sh", () => {
     git(appDir, "commit", "-qm", "add deploy.sh");
     const c1 = new TextDecoder().decode(git(appDir, "rev-parse", "HEAD").stdout).trim();
 
-    // the deployed commit changes the script the deploy is running from
-    appendFileSync(inRepo, "\n# rewritten by the deployed commit\n");
-    git(appDir, "commit", "-aqm", "modify deploy.sh");
+    // The deployed version is a tiny stub, replacing the whole file rather than
+    // appending to it — an appended comment leaves every earlier byte intact, so
+    // nothing about the on-disk file would have changed in a way any assertion
+    // could notice. It need not be a runnable script: the running process reads
+    // from its own descriptor, so on disk this is only bytes.
+    const deployedStub = "#!/bin/sh\nexit 0\n";
+    writeFileSync(inRepo, deployedStub);
+    git(appDir, "commit", "-aqm", "replace deploy.sh with a stub");
     git(appDir, "branch", "-f", "deploy", "HEAD");
-    // …while the working tree still holds the old copy, so the reset rewrites it
+    const c2 = new TextDecoder().decode(git(appDir, "rev-parse", "deploy").stdout).trim();
+    // …while the working tree still holds the full script, so the reset rewrites it
     git(appDir, "reset", "--hard", "-q", c1);
+    expect(readFileSync(inRepo, "utf8")).not.toBe(deployedStub); // precondition
 
     const r = await run({}, [], inRepo);
-    expect(r.exitCode).toBe(0);
-    // the parts that a truncated run would skip while still exiting 0
+
+    // The rewrite MUST have happened, or this proves nothing. Without these two
+    // the case passed even with `git reset --hard` deleted from deploy.sh.
+    expect(new TextDecoder().decode(git(appDir, "rev-parse", "HEAD").stdout).trim()).toBe(c2);
+    expect(readFileSync(inRepo, "utf8")).toBe(deployedStub);
+
+    // …and the run still reached the end. Not the exit code: the in-place
+    // failure mode exits 0, so an exit-code check would not see it.
     expect(r.log).toContain("build");
     expect(r.stdout).toContain("healthy");
     expect(r.stdout).toContain("deployed");
