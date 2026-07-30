@@ -79,7 +79,7 @@ Documented in `infra/env/.env.example`; the full set:
 | `APT_MIRROR` | build | Closer Debian mirror for the worker image build |
 | `WORKER_SLOTS` | worker | Concurrent runs per worker (default 2) |
 | `WORKSPACE_ROOT` | worker | Per-run checkout directory (default `/work/runs` in the image) |
-| `ARTIFACT_STORAGE_ROOT` | worker | Large-artifact storage (>64 KB; smaller ones live in Postgres) |
+| `ARTIFACT_STORAGE_ROOT` | worker | Large-artifact storage (>64 KB; smaller ones — and checkpoint-driving ones up to 2 MiB — live in Postgres) |
 | `AGRIPPA_TEMPLATES_DIR` | api, worker | Builtin templates location (set in the images) |
 | `AGRIPPA_WEB_DIST` | api | SPA dist directory to serve (set in the api image) |
 | `AGRIPPA_MIGRATE_ON_BOOT` | api | `0` disables boot-time migrate/seed |
@@ -126,7 +126,7 @@ $C up -d api worker                  # picks up the new DATABASE_URL
 ## Backup — three things
 
 1. The **database** — Compose: the `pgdata` volume; VM: `pg_dump agrippa` — schedule per your policy.
-2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata and small artifacts survive in Postgres).
+2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata, small artifacts, and checkpoint-driving artifacts survive in Postgres).
 3. **`AGRIPPA_SECRET_KEY`** — without it, every stored git token and MCP credential is unrecoverable. Redis needs no backup.
 
 ## Upgrades & scaling

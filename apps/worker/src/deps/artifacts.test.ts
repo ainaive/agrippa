@@ -120,6 +120,54 @@ describe("DiskArtifactStore path containment", () => {
     }
   });
 
+  it("inlines past 64 KB when the caller raises the inline limit", async () => {
+    const ws = freshWorkspace();
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    const content = "r".repeat(100 * 1024); // 100 KB — over the default threshold
+    writeFileSync(path.join(ws, ".agrippa/artifacts/report.json"), content);
+
+    // without the override, the same file goes to disk
+    const onDisk = await store.store(
+      "run-1",
+      "report",
+      "json",
+      { path: ".agrippa/artifacts/report.json" },
+      ws,
+    );
+    expect(onDisk.inline).toBeNull();
+    expect(onDisk.storageRef).not.toBeNull();
+
+    // with it (the engine's interaction-artifact path), it inlines whole
+    const inlined = await store.store(
+      "run-2",
+      "report",
+      "json",
+      { path: ".agrippa/artifacts/report.json" },
+      ws,
+      { inlineLimitBytes: 2 * 1024 * 1024 },
+    );
+    expect(inlined.inline).toBe(content);
+    expect(inlined.storageRef).toBeNull();
+
+    // engine-provided inline sources honor the same override
+    const inlineSource = await store.store("run-3", "report", "json", { inline: content }, ws, {
+      inlineLimitBytes: 2 * 1024 * 1024,
+    });
+    expect(inlineSource.inline).toBe(content);
+    expect(inlineSource.storageRef).toBeNull();
+  });
+
+  it("spills to disk when content exceeds even a raised inline limit", async () => {
+    const ws = freshWorkspace();
+    const content = "x".repeat(200 * 1024);
+    const stored = await store.store("run-1", "report", "json", { inline: content }, ws, {
+      inlineLimitBytes: 128 * 1024,
+    });
+    expect(stored.inline).toBeNull();
+    expect(stored.storageRef).not.toBeNull();
+    expect(stored.size).toBe(200 * 1024);
+  });
+
   it("falls back to the default cap when the size env is not a valid number", async () => {
     const ws = freshWorkspace();
     await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });

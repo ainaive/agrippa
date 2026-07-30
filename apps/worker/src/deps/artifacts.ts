@@ -47,7 +47,11 @@ async function resolveContainedPath(workspaceDir: string, rel: string): Promise<
   return real;
 }
 
-/** ≤64 KB inline in Postgres; larger content on the artifacts volume. */
+/**
+ * ≤64 KB inline in Postgres; larger content on the artifacts volume. The
+ * engine raises the inline threshold per call (opts.inlineLimitBytes) for
+ * checkpoint-driving artifacts, which must inline whole to survive resume.
+ */
 export class DiskArtifactStore implements ArtifactStore {
   async store(
     runId: string,
@@ -55,13 +59,15 @@ export class DiskArtifactStore implements ArtifactStore {
     kind: ArtifactKind,
     source: { inline?: unknown; path?: string },
     workspaceDir: string,
+    opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact> {
+    const inlineLimit = opts?.inlineLimitBytes ?? INLINE_LIMIT;
     // engine-provided inline content (patch diffs, links) is always text
     if (source.inline !== undefined) {
       const content =
         typeof source.inline === "string" ? source.inline : JSON.stringify(source.inline);
       const mime = kind === "json" ? "application/json" : "text/markdown";
-      return this.storeText(runId, key, content, mime);
+      return this.storeText(runId, key, content, mime, inlineLimit);
     }
     if (!source.path) return EMPTY;
 
@@ -78,8 +84,8 @@ export class DiskArtifactStore implements ArtifactStore {
 
     // small text can inline in Postgres; `file`-kind (possibly binary) and any
     // large artifact stream straight to disk byte-exact, never fully buffered
-    if (kind !== "file" && size <= INLINE_LIMIT) {
-      return this.storeText(runId, key, await file.text(), mime);
+    if (kind !== "file" && size <= inlineLimit) {
+      return this.storeText(runId, key, await file.text(), mime, inlineLimit);
     }
     const storageRef = await this.writeToDisk(runId, key, file);
     return { inline: null, storageRef, size, mime };
@@ -90,11 +96,12 @@ export class DiskArtifactStore implements ArtifactStore {
     key: string,
     content: string,
     mime: string | null,
+    inlineLimit: number,
   ): Promise<StoredArtifact> {
     const size = Buffer.byteLength(content);
     if (size === 0) return EMPTY;
     if (size > maxArtifactSize()) throw new ArtifactTooLargeError(key, size);
-    if (size <= INLINE_LIMIT) return { inline: content, storageRef: null, size, mime };
+    if (size <= inlineLimit) return { inline: content, storageRef: null, size, mime };
     const storageRef = await this.writeToDisk(runId, key, content);
     return { inline: null, storageRef, size, mime };
   }

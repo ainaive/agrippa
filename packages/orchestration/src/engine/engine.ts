@@ -1,5 +1,6 @@
 import {
   type CheckpointStoredResponse,
+  INTERACTION_ARTIFACT_MAX_BYTES,
   isCredentialGatedExecutor,
   isTerminalRunStatus,
   type ProviderCatalog,
@@ -1595,12 +1596,17 @@ class RunEngine {
     row: StepRow,
     event: { key: string; kind: string; path?: string; inline?: unknown },
   ): Promise<void> {
+    // a checkpoint-driving artifact must inline whole in Postgres (resume
+    // re-reads it from the DB row), so it gets the larger allowance sized to
+    // dominate any schema-valid payload
+    const interactionKind = this.interactionSources.get(event.key);
     const stored = await this.deps.artifacts.store(
       this.run.id,
       event.key,
       event.kind as never,
       { inline: event.inline, path: event.path },
       this.workspaceDir,
+      interactionKind ? { inlineLimitBytes: INTERACTION_ARTIFACT_MAX_BYTES } : undefined,
     );
     // a missing OR empty source produced no bytes — don't create a zero-byte row
     // (and don't mark the key produced, so a required-but-empty artifact still
@@ -1610,12 +1616,11 @@ class RunEngine {
     // schema NOW, while the producing step's attempt is still open — so a
     // malformed report fails the step (template retry/onFailure apply) instead
     // of silently auto-passing the gate later
-    const interactionKind = this.interactionSources.get(event.key);
     if (interactionKind) {
       if (stored.inline === null) {
         throw new StepFailed(`interaction artifact '${event.key}' exceeds the inline limit`, {
           code: "contract_violation",
-          message: `artifact '${event.key}' is too large to drive its checkpoint (${stored.size} bytes; inline limit applies)`,
+          message: `artifact '${event.key}' is too large to drive its checkpoint (${stored.size} bytes; limit ${INTERACTION_ARTIFACT_MAX_BYTES})`,
         });
       }
       const parsed =

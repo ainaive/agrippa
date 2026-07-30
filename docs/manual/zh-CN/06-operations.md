@@ -78,7 +78,7 @@ docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env 
 | `APT_MIRROR` | 构建期 | 构建 worker 镜像时使用的就近 Debian 镜像源 |
 | `WORKER_SLOTS` | worker | 单 worker 并发执行数（默认 2） |
 | `WORKSPACE_ROOT` | worker | 每次执行的检出目录（镜像内默认 `/work/runs`） |
-| `ARTIFACT_STORAGE_ROOT` | worker | 大产出物存储（>64 KB；更小的存于 Postgres） |
+| `ARTIFACT_STORAGE_ROOT` | worker | 大产出物存储（>64 KB；更小的以及驱动检查点的产出物（上限 2 MiB）存于 Postgres） |
 | `AGRIPPA_TEMPLATES_DIR` | api、worker | 内置模板位置（镜像内已设置） |
 | `AGRIPPA_WEB_DIST` | api | 要托管的 SPA 构建目录（api 镜像内已设置） |
 | `AGRIPPA_MIGRATE_ON_BOOT` | api | 设为 `0` 关闭启动时迁移/植入 |
@@ -125,7 +125,7 @@ $C up -d api worker                  # 使其读取新的 DATABASE_URL
 ## 备份——三样东西
 
 1. **数据库** —— Compose：`pgdata` 卷；虚拟机：`pg_dump agrippa` ——按你的策略定期执行。
-2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后超过 64 KB 的下载不可恢复（元数据与小产出物在 Postgres 中仍在）。
+2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后超过 64 KB 的下载不可恢复（元数据、小产出物以及驱动检查点的产出物在 Postgres 中仍在）。
 3. **`AGRIPPA_SECRET_KEY`** ——没有它，所有已存的 git 令牌和 MCP 凭证都无法解密。Redis 无需备份。
 
 ## 升级与扩容
