@@ -1,0 +1,32 @@
+# Janus deploy pipeline — runs on the Agrippa host itself.
+#
+# Deliberately not .janus/ci.yml (the default path): the GitCode webhook selects
+# this file with ?pipeline_path=.janus/deploy.yml, which leaves ci.yml free if
+# Janus ever runs tests for this repo too, rather than conflating deploy and CI.
+#
+# Trigger is the `deploy` branch, not main: main takes doc-only commits, and
+# this is the only environment — going live should be a deliberate
+# fast-forward, and rolling back is moving the branch.
+#
+# Janus checks the repo out into its own workspace as the `janus` user; that
+# checkout is only the trigger vehicle. The deploy acts on /opt/agrippa, which
+# is root-owned and holds the untracked .env. See docs/design/08-deployment.md
+# for why the tree is not janus-writable.
+name: deploy
+
+on:
+  push:
+    branches: [deploy]
+
+# Serialize deploys. infra/deploy.sh also takes a flock, which covers manual
+# runs that never reach Janus; this stops the queue forming inside the script.
+concurrency:
+  group: deploy-${{ branch }}
+
+jobs:
+  deploy:
+    steps:
+      # Passing the exact SHA makes the deploy deterministic: it applies the
+      # commit that triggered this run, not whatever the branch tip has moved
+      # to since. sudo is a single NOPASSWD rule for this one script.
+      - run: sudo /opt/agrippa/infra/deploy.sh ${{ sha }}

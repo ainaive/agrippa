@@ -111,6 +111,31 @@ A registered executor still needs a credential for the provider a step resolves 
 
 ## Upgrades & scaling
 
+Compose deployments use **`sudo infra/deploy.sh [<commit>]`**: it fetches from GitCode, builds images tagged with the deployed commit, starts them, waits on `/healthz`, and **rolls back to the previous tag** if the new one doesn't come up. Run it by hand any time; pushing to the `deploy` branch runs the same script automatically via Janus (`.janus/deploy.yml`).
+
+It always rebuilds, deliberately: the SPA and the API are baked into the api image, so a bare `git pull && docker compose up -d` restarts the **old** code and looks like it worked. Build cache keeps a docs-only deploy cheap. A `flock` serializes concurrent deploys, and only the current and previous image tags are kept (each pair is ~4 GB).
+
+Two things it will not do. It **only deploys commits reachable from the `deploy` branch** — an arbitrary SHA is refused, which is what keeps the root-level sudo rule meaningful. And **rollback does not revert the database**: the API applies migrations on boot before it is healthy, and some are irreversible.
+
+The script therefore takes a `pg_dump` before every deploy, into `/var/lib/agrippa-deploy` (mode `0700`, dumps `0600`, last 5 retained — they are a full copy of production and the host also runs an unprivileged CI user). On any failure it prints the restore procedure rather than implying the schema came back:
+
+```sh
+# the deploy prints the dump path it took; assign it rather than pasting a placeholder
+DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
+C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
+
+$C stop api worker                       # dropdb needs zero connections
+$C exec -T postgres dropdb -U agrippa --if-exists agrippa
+$C exec -T postgres createdb -U agrippa agrippa
+$C exec -T postgres pg_restore -U agrippa -d agrippa \
+    --exit-on-error --single-transaction < "$DUMP"
+$C start api worker                      # only once the restore succeeded
+```
+
+Drop and recreate rather than `pg_restore --clean`: `--clean` only drops what the archive contains, so tables the failed migration *added* would survive, and can block the restore through dependencies. `--single-transaction` with `--exit-on-error` means a partial restore rolls back instead of leaving a half-populated database. Stopping the app first is not optional — `dropdb` refuses while the api and worker hold connections.
+
+A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** a worker has registered its executors. The replica count matters because the worker registers before it starts consuming the queue, so a fresh registration alone would pass a worker that died during startup. Residual gap: a worker that stays up but wedges after registering is not detected.
+
 Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 
 ### Upgrading from a deployment created before the compose project was named

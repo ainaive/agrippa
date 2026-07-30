@@ -110,6 +110,31 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 
 ## 升级与扩容
 
+Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode 拉取代码、构建以所部署提交号打标签的镜像、启动、等待 `/healthz`，若新版本起不来则**回滚到上一个标签**。可随时手动执行；向 `deploy` 分支推送时，Janus 会通过 `.janus/deploy.yml` 自动运行同一个脚本。
+
+它每次都会重新构建，这是刻意为之：SPA 与 API 都在构建镜像时打包进 api 镜像，因此单纯的 `git pull && docker compose up -d` 会重启**旧**代码，且看起来像是成功了。构建缓存让纯文档变更的部署依然很快。脚本用 `flock` 串行化并发部署，并且只保留当前与上一个镜像标签（每组约 4 GB）。
+
+有两点它不会做。它**只部署能从 `deploy` 分支追溯到的提交**——任意 SHA 会被拒绝，这正是那条 root 级 sudo 规则得以成立的前提。以及**回滚不会还原数据库**：API 在启动、尚未健康之前就会执行迁移，其中部分不可逆。
+
+因此脚本会在每次部署前做一次 `pg_dump`，存放于 `/var/lib/agrippa-deploy`（目录 `0700`、转储文件 `0600`，保留最近 5 份——它们是生产数据的完整副本，而本机上还运行着非特权的 CI 用户）。任何失败都会打印还原步骤，而不是让人误以为数据库也一并还原了：
+
+```sh
+# 部署失败时会打印所用的转储文件路径；请把它赋给变量，而不是照抄占位符
+DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
+C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
+
+$C stop api worker                       # dropdb 要求没有任何连接
+$C exec -T postgres dropdb -U agrippa --if-exists agrippa
+$C exec -T postgres createdb -U agrippa agrippa
+$C exec -T postgres pg_restore -U agrippa -d agrippa \
+    --exit-on-error --single-transaction < "$DUMP"
+$C start api worker                      # 仅在还原成功之后
+```
+
+要先删库重建，而不是用 `pg_restore --clean`：`--clean` 只会删除归档中存在的对象，因此失败迁移**新增**的表会残留下来，并可能因依赖关系导致还原失败。`--single-transaction` 配合 `--exit-on-error` 可保证部分还原会整体回滚，而不是留下一个半成品数据库。先停掉应用不是可选项——api 与 worker 仍持有连接时 `dropdb` 会拒绝执行。
+
+只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**已有 worker 注册了执行器时，部署才算成功。副本数之所以重要，是因为 worker 在开始消费队列之前就会先注册，仅凭一条新注册记录会放过一个启动途中就挂掉的 worker。已知残留缺口：worker 起来了但注册后卡死，这种情况检测不到。
+
 拉取新镜像后 `docker compose up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
 
 ### 从「compose 项目未命名」时期的部署升级
