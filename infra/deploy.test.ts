@@ -82,6 +82,7 @@ case "$1" in
             # on every developer machine.
             i=0
             while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do echo worker; i=$((i + 1)); done ;;
+          *"-q api"*) echo "apictr1" ;;
           *"-q"*)
             i=0
             while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do
@@ -292,6 +293,47 @@ describe("infra/deploy.sh", () => {
     expect(statSync(src).mode & 0o777).toBe(0o644);
   }, 20_000);
 
+  it("refuses to share a state directory with another compose project", async () => {
+    // STATE_DIR holds last-good and the dump retention window — per-stack state
+    // in a path that is not derived from the project. A drill or staging copy
+    // run under COMPOSE_PROJECT_NAME without also overriding STATE_DIR would
+    // overwrite production's rollback target and evict its dumps. That is how
+    // the restore drill was actually run; only a hand-passed STATE_DIR saved it.
+    const first = await run();
+    expect(first.exitCode).toBe(0);
+    const goodBefore = readFileSync(path.join(stateDir, "last-good"), "utf8");
+    const dumpsBefore = [...new Bun.Glob("pgdump-*.dump").scanSync(stateDir)].length;
+    expect(readFileSync(path.join(stateDir, "project"), "utf8").trim()).toBe("agrippa");
+
+    const second = await run({ COMPOSE_PROJECT_NAME: "agrippadrill" });
+    expect(second.exitCode).not.toBe(0);
+    expect(second.stderr).toContain("agrippa"); // names the owner
+    expect(second.stderr).toContain("agrippadrill"); // and the intruder
+    expect(second.stderr).toContain("STATE_DIR"); // and the way out
+
+    // The assertions that matter: the harm, not the message. Both runs deploy
+    // the same commit, so last-good alone cannot discriminate — a new dump is
+    // what would have evicted a recovery point, and the guard sits before the
+    // dump precisely so this count cannot move.
+    expect([...new Bun.Glob("pgdump-*.dump").scanSync(stateDir)].length).toBe(dumpsBefore);
+    expect(readFileSync(path.join(stateDir, "last-good"), "utf8")).toBe(goodBefore);
+    expect(readFileSync(path.join(stateDir, "project"), "utf8").trim()).toBe("agrippa");
+  }, 40_000);
+
+  it("takes the first-deploy rollback target from this project's api container", async () => {
+    // With no last-good yet, deploy.sh falls back to the running api's image
+    // tag. That lookup used a hardcoded `agrippa-api-1`, so a second stack's
+    // first deploy inspected PRODUCTION's container and adopted its tag as its
+    // own rollback target.
+    const r = await run({ COMPOSE_PROJECT_NAME: "agrippadrill" });
+    expect(r.exitCode).toBe(0);
+    const inspects = r.log.split("\n").filter((l) => l.startsWith("inspect "));
+    expect(inspects.length).toBeGreaterThan(0);
+    // resolved through `compose ps -q api`, which carries -p
+    expect(inspects.some((l) => l.includes("apictr1"))).toBe(true);
+    expect(inspects.some((l) => l.includes("agrippa-api-1"))).toBe(false);
+  }, 20_000);
+
   it("retains only the newest KEEP_DUMPS dumps", async () => {
     // dumps are a full copy of production, so unbounded retention is both a
     // disk and an exposure problem. Seed more than the cap with distinct mtimes
@@ -485,7 +527,14 @@ describe("infra/deploy.sh", () => {
     const r = await run({ STUB_UP_RC: "1" });
     expect(r.stderr).toContain("-p agrippa");
 
-    const drill = await run({ COMPOSE_PROJECT_NAME: "agrippadrill", STUB_UP_RC: "1" });
+    // Its own STATE_DIR, because the ownership guard now refuses to let a second
+    // project share the first's recovery state — which is what an operator
+    // running a second stack has to do anyway.
+    const drill = await run({
+      COMPOSE_PROJECT_NAME: "agrippadrill",
+      STATE_DIR: path.join(dir, "state-drill"),
+      STUB_UP_RC: "1",
+    });
     expect(drill.stderr).toContain("-p agrippadrill");
   }, 40_000);
 

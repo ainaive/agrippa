@@ -69,6 +69,11 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
   deploy would force-move that branch, and a stray `git pull` would advance the tree past the
   running images — compose config, `.env` defaults and Dockerfiles are read from that tree, so
   manual compose commands would then use config that does not match what is running.
+  `STATE_DIR` holds per-stack recovery state (`last-good` and the dump retention window) but is not
+  derived from the project, so it carries an ownership marker: a second stack run under
+  `COMPOSE_PROJECT_NAME` without its own `STATE_DIR` is refused rather than allowed to overwrite the
+  first's rollback target. The lock is deliberately *not* per-project — image tags carry no project,
+  so concurrent deploys of different stacks really do race on them.
   Every compose invocation, and the restore procedure it prints, names the project explicitly
   (`-p`): the procedure is copy-pasted into a shell that does not share the deploy's environment,
   and without it the commands resolve against whatever `name:` the tree carries — the wrong stack

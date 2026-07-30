@@ -94,11 +94,37 @@ umask 022
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 
+# last-good and the dump retention window are per-STACK state, but STATE_DIR is
+# not derived from the project — so a second stack (a restore drill, a staging
+# copy) run under COMPOSE_PROJECT_NAME without also overriding STATE_DIR would
+# write its rollback target over production's and evict production's dumps
+# through KEEP_DUMPS. That is exactly how the restore drill was run; it was safe
+# only because STATE_DIR was passed by hand.
+#
+# Refuse rather than auto-derive a path. An invented directory starts with no
+# last-good, and the first-deploy fallback below would then adopt whatever the
+# OTHER stack is running as this one's rollback target — quiet and subtly wrong,
+# where this is loud and stopped. Placed before the lock, the dump and
+# last-good, so a refusal touches nothing.
+state_owner="$STATE_DIR/project"
+if [ -s "$state_owner" ]; then
+  [ "$(cat "$state_owner")" = "$COMPOSE_PROJECT" ] ||
+    die "$STATE_DIR holds recovery state for project '$(cat "$state_owner")', not \
+'$COMPOSE_PROJECT'. Give this stack its own: STATE_DIR=/var/lib/agrippa-$COMPOSE_PROJECT"
+else
+  printf '%s\n' "$COMPOSE_PROJECT" > "$state_owner"
+fi
+
 compose() { docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 
 # Only one deploy at a time. Janus's `concurrency:` already serializes webhook
 # runs, but a manual invocation bypasses Janus entirely — and two concurrent
 # builds racing on the same image tags corrupt each other's rollback target.
+#
+# Deliberately NOT per-project, unlike STATE_DIR above: image tags are
+# ghcr.io/ainaive/agrippa-{api,worker}:$sha regardless of project, so two stacks
+# deploying at once really do race on the same tags. Scoping this lock would
+# reintroduce the race it exists to prevent.
 exec 9>"$LOCK_FILE"
 flock -w "$LOCK_WAIT" 9 || die "another deploy holds $LOCK_FILE (waited ${LOCK_WAIT}s)"
 
@@ -144,7 +170,14 @@ else
   # rollback target, but HEAD *is* the configuration currently deployed — record
   # it too, so a first-deploy failure restores config instead of leaving the
   # failed commit's compose file in place.
-  previous="$(docker inspect --format '{{.Config.Image}}' agrippa-api-1 2>/dev/null | sed 's/.*://')" || previous=""
+  # Via compose, which carries -p: a hardcoded `agrippa-api-1` made a second
+  # stack's first deploy inspect PRODUCTION's container and adopt its image tag.
+  # (The old form's `|| previous=""` was also dead — the pipeline's status is
+  # sed's, and sed succeeds even when docker inspect does not.)
+  api_cid="$(compose ps -q api 2>/dev/null | head -n1)"
+  previous=""
+  [ -n "$api_cid" ] &&
+    previous="$(docker inspect --format '{{.Config.Image}}' "$api_cid" 2>/dev/null | sed 's/.*://')"
   [ -n "$previous" ] || previous="latest"
   previous_sha="$(git rev-parse --verify HEAD 2>/dev/null || true)"
 fi
