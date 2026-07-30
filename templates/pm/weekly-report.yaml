@@ -1,0 +1,154 @@
+version: 3
+slug: pm.weekly-report
+scenario: project-management
+name: { en: "Weekly Report", zh-CN: "项目周报" }
+description:
+  en: "Compose a modular weekly project report from user-provided notes, with a review gate before publishing."
+  zh-CN: "基于用户提供的素材，组合生成模块化项目周报，发布前需审核确认。"
+
+faber: navigator
+
+inputs:
+  - key: dateRange
+    type: string
+    required: true
+    label: { en: "Reporting period", zh-CN: "报告周期" }
+    help:
+      en: "Date range for this report, e.g. 2026.07.18-2026.07.24"
+      zh-CN: "本次报告覆盖的日期范围，如 2026.07.18-2026.07.24"
+  - key: rawNotes
+    type: text
+    required: true
+    label: { en: "Raw notes & materials", zh-CN: "原始素材与备注" }
+    help:
+      en: "Write the key facts, progress, issues, and plans for each section you want included. The agent will structure and polish it."
+      zh-CN: "按板块写下关键进展、问题、计划等原始素材，agent 会帮你结构化整理。"
+    ui: { widget: textarea, rows: 12 }
+  - key: density
+    type: select
+    default: comprehensive
+    label: { en: "Report density", zh-CN: "报告详略" }
+    options:
+      - { value: comprehensive, label: { en: "Comprehensive", zh-CN: "详尽" } }
+      - { value: brief, label: { en: "Brief", zh-CN: "精简" } }
+      - { value: highlights, label: { en: "Highlights only", zh-CN: "仅要点" } }
+  - key: includeRisks
+    type: boolean
+    default: true
+    label: { en: "Include: Risks & Issues", zh-CN: "包含：风险与问题" }
+  - key: includeMetrics
+    type: boolean
+    default: false
+    label: { en: "Include: Key Metrics", zh-CN: "包含：关键指标" }
+  - key: includeRetrospective
+    type: boolean
+    default: false
+    label: { en: "Include: Retrospective", zh-CN: "包含：回顾总结" }
+  - key: includeUpcoming
+    type: boolean
+    default: true
+    label: { en: "Include: Upcoming Plans", zh-CN: "包含：下周计划" }
+  - key: includeDecisions
+    type: boolean
+    default: false
+    label: { en: "Include: Key Decisions", zh-CN: "包含：重要决策" }
+  - key: includeDependencies
+    type: boolean
+    default: false
+    label: { en: "Include: External Dependencies", zh-CN: "包含：外部依赖与协作" }
+  - key: language
+    type: select
+    default: zh-CN
+    label: { en: "Report language", zh-CN: "报告语言" }
+    options:
+      - { value: zh-CN, label: { en: "Chinese", zh-CN: "中文" } }
+      - { value: en, label: { en: "English", zh-CN: "英文" } }
+      - { value: bilingual, label: { en: "Bilingual", zh-CN: "双语" } }
+
+models:
+  writing: { tier: balanced, fallback: [fast] }
+  fast: { tier: fast }
+
+phases:
+  - id: draft
+    name: { en: "Draft", zh-CN: "起草" }
+    steps:
+      - id: draft-report
+        kind: agent
+        model: { role: writing }
+        instructions: |
+          Generate a structured weekly project report based on the raw notes below.
+
+          Reporting period: ${inputs.dateRange}
+          Report density: ${inputs.density}
+          Language: ${inputs.language}
+
+          Section configuration:
+          - "Progress" (本周进展) — ALWAYS include
+          - "Risks & Issues" (风险与问题) — ${inputs.includeRisks}
+          - "Key Metrics" (关键指标) — ${inputs.includeMetrics}
+          - "Retrospective" (回顾总结) — ${inputs.includeRetrospective}
+          - "Upcoming Plans" (下周计划) — ${inputs.includeUpcoming}
+          - "Key Decisions" (重要决策) — ${inputs.includeDecisions}
+          - "External Dependencies" (外部依赖与协作) — ${inputs.includeDependencies}
+
+          Rules:
+          - Write in ${inputs.language} language
+          - For enabled sections: structure the raw notes into clear, well-organized content
+          - For disabled sections: omit them entirely from the output
+          - If the raw notes are thin for an enabled section, say so plainly; never invent content
+          - Use clear headers (## level), bullets for scanability
+          - Density "${inputs.density}":
+            - "comprehensive": thorough coverage with supporting detail and context
+            - "brief": concise bullet points, minimal prose
+            - "highlights": one-liners per topic, executive-summary style
+
+          --- RAW NOTES ---
+          ${inputs.rawNotes}
+        produces: [report-draft]
+
+  - id: review
+    name: { en: "Review", zh-CN: "审核" }
+    steps:
+      - id: approve-draft
+        kind: checkpoint
+        checkpoint:
+          kind: approval
+          title:
+            en: "Review the weekly report draft"
+            zh-CN: "审核周报草稿"
+          present: [report-draft]
+          timeout: 48h
+          onTimeout: cancel
+
+  - id: publish
+    name: { en: "Publish", zh-CN: "发布" }
+    steps:
+      - id: finalize-report
+        kind: agent
+        model: { role: fast }
+        instructions: |
+          Finalize the weekly report based on the draft and any reviewer feedback.
+
+          Reviewer comment (empty if approved without changes):
+          ${checkpoints.approve-draft.comment}
+
+          Produce the final, polished report:
+          - Clean headers, consistent formatting, no placeholder text
+          - Order: Progress → Risks & Issues → Key Metrics → Retrospective → Upcoming Plans → Key Decisions → External Dependencies
+          - Title: "Weekly Report — ${inputs.dateRange}"
+          - Email-friendly structure: clear title line, summary paragraph, then scannable sections
+          - If bilingual was requested, include both languages
+
+          The approved draft:
+          ${artifacts.report-draft}
+        produces: [weekly-report]
+
+limits:
+  maxTokens: 400000
+  maxDurationMinutes: 30
+
+outputs:
+  - { key: report-draft, kind: markdown, required: false }
+  - { key: weekly-report, kind: markdown, required: true }
+summary: { from: weekly-report }
