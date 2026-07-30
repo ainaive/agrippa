@@ -4,11 +4,13 @@
 #
 # 迁移要点（AtomGit Action 仍处测试阶段，部分能力需等价替代）：
 #   1. 工作流目录 .github/workflows/ → .gitcode/workflows/
-#   2. 用 stages 维度（单 stage，ci + docker 两 job 并行），结构贴近 GitHub 原版
+#   2. 用 stages 维度（单 stage、单 ci job）；不在本流水线构建 docker 镜像或
+#      启动 postgres/redis —— 镜像构建在 release.yml，带 DB 的全量测试在
+#      GitHub Actions（.github/workflows/ci.yml，含 services 容器）
 #   3. runs-on 改用自有 runner 标签 [self-hosted, os=ubuntu, arch=x64]（替代官方 ubuntu-latest 三段式）
 #   4. 上下文 github.* → atomgit.*；系统变量 GITHUB_* → ATOMGIT_*（用 $ATOMGIT_PATH 注入 bun）
-#   5. AtomGit Action 不支持 services: 服务容器，改用 docker run 启动 postgres/redis；
-#      runner 无 docker 时经 docker info 预检自动跳过，集成测试在无 DB 时自跳过
+#   5. 不启动 postgres/redis：集成测试需 DB，留给 GitHub Actions 全量跑；本流水线
+#      的 bun test 在无 DB 时集成套件自跳过，仅跑单元测试（快速预合并信号）
 #   6. Runner 镜像未预装 Bun，且 bun.sh 在国内不可达，改从 npmmirror 二进制镜像下载；用 cache 插件缓存 bun 全局缓存
 #   7. 私有仓库：checkout 用 PAT 密钥 secrets.GIT_TOKEN 鉴权（内置 ATOMGIT_TOKEN 不行），
 #      ref 取 PR 合并提交或推送 sha
@@ -33,9 +35,6 @@ stages:
       ci:
         name: Lint, test and build
         runs-on: [self-hosted, os=ubuntu, arch=x64]
-        env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
-          REDIS_URL: redis://localhost:6379
         steps:
           - name: Checkout
             uses: checkout
@@ -94,67 +93,8 @@ stages:
             if: ${{ atomgit.event_name == 'push' }}
             run: bun x commitlint --last
 
-          - name: Check docker availability
-            id: docker_check
-            continue-on-error: true
-            run: |
-              if docker info >/dev/null 2>&1; then
-                echo "available=true" >> "$ATOMGIT_OUTPUT"
-              else
-                echo "available=false" >> "$ATOMGIT_OUTPUT"
-              fi
-
-          - name: Start Postgres
-            if: ${{ steps.docker_check.outputs.available == 'true' }}
-            run: |
-              docker run -d --name postgres \
-                -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-                -e POSTGRES_DB=agrippa_test -p 5432:5432 \
-                --health-cmd="pg_isready" --health-interval=5s --health-timeout=3s --health-retries=10 \
-                postgres:17
-              for i in $(seq 1 30); do
-                docker exec postgres pg_isready -U postgres && break
-                sleep 1
-              done
-              docker exec postgres pg_isready -U postgres
-
-          - name: Start Redis
-            if: ${{ steps.docker_check.outputs.available == 'true' }}
-            run: |
-              docker run -d --name redis -p 6379:6379 redis:7
-              for i in $(seq 1 30); do
-                docker exec redis redis-cli ping && break
-                sleep 1
-              done
-              docker exec redis redis-cli ping
-
           - name: Test
             run: bun test
 
           - name: Build
             run: bun run build
-
-      docker:
-        name: Docker images
-        runs-on: [self-hosted, os=ubuntu, arch=x64]
-        steps:
-          - name: Checkout
-            uses: checkout
-            with:
-              ref: ${{ atomgit.event.pull_request.merge_commit_sha || atomgit.sha }}
-              token: ${{ secrets.GIT_TOKEN }}
-          - name: Check docker availability
-            id: docker_check
-            continue-on-error: true
-            run: |
-              if docker info >/dev/null 2>&1; then
-                echo "available=true" >> "$ATOMGIT_OUTPUT"
-              else
-                echo "available=false" >> "$ATOMGIT_OUTPUT"
-              fi
-          - name: Build api image
-            if: ${{ steps.docker_check.outputs.available == 'true' }}
-            run: docker build -f infra/Dockerfile.api -t agrippa-api:ci .
-          - name: Build worker image
-            if: ${{ steps.docker_check.outputs.available == 'true' }}
-            run: docker build -f infra/Dockerfile.worker -t agrippa-worker:ci .
