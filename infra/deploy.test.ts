@@ -14,6 +14,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+  appendFileSync,
+  chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -88,8 +91,9 @@ let binDir: string;
 let stubLog: string;
 let deploySha: string;
 
-const run = async (scenario: Scenario = {}, args: string[] = []) => {
-  const proc = Bun.spawn(["bash", SCRIPT, ...args], {
+/** `script` defaults to the repo's copy; the self-rewrite case runs the fixture's. */
+const run = async (scenario: Scenario = {}, args: string[] = [], script = SCRIPT) => {
+  const proc = Bun.spawn(["bash", script, ...args], {
     env: {
       ...process.env,
       PATH: `${binDir}:${process.env.PATH}`,
@@ -262,6 +266,43 @@ describe("infra/deploy.sh", () => {
     // budget + one in-flight probe + process startup. Counting sleeps instead
     // of elapsed time would run several multiples of this.
     expect(elapsed).toBeLessThan(12);
+  }, 20_000);
+
+  it("completes when the deployed commit rewrites deploy.sh", async () => {
+    // deploy.sh lives inside the tree it deploys and resets that tree, so it
+    // rewrites its own file whenever the deployed commit changes it. Bash reads a
+    // script lazily by byte offset, so this LOOKS like it should truncate
+    // execution — and it does when a file is rewritten in place (`cat > "$0"`
+    // silently stops the script and exits 0).
+    //
+    // It is safe with git, because git replaces a file with a NEW INODE; the
+    // running shell keeps its descriptor on the old one and finishes normally.
+    // Verified on both macOS and the Linux deploy host (git 2.43).
+    //
+    // This case exists to keep that true: it would fail if the script ever
+    // started editing itself in place, or if git's replace strategy changed.
+    // Assert on reaching the end, not on the exit code — the in-place failure
+    // mode exits 0, so an exit-code check would not see it.
+    const inRepo = path.join(appDir, "infra", "deploy.sh");
+    copyFileSync(SCRIPT, inRepo);
+    chmodSync(inRepo, 0o755);
+    git(appDir, "add", "-A");
+    git(appDir, "commit", "-qm", "add deploy.sh");
+    const c1 = new TextDecoder().decode(git(appDir, "rev-parse", "HEAD").stdout).trim();
+
+    // the deployed commit changes the script the deploy is running from
+    appendFileSync(inRepo, "\n# rewritten by the deployed commit\n");
+    git(appDir, "commit", "-aqm", "modify deploy.sh");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    // …while the working tree still holds the old copy, so the reset rewrites it
+    git(appDir, "reset", "--hard", "-q", c1);
+
+    const r = await run({}, [], inRepo);
+    expect(r.exitCode).toBe(0);
+    // the parts that a truncated run would skip while still exiting 0
+    expect(r.log).toContain("build");
+    expect(r.stdout).toContain("healthy");
+    expect(r.stdout).toContain("deployed");
   }, 20_000);
 
   it("prints a recovery procedure that drops and recreates, not --clean", async () => {
