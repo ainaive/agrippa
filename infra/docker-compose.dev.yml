@@ -1,5 +1,14 @@
 # Development dependencies only — api/worker/web run on the host via `bun dev`.
 # Usage: docker compose -f infra/docker-compose.dev.yml up -d
+#
+# Named, like the production file. Without `name:` the project falls back to the
+# parent directory — `infra` — which is exactly what the production stack was
+# called before `name: agrippa` pinned it, and this file declares a volume also
+# called `pgdata`. On a host that predates that change, `down -v` here would
+# delete the production volume. It also means two clones of this repo silently
+# share one dev database.
+name: agrippa-dev
+
 services:
   postgres:
     image: postgres:17
@@ -7,8 +16,12 @@ services:
       POSTGRES_USER: agrippa
       POSTGRES_PASSWORD: agrippa
       POSTGRES_DB: agrippa
+    # Bound to loopback: published ports bypass ufw (docker inserts its own
+    # iptables DNAT rules ahead of it), so an unqualified "5432:5432" exposes a
+    # known-password database to every machine on whatever network the laptop is
+    # joined to. Same technique .env.example already documents for AGRIPPA_PORT.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -20,7 +33,7 @@ services:
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
 volumes:
   pgdata:

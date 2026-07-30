@@ -116,6 +116,8 @@ Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode �
 
 服务器上的工作副本处于**游离 HEAD**（detached HEAD）状态，指向已部署的那个提交，因此在该目录执行 `git pull` 会直接失败，而不会悄悄把工作树推进到运行中镜像之后——Compose 配置、`.env` 默认值与 Dockerfile 都取自这棵工作树。查看当前部署的提交用 `git -C /opt/agrippa log -1`；要变更则移动 `deploy` 分支并推送。
 
+api 的健康检查设置了 180 秒的 `start_period`：迁移与种子数据都在监听端口打开之前执行，若不设置，一次较慢但成功的迁移会在部署过程中显示为 `unhealthy`。
+
 四个服务都设置了 `restart: unless-stopped`，因此主机重启后整套栈会自行恢复——没有别的东西在托管它。注意这与部署校验是绑定的：崩溃重启循环中的 worker 在两次重启之间看起来是 "running"，因此校验期间若 worker 的重启计数发生变化，本次部署同样判定失败。二者不可只去其一。
 
 它每次都会重新构建，这是刻意为之：SPA 与 API 都在构建镜像时打包进 api 镜像，因此单纯的 `git pull && docker compose up -d` 会重启**旧**代码，且看起来像是成功了。构建缓存让纯文档变更的部署依然很快。脚本用 `flock` 串行化并发部署，并且只保留当前与上一个镜像标签（每组约 4 GB）。
