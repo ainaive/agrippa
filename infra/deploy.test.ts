@@ -13,7 +13,15 @@
  * privilege boundary and stubbing it would test nothing.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -184,6 +192,32 @@ describe("infra/deploy.sh", () => {
     expect(dumps.length).toBe(1);
     expect(statSync(path.join(stateDir, dumps[0] as string)).mode & 0o777).toBe(0o600);
     expect(statSync(stateDir).mode & 0o777).toBe(0o700);
+  });
+
+  it("retains only the newest KEEP_DUMPS dumps", async () => {
+    // dumps are a full copy of production, so unbounded retention is both a
+    // disk and an exposure problem. Seed more than the cap with distinct mtimes
+    // so "newest" is well defined, then check the oldest are the ones dropped.
+    mkdirSync(stateDir, { recursive: true });
+    const seeded = ["0001", "0002", "0003", "0004", "0005", "0006"].map((n) => {
+      const f = path.join(stateDir, `pgdump-2026010${n[3]}-000000-seed${n}.dump`);
+      writeFileSync(f, "old");
+      return f;
+    });
+    for (const [i, f] of seeded.entries()) {
+      const t = new Date(1e9 + i * 1000);
+      utimesSync(f, t, t);
+    }
+
+    const r = await run({ KEEP_DUMPS: "3" });
+    expect(r.exitCode).toBe(0);
+
+    const left = [...new Bun.Glob("pgdump-*.dump").scanSync(stateDir)].sort();
+    expect(left.length).toBe(3);
+    // the run's own dump survives, and so do the two newest seeds
+    expect(left.some((f) => f.includes("seed0006"))).toBe(true);
+    expect(left.some((f) => f.includes("seed0005"))).toBe(true);
+    expect(left.some((f) => f.includes("seed0001"))).toBe(false);
   });
 
   it("rolls back when docker compose up -d fails", async () => {

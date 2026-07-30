@@ -267,7 +267,11 @@ stack_ok() {
     if api_ok && worker_ok "$since"; then
       return 0
     fi
-    sleep 5
+    # capped by what is left, so the final iteration cannot sleep past the
+    # deadline — a stated bound should be honoured exactly, not approximately
+    remaining=$((deadline - $(date +%s)))
+    [ "$remaining" -gt 0 ] || break
+    sleep "$((remaining < 5 ? remaining : 5))"
   done
   probe_budget=5
   api_ok || echo "  api never became healthy" >&2
