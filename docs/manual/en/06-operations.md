@@ -166,7 +166,12 @@ $C start api worker                      # only once the restore succeeded
 
 Drop and recreate rather than `pg_restore --clean`: `--clean` only drops what the archive contains, so tables the failed migration *added* would survive, and can block the restore through dependencies. `--single-transaction` with `--exit-on-error` means a partial restore rolls back instead of leaving a half-populated database. Stopping the app first is not optional — `dropdb` refuses while the api and worker hold connections.
 
-A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** a worker has registered its executors. The replica count matters because the worker registers before it starts consuming the queue, so a fresh registration alone would pass a worker that died during startup. Residual gap: a worker that stays up but wedges after registering is not detected.
+A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** each expected replica has written a fresh consumers-ready row to `worker_heartbeats`. That row is per-container and written only after all of the worker's queue consumers have started, so a worker that registers its executors and then wedges during startup no longer reads as deployed. Inspect the rows with:
+
+```sh
+docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
+  -c "select container_id, consumers_ready_at, heartbeat_at from worker_heartbeats order by 2 desc;"
+```
 
 Pull new images and `docker compose -p agrippa up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 

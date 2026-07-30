@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import {
   type ApprovalExpirePayload,
   EXECUTOR_CATALOG,
@@ -29,11 +30,15 @@ import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
+import { markConsumersReady, touchWorkerHeartbeat } from "./deps/readiness";
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitScmService } from "./deps/scm";
 import { GitWorkspaceManager } from "./deps/workspace";
 
 const db = createDb();
+// inside a compose container the hostname IS the container id — the identity
+// deploy verification counts readiness rows by
+const containerId = hostname();
 const bus = process.env.REDIS_URL
   ? new RedisEventBus(process.env.REDIS_URL)
   : new InProcessEventBus();
@@ -178,6 +183,10 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
   }
 });
 
+// every boss.work() above has returned — only now is this replica actually
+// consuming, which is the signal deploy verification counts (issue #15)
+await markConsumersReady(db, containerId);
+
 async function scheduleApprovalExpiry(runId: string): Promise<void> {
   const rows = await db
     .select()
@@ -230,12 +239,16 @@ setInterval(async () => {
 
     // executor-availability heartbeat (the API's live window is minutes-wide)
     await registerExecutors();
+    // per-container liveness (readiness stays untouched — boot-time only)
+    await touchWorkerHeartbeat(db, containerId);
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }
 }, 60_000);
 
-console.log(`[worker] up — slots=${SLOTS} redis=${Boolean(process.env.REDIS_URL)}`);
+console.log(
+  `[worker] up — container=${containerId} slots=${SLOTS} redis=${Boolean(process.env.REDIS_URL)}`,
+);
 
 process.on("SIGTERM", async () => {
   deps.logger.info("draining…");

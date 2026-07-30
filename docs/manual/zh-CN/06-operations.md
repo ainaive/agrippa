@@ -165,7 +165,12 @@ $C start api worker                      # 仅在还原成功之后
 
 要先删库重建，而不是用 `pg_restore --clean`：`--clean` 只会删除归档中存在的对象，因此失败迁移**新增**的表会残留下来，并可能因依赖关系导致还原失败。`--single-transaction` 配合 `--exit-on-error` 可保证部分还原会整体回滚，而不是留下一个半成品数据库。先停掉应用不是可选项——api 与 worker 仍持有连接时 `dropdb` 会拒绝执行。
 
-只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**已有 worker 注册了执行器时，部署才算成功。副本数之所以重要，是因为 worker 在开始消费队列之前就会先注册，仅凭一条新注册记录会放过一个启动途中就挂掉的 worker。已知残留缺口：worker 起来了但注册后卡死，这种情况检测不到。
+只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**每个预期副本都在 `worker_heartbeats` 中写入了新的「消费者就绪」记录时，部署才算成功。该记录以容器为单位，且只有在 worker 的全部队列消费者启动完成后才会写入——因此「注册了执行器但随后启动途中卡死」的 worker 不会再被误判为部署成功。可用以下命令查看：
+
+```sh
+docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
+  -c "select container_id, consumers_ready_at, heartbeat_at from worker_heartbeats order by 2 desc;"
+```
 
 拉取新镜像后 `docker compose -p agrippa up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
 
