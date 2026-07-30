@@ -232,7 +232,7 @@ docker volume rm infra_pgdata infra_artifacts infra_workspaces
 
 | 现象 | 可能原因 / 处理 |
 |---|---|
-| 部署失败并提示 `AGRIPPA_VERSION did not reach compose; images would be mistagged` | Compose 根本无法渲染该文件——通常是某个必填变量未设置（自 `POSTGRES_PASSWORD` 变为必填后尤其常见）。这条提示是错的：*上一个*版本的 `deploy.sh` 丢弃了 Compose 的 stderr，而对该脚本的修改要到下一次部署才生效。你的服务栈已回滚并在运行。手动执行 `docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env config` 查看真正的报错，修复后重新部署。从本版本起，部署会直接报告真实原因。 |
+| 部署失败并提示 `AGRIPPA_VERSION did not reach compose; images would be mistagged` | Compose 根本无法渲染该文件——几乎总是某个必填变量未设置，而变为必填的正是 `POSTGRES_PASSWORD`。请在 `infra/env/.env` 中设置它（参见 `infra/env/.env.example`）后重新部署；你的服务栈已回滚且仍在运行，因此并不紧急。提示里之所以提到镜像标签，是因为*上一个*版本的 `deploy.sh` 丢弃了 Compose 的 stderr，而对该脚本的修改要到下一次部署才生效。**不要在 `/opt/agrippa` 里直接跑 `compose config` 来排查**——回滚已经把工作副本重置回上一个提交，而那份 Compose 文件仍为该密码提供了默认值，因此它会正常渲染、什么问题都看不出来。要看到 Compose 的真实报错，请显式渲染失败的那个提交（其 SHA 见部署输出中的 `after a failed deploy of …` 一行）：`cd /opt/agrippa && git show <failed-sha>:infra/docker-compose.yml \| docker compose -p agrippa -f - --env-file infra/env/.env config`。从本版本起，部署会直接报告真实原因。 |
 | 扩容 worker 后部署回滚并提示 `worker never became ready` | 你是在带外扩容的（`--scale`）。`deploy.sh` 要求运行中的 worker 数量与 `WORKER_REPLICAS` **完全相等**——请改为在 `infra/env/.env` 中设置该变量后重新部署。 |
 | 执行卡在「排队中」 | 没有 worker 在运行，或入队丢失——worker 启动后其巡检器会自动补投超过 30 秒的排队执行。查看 worker 日志。 |
 | 实时进度延迟约 1 秒、无推送 | `REDIS_URL` 未设置或不可达——SSE 退化为数据库轮询。无害；恢复 Redis 即恢复即时推送。 |
