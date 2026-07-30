@@ -113,6 +113,8 @@ A registered executor still needs a credential for the provider a step resolves 
 
 Compose deployments use **`sudo infra/deploy.sh [<commit>]`**: it fetches from GitCode, builds images tagged with the deployed commit, starts them, waits on `/healthz`, and **rolls back to the previous tag** if the new one doesn't come up. Run it by hand any time; pushing to the `deploy` branch runs the same script automatically via Janus (`.janus/deploy.yml`).
 
+Changes to `deploy.sh` itself land one deploy later: the running script was read from the tree as it stood at the *previous* deploy, and it keeps running from that file after resetting the tree. So the deploy that ships a script change still runs the old script. Check a script change against the following deploy, or run it by hand.
+
 The host checkout sits on a **detached HEAD** at the deployed commit, so `git pull` there fails rather than quietly advancing the tree past the running images — compose config, `.env` defaults and Dockerfiles all come from that tree. To see what is deployed, `git -C /opt/agrippa log -1`; to change it, move the `deploy` branch and push.
 
 It always rebuilds, deliberately: the SPA and the API are baked into the api image, so a bare `git pull && docker compose up -d` restarts the **old** code and looks like it worked. Build cache keeps a docs-only deploy cheap. A `flock` serializes concurrent deploys, and only the current and previous image tags are kept (each pair is ~4 GB).

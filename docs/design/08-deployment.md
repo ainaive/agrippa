@@ -61,6 +61,10 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
   It refuses any commit **not reachable from `deploy`** — the privileged path that lets Janus call
   it as root would otherwise make every branch deployable, and root-owning the tree would buy
   nothing.
+  **Edits to `deploy.sh` take effect one deploy later**: it is launched from the tree as it stood at
+  the previous deploy and only then resets that tree, and the running bash keeps executing the file
+  it opened (git swaps in a new inode). So the deploy that ships a change to the script still runs
+  the old version — verify a script change against the *next* deploy, or run it by hand.
   The host checkout is left on a **detached HEAD** at the deployed commit: on a local branch, each
   deploy would force-move that branch, and a stray `git pull` would advance the tree past the
   running images — compose config, `.env` defaults and Dockerfiles are read from that tree, so

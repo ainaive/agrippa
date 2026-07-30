@@ -20,10 +20,19 @@
 #   deploy.sh [<commit-ish>]     # default: the deploy ref on $DEPLOY_REMOTE
 #
 # The commit must be reachable from $DEPLOY_REMOTE/$DEPLOY_REF. That is the
-# privilege boundary: this script runs as root via a NOPASSWD sudoers rule, so
-# an unconstrained argument would let its caller deploy any branch — including
-# a compose file that mounts the host — and root-owning the tree would buy
-# nothing.
+# privilege boundary: this script runs as root on the CI user's behalf (see
+# infra/janus/), so an unconstrained argument would let its caller deploy any
+# branch — including a compose file that mounts the host — and root-owning the
+# tree would buy nothing.
+#
+# EDITS TO THIS FILE TAKE EFFECT ONE DEPLOY LATER. The script is launched from
+# the tree as it stood at the PREVIOUS deploy, and only then resets that tree to
+# the new commit. Bash keeps executing the file it opened — git swaps in a new
+# inode, so the running process is unaffected (infra/deploy.test.ts covers that)
+# — which means a deploy that ships a change to this script still runs the old
+# version of it. Verify a change against the deploy AFTER the one that ships it,
+# or run the new script by hand. Getting this wrong looks like the fix silently
+# not working.
 #
 # Overridable via environment:
 #   APP_DIR (/opt/agrippa)  DEPLOY_REMOTE (gitcode)  DEPLOY_REF (deploy)
