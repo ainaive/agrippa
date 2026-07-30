@@ -1,8 +1,15 @@
 # Janus deploy pipeline — runs on the Agrippa host itself.
 #
 # Deliberately not .janus/ci.yml (the default path): the GitCode webhook selects
-# this file with ?pipeline_path=.janus/deploy.yml, which leaves ci.yml free if
-# Janus ever runs tests for this repo too, rather than conflating deploy and CI.
+# this file with ?pipeline_path=deploy.yml, which leaves ci.yml free if Janus
+# ever runs tests for this repo too, rather than conflating deploy and CI.
+#
+# That value is relative to the pipeline DIRECTORY, not the repo root — Janus
+# joins it onto .janus/ itself (internal/runner/runner.go: "release.yml", not
+# ".janus/release.yml"). Passing the full path silently resolves to
+# .janus/.janus/deploy.yml and the run fails at checkout with a missing file,
+# before any branch filter applies — so a push to ANY branch fails the run
+# rather than being skipped. Getting this wrong is not a no-op.
 #
 # Trigger is the `deploy` branch, not main: main takes doc-only commits, and
 # this is the only environment — going live should be a deliberate
