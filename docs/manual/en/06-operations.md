@@ -115,7 +115,9 @@ Compose deployments use **`sudo infra/deploy.sh [<commit>]`**: it fetches from G
 
 It always rebuilds, deliberately: the SPA and the API are baked into the api image, so a bare `git pull && docker compose up -d` restarts the **old** code and looks like it worked. Build cache keeps a docs-only deploy cheap. A `flock` serializes concurrent deploys, and only the current and previous image tags are kept (each pair is ~4 GB).
 
-Two things it will not do. It **only deploys commits reachable from the `deploy` branch** — an arbitrary SHA is refused, which is what keeps the root-level sudo rule meaningful. And **rollback does not revert the database**: the API applies migrations on boot before it is healthy, and some are irreversible.
+Two things it will not do. It **only deploys commits reachable from the `deploy` branch** — an arbitrary SHA is refused, which is what keeps the root-level grant meaningful. And **rollback does not revert the database**: the API applies migrations on boot before it is healthy, and some are irreversible.
+
+Janus does not reach root through `sudo`. Its service runs with `NoNewPrivileges`, which every pipeline step inherits and which makes setuid a permanent no-op, so `sudo` cannot work there whatever the sudoers rule says. The pipeline instead starts a oneshot systemd unit, `agrippa-deploy@<sha>.service`, authorized by a polkit rule scoped to that one unit and the `start` verb alone; the deploy log is written to `/var/log/agrippa-deploy/<sha>.log` and printed back into the pipeline. See [`infra/janus/README.md`](https://github.com/ainaive/agrippa/blob/main/infra/janus/README.md).
 
 The script therefore takes a `pg_dump` before every deploy, into `/var/lib/agrippa-deploy` (mode `0700`, dumps `0600`, last 5 retained — they are a full copy of production and the host also runs an unprivileged CI user). On any failure it prints the restore procedure rather than implying the schema came back:
 

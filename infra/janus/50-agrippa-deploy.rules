@@ -1,0 +1,18 @@
+// Let the janus user start ONLY agrippa-deploy@<sha>.service, and only start it.
+//
+// This is the privilege boundary that the sudoers rule used to be: Janus is
+// otherwise unprivileged, and the deploy tree is root-owned so a pipeline
+// cannot edit the script it is about to run as root.
+//
+// The instance is constrained to a hex commit id so the unit name cannot be
+// used to reach some other template instance. deploy.sh separately refuses any
+// commit not reachable from gitcode/deploy — this is defence in depth.
+polkit.addRule(function (action, subject) {
+  if (action.id !== "org.freedesktop.systemd1.manage-units") return;
+  if (subject.user !== "janus") return;
+  var unit = action.lookup("unit");
+  var verb = action.lookup("verb");
+  if (verb === "start" && unit && /^agrippa-deploy@[0-9a-f]{7,40}\.service$/.test(unit)) {
+    return polkit.Result.YES;
+  }
+});

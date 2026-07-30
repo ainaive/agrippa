@@ -114,7 +114,9 @@ Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode �
 
 它每次都会重新构建，这是刻意为之：SPA 与 API 都在构建镜像时打包进 api 镜像，因此单纯的 `git pull && docker compose up -d` 会重启**旧**代码，且看起来像是成功了。构建缓存让纯文档变更的部署依然很快。脚本用 `flock` 串行化并发部署，并且只保留当前与上一个镜像标签（每组约 4 GB）。
 
-有两点它不会做。它**只部署能从 `deploy` 分支追溯到的提交**——任意 SHA 会被拒绝，这正是那条 root 级 sudo 规则得以成立的前提。以及**回滚不会还原数据库**：API 在启动、尚未健康之前就会执行迁移，其中部分不可逆。
+有两点它不会做。它**只部署能从 `deploy` 分支追溯到的提交**——任意 SHA 会被拒绝，这正是那条 root 级授权得以成立的前提。以及**回滚不会还原数据库**：API 在启动、尚未健康之前就会执行迁移，其中部分不可逆。
+
+Janus 并非通过 `sudo` 获得 root。它的服务启用了 `NoNewPrivileges`，该标志会被每个流水线步骤继承且子进程无法解除，因此 setuid 在其中永久失效——无论 sudoers 规则怎么写，`sudo` 都无法工作。流水线改为启动一个 oneshot systemd 单元 `agrippa-deploy@<sha>.service`，由一条 polkit 规则授权，且该规则仅限这一个单元与 `start` 这一个动作；部署日志写入 `/var/log/agrippa-deploy/<sha>.log`，再由流水线回读打印。参见 [`infra/janus/README.md`](https://github.com/ainaive/agrippa/blob/main/infra/janus/README.md)。
 
 因此脚本会在每次部署前做一次 `pg_dump`，存放于 `/var/lib/agrippa-deploy`（目录 `0700`、转储文件 `0600`，保留最近 5 份——它们是生产数据的完整副本，而本机上还运行着非特权的 CI 用户）。任何失败都会打印还原步骤，而不是让人误以为数据库也一并还原了：
 

@@ -1,0 +1,24 @@
+# Privileged deploy unit, started by Janus over D-Bus.
+#
+# Janus runs its pipelines as host processes under NoNewPrivileges=true, which
+# every step inherits and which makes setuid a no-op — so `sudo deploy.sh` can
+# never work from a pipeline, however the sudoers rule is written. systemctl
+# asks pid 1 to do the work over D-Bus instead of escalating in-process, so the
+# flag does not apply; polkit authorizes the call (50-agrippa-deploy.rules).
+#
+# The instance name is the commit to deploy: agrippa-deploy@<sha>.service.
+[Unit]
+Description=Agrippa deploy %i
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/agrippa/infra/deploy.sh %i
+# The pipeline cats this file so the deploy log reaches Janus. The journal is
+# not readable by the janus user, and adding it to systemd-journal would expose
+# every unit's logs to every pipeline this host runs.
+StandardOutput=append:/var/log/agrippa-deploy/%i.log
+StandardError=append:/var/log/agrippa-deploy/%i.log
+# Builds two images from source; the default 90s would kill it mid-build.
+TimeoutStartSec=1800

@@ -35,5 +35,22 @@ jobs:
     steps:
       # Passing the exact SHA makes the deploy deterministic: it applies the
       # commit that triggered this run, not whatever the branch tip has moved
-      # to since. sudo is a single NOPASSWD rule for this one script.
-      - run: sudo /opt/agrippa/infra/deploy.sh ${{ sha }}
+      # to since.
+      #
+      # NOT sudo. Janus's own unit sets NoNewPrivileges=true, which every step
+      # inherits and which makes setuid a no-op, so `sudo` fails here however
+      # the sudoers rule is written ("the no new privileges flag is set, which
+      # prevents sudo from running as root"). systemctl asks pid 1 to do the
+      # work over D-Bus rather than escalating in-process, so the flag does not
+      # apply; polkit authorizes exactly this one unit. See infra/janus/.
+      #
+      # --wait blocks until the unit finishes and exits non-zero if it failed,
+      # so the pipeline still reflects the deploy. The unit logs to a file
+      # rather than the journal because the janus user cannot read the journal,
+      # and granting it that would expose every unit's logs to every pipeline.
+      # cat runs regardless of outcome — a failed deploy is when the log is
+      # worth having — and the original status is preserved for Janus.
+      - run: |
+          systemctl start --wait agrippa-deploy@${{ sha }}.service; rc=$?
+          cat /var/log/agrippa-deploy/${{ sha }}.log 2>/dev/null || true
+          exit $rc
