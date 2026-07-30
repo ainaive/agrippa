@@ -102,6 +102,24 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 
 即使执行器已注册，步骤解析到的服务商仍需要凭证。`openai` 与 `anthropic` 可用 worker 环境变量（如 `OPENAI_API_KEY`）；`dashscope` 以及组织自行注册的自定义服务商**只能用项目凭证**。注意 `dashscope` 根本无法支撑 `codex-cli` 代理位——它在目录中只提供 `anthropic` 线路协议，因为 Codex ≥ 0.122 移除了百炼 OpenAI 兼容模式所用的 chat 线路 API。这类代理位请改指向提供 `openai` 协议的服务商，或改用 `claude-agent-sdk`。
 
+## 轮换数据库密码
+
+`POSTGRES_PASSWORD` 只在数据卷**首次初始化**时被 Postgres 读取，之后每次启动都会忽略它；而 Compose 仍然一直用它来拼接 `DATABASE_URL`。因此只改环境文件不会轮换任何东西，只会让 URL 与角色对不上：api 与 worker 会报 `password authentication failed for user "agrippa"`，`/healthz` 返回 503，部署随即回滚——而且回滚也救不回来，因为 `infra/env/.env` 未纳入版本控制，`git reset --hard` 不会还原它。
+
+正确顺序是先改角色，再改文件：
+
+```sh
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
+NEW=$(openssl rand -hex 24)          # 用十六进制：该值会进入 URL，而 base64 可能产生 /
+
+$C exec -T postgres psql -U agrippa -d agrippa \
+    -c "ALTER ROLE agrippa WITH PASSWORD '$NEW'"
+# 上一步成功之后，再把同样的值写入 infra/env/.env
+$C up -d api worker                  # 使其读取新的 DATABASE_URL
+```
+
+**从依赖旧默认值的部署升级？** 早期版本在该变量未设置时会默认使用字面量 `agrippa`。现在它是必填项，因此请把它设置为 `agrippa`——也就是角色实际持有的密码——或者先用上面的方法轮换。设置成其他任何值都无法通过认证。
+
 ## 备份——三样东西
 
 1. **数据库** —— Compose：`pgdata` 卷；虚拟机：`pg_dump agrippa` ——按你的策略定期执行。

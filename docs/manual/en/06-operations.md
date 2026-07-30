@@ -103,6 +103,24 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 
 A registered executor still needs a credential for the provider a step resolves to. `openai` takes worker env (`OPENAI_API_KEY`), so does `anthropic`; `dashscope` and org-registered custom providers are **project-credential only**. Note that `dashscope` cannot back a `codex-cli` slot at all — its catalog entry serves the `anthropic` wire protocol only, because Codex ≥ 0.122 dropped the chat wire API Bailian's OpenAI-compatible mode speaks. Point such a slot at a provider that serves the `openai` protocol, or at `claude-agent-sdk`.
 
+## Rotating the database password
+
+`POSTGRES_PASSWORD` is read by Postgres **only when the data volume is first initialized**. On every later boot it is ignored, while compose keeps building `DATABASE_URL` from it — so editing the env file alone does not rotate anything, it just makes the URL stop matching the role. The api and worker then fail with `password authentication failed for user "agrippa"`, `/healthz` returns 503, and a deploy rolls back — unsuccessfully, because `infra/env/.env` is untracked and survives `git reset --hard`.
+
+Change the role first, then the file:
+
+```sh
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
+NEW=$(openssl rand -hex 24)          # hex: this ends up in a URL, and base64 can emit /
+
+$C exec -T postgres psql -U agrippa -d agrippa \
+    -c "ALTER ROLE agrippa WITH PASSWORD '$NEW'"
+# only once that succeeded — put the same value in infra/env/.env
+$C up -d api worker                  # picks up the new DATABASE_URL
+```
+
+**Upgrading from a stack that relied on the old default?** Earlier versions defaulted the password to the literal `agrippa` when the variable was unset. It is now required, so set it to `agrippa` — the value your role actually has — or rotate with the recipe above first. Any other value will not authenticate.
+
 ## Backup — three things
 
 1. The **database** — Compose: the `pgdata` volume; VM: `pg_dump agrippa` — schedule per your policy.
