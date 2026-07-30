@@ -117,4 +117,12 @@ export class DiskArtifactStore implements ArtifactStore {
     await Bun.write(storageRef, data);
     return storageRef;
   }
+
+  async read(storageRef: string): Promise<string | null> {
+    // refs come from our own artifact rows, but stay inside the storage root
+    // anyway — a corrupted row must not become an arbitrary-file-read primitive
+    if (!isWithin(STORAGE_ROOT, path.resolve(storageRef))) return null;
+    const file = Bun.file(storageRef);
+    return (await file.exists()) ? await file.text() : null;
+  }
 }

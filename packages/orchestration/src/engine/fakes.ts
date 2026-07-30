@@ -130,11 +130,20 @@ export class FakeResourceMaterializer implements ResourceMaterializer {
 }
 
 export class InMemoryArtifactStore implements ArtifactStore {
+  /** Shared across instances the way the real artifacts volume persists across legs. */
+  private static files = new Map<string, string>();
+
   /** Default mirrors DiskArtifactStore's 64 KiB threshold so the compliance suite exercises the same inline policy. */
   constructor(private readonly inlineLimitBytes: number = 64 * 1024) {}
 
+  private overflow(runId: string, key: string, content: string): string {
+    const ref = `mem://${runId}/${key}`;
+    InMemoryArtifactStore.files.set(ref, content);
+    return ref;
+  }
+
   async store(
-    _runId: string,
+    runId: string,
     key: string,
     _kind: string,
     source: { inline?: unknown; path?: string },
@@ -143,12 +152,14 @@ export class InMemoryArtifactStore implements ArtifactStore {
   ): Promise<StoredArtifact> {
     const limit = opts?.inlineLimitBytes ?? this.inlineLimitBytes;
     if (source.inline !== undefined) {
-      const size = Buffer.byteLength(
-        typeof source.inline === "string" ? source.inline : JSON.stringify(source.inline),
-      );
+      const content =
+        typeof source.inline === "string" ? source.inline : JSON.stringify(source.inline);
+      const size = Buffer.byteLength(content);
       // over-limit keeps a non-null storageRef so the engine reads "stored,
       // not inline" rather than "produced no bytes"
-      if (size > limit) return { inline: null, storageRef: `mem://${key}`, size, mime: null };
+      if (size > limit) {
+        return { inline: null, storageRef: this.overflow(runId, key, content), size, mime: null };
+      }
       return { inline: source.inline, storageRef: null, size, mime: null };
     }
     if (source.path) {
@@ -156,10 +167,16 @@ export class InMemoryArtifactStore implements ArtifactStore {
       const content = (await file.exists()) ? await file.text() : "";
       const size = Buffer.byteLength(content);
       const mime = file.type || null;
-      if (size > limit) return { inline: null, storageRef: `mem://${key}`, size, mime };
+      if (size > limit) {
+        return { inline: null, storageRef: this.overflow(runId, key, content), size, mime };
+      }
       return { inline: content, storageRef: null, size, mime };
     }
     return { inline: null, storageRef: null, size: 0, mime: null };
+  }
+
+  async read(storageRef: string): Promise<string | null> {
+    return InMemoryArtifactStore.files.get(storageRef) ?? null;
   }
 }
 

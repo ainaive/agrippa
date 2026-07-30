@@ -125,7 +125,7 @@ $C up -d api worker                  # 使其读取新的 DATABASE_URL
 ## 备份——三样东西
 
 1. **数据库** —— Compose：`pgdata` 卷；虚拟机：`pg_dump agrippa` ——按你的策略定期执行。
-2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后超过 64 KB 的下载不可恢复（元数据、小产出物以及驱动检查点的产出物在 Postgres 中仍在）。
+2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后超过 64 KB 的下载不可恢复（元数据、小产出物以及驱动检查点的产出物在 Postgres 中仍在），且评审补丁超过 64 KB 的进行中执行将拒绝发布——推送会校验存储的补丁字节。
 3. **`AGRIPPA_SECRET_KEY`** ——没有它，所有已存的 git 令牌和 MCP 凭证都无法解密。Redis 无需备份。
 
 ## 升级与扩容

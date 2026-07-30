@@ -260,6 +260,8 @@ class RunEngine {
   private currentStepRowId: string | null = null;
   private currentIteration = 1;
   private producedArtifacts = new Set<string>();
+  /** storageRef per artifact key, for content too large to sit in artifactValues. */
+  private artifactRefs: Record<string, string> = {};
   /** Latest inline value per artifact key — the `artifacts.<key>` expression root. */
   private artifactValues: Record<string, unknown> = {};
   /** Latest decided response per checkpoint id — the `checkpoints.<id>` root. */
@@ -424,6 +426,7 @@ class RunEngine {
     for (const a of priorArtifacts) {
       this.producedArtifacts.add(a.artifactKey);
       this.artifactValues[a.artifactKey] = a.inline ?? "";
+      if (a.storageRef) this.artifactRefs[a.artifactKey] = a.storageRef;
     }
     // decided checkpoint responses re-enter the expression context on resume
     const decidedCheckpoints = await db
@@ -1092,7 +1095,7 @@ class RunEngine {
       if (patchContracts.length > 0) {
         const current = await this.wrapScm(step, () => this.deps.workspace.diff(this.run.id));
         for (const contract of patchContracts) {
-          const stored = this.artifactValues[contract.key] ?? "";
+          const stored = await this.readPatchEvidence(contract.key);
           if (stored !== current) {
             throw new RunFailure(
               "contract_violation",
@@ -1648,6 +1651,7 @@ class RunEngine {
       inline: stored.inline ?? null,
     });
     this.producedArtifacts.add(event.key);
+    if (stored.storageRef) this.artifactRefs[event.key] = stored.storageRef;
     if (stored.inline !== null) {
       this.artifactValues[event.key] = stored.inline;
     } else {
@@ -1657,6 +1661,26 @@ class RunEngine {
       });
       this.artifactValues[event.key] = "";
     }
+  }
+
+  /**
+   * The exact bytes of a reviewed patch. Inline for patches within the store's
+   * threshold; larger ones read back from the artifact store by storageRef —
+   * the stored bytes ARE the approved evidence, so an unreadable ref must fail
+   * the push (a publish must never proceed on unverifiable evidence).
+   */
+  private async readPatchEvidence(key: string): Promise<string> {
+    const inline = this.artifactValues[key];
+    if (typeof inline === "string" && inline !== "") return inline;
+    const ref = this.artifactRefs[key];
+    const content = ref ? await this.deps.artifacts.read(ref) : null;
+    if (content === null) {
+      throw new RunFailure(
+        "contract_violation",
+        `patch evidence '${key}' is not readable from the artifact store — refusing to publish unverifiable changes`,
+      );
+    }
+    return content;
   }
 
   private async recordUsage(event: UsageDelta, row: StepRow, attempt: number): Promise<void> {

@@ -126,7 +126,7 @@ $C up -d api worker                  # picks up the new DATABASE_URL
 ## Backup — three things
 
 1. The **database** — Compose: the `pgdata` volume; VM: `pg_dump agrippa` — schedule per your policy.
-2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata, small artifacts, and checkpoint-driving artifacts survive in Postgres).
+2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata, small artifacts, and checkpoint-driving artifacts survive in Postgres), and an in-flight run whose reviewed patch exceeded 64 KB will refuse to publish — the push verifies against the stored patch bytes.
 3. **`AGRIPPA_SECRET_KEY`** — without it, every stored git token and MCP credential is unrecoverable. Redis needs no backup.
 
 ## Upgrades & scaling

@@ -1321,6 +1321,11 @@ const REV_BIG: Record<string, FakeStepBehavior> = {
   },
 };
 
+// a working diff over the store's 64 KiB inline threshold: its patch artifact
+// lands on the artifact store (inline=null), so publish-time evidence has to
+// be read back by storageRef rather than from the expression context
+const BIG_DIFF = `diff --git a/big b/big\n${"+x\n".repeat(40_000)}`;
+
 // an approval wedged between the review and its gate forces the gate to be
 // evaluated by a FRESH engine on the next leg — the report must survive the
 // round-trip through the artifacts row (resume re-reads inline from Postgres)
@@ -1866,6 +1871,103 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
     const error = run?.error as { code: string; message: string } | null;
     expect(error?.code).toBe("contract_violation");
     expect(error?.message).toContain("exceeds the inline limit");
+  });
+
+  // walks a big-diff run to its decided review gate: analyze asks nothing,
+  // plan approved, implement stores the >64 KB patch, review reports one
+  // finding, gate decided "pass" — the NEXT leg (a fresh engine) publishes
+  const walkBigPatchToDecidedGate = async (fx: V2Fixture) => {
+    fx.workspace.diffOutput = BIG_DIFF;
+    const impl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+    const rev: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "one issue",
+      },
+    };
+    for (const response of [
+      { kind: "approval", outcome: "approved" } as const,
+      {
+        kind: "review-gate",
+        outcome: "pass",
+        selectedFindings: [],
+        acceptedFindings: [FINDING_A],
+        acceptedFindingIds: ["f1"],
+      } as const,
+    ]) {
+      expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+    }
+    return { impl, rev };
+  };
+
+  it("publishes a patch over the inline threshold by reading the evidence back", async () => {
+    const fx = await setupV2Fixture();
+    const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+
+    // the publish leg resumes with artifactValues["changes"] empty (the row
+    // is inline=null) — the evidence must come back from the store, not fail
+    // as phantom drift
+    expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("succeeded");
+    expect(fx.scm.pushes).toHaveLength(1);
+    const [patchRow] = await fx.db
+      .select()
+      .from(artifacts)
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "changes")));
+    expect(patchRow?.inline).toBeNull(); // proves the read-back path was the one exercised
+    expect(patchRow?.storageRef).not.toBeNull();
+  });
+
+  it("still fails a drifted workspace when the patch is over the inline threshold", async () => {
+    const fx = await setupV2Fixture();
+    const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+
+    fx.workspace.diffOutput = `${BIG_DIFF}+drifted after review\n`;
+    expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    expect((run?.error as { message: string } | null)?.message).toContain("changed");
+    expect(fx.scm.pushes).toHaveLength(0);
+  });
+
+  it("refuses to publish when big-patch evidence cannot be read back", async () => {
+    const fx = await setupV2Fixture();
+    const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+
+    // a lost artifacts volume (or a corrupted row) — the stored bytes ARE the
+    // approved evidence, so the push must fail, never proceed unverified
+    await fx.db
+      .update(artifacts)
+      .set({ storageRef: "mem://void/changes" })
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "changes")));
+    expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    expect((run?.error as { message: string } | null)?.message).toContain("not readable");
+    expect(fx.scm.pushes).toHaveLength(0);
   });
 
   it("fails instead of publishing drifted, empty, or atomically changed evidence", async () => {

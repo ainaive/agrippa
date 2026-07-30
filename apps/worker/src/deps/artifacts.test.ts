@@ -168,6 +168,18 @@ describe("DiskArtifactStore path containment", () => {
     expect(stored.size).toBe(200 * 1024);
   });
 
+  it("reads spilled content back by storageRef, but only inside the storage root", async () => {
+    const ws = freshWorkspace();
+    const content = "p".repeat(100 * 1024); // over the 64 KB threshold → disk
+    const stored = await store.store("run-read", "changes", "patch", { inline: content }, ws);
+    expect(stored.storageRef).not.toBeNull();
+    expect(await store.read(stored.storageRef as string)).toBe(content);
+
+    // a corrupted row must not become an arbitrary-file-read primitive
+    expect(await store.read("/etc/hosts")).toBeNull();
+    expect(await store.read(`${stored.storageRef}/../../../../etc/hosts`)).toBeNull();
+  });
+
   it("falls back to the default cap when the size env is not a valid number", async () => {
     const ws = freshWorkspace();
     await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
