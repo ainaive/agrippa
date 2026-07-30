@@ -34,7 +34,7 @@ stages:
     jobs:
       api:
         name: API image
-        runs-on: [ubuntu-latest, x64, medium]
+        runs-on: [self-hosted, os=ubuntu, arch=x64]
         env:
           REGISTRY: ${{ vars.REGISTRY }}
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
@@ -72,7 +72,7 @@ stages:
 
       worker:
         name: Worker image
-        runs-on: [ubuntu-latest, x64, medium]
+        runs-on: [self-hosted, os=ubuntu, arch=x64]
         env:
           REGISTRY: ${{ vars.REGISTRY }}
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}

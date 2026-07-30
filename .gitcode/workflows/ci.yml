@@ -5,7 +5,7 @@
 # 迁移要点（AtomGit Action 仍处测试阶段，部分能力需等价替代）：
 #   1. 工作流目录 .github/workflows/ → .gitcode/workflows/
 #   2. 用 stages 维度（单 stage，ci + docker 两 job 并行），结构贴近 GitHub 原版
-#   3. runs-on 标签改为三段式 {os},{arch},{flavor}，如 [ubuntu-latest, x64, medium]
+#   3. runs-on 改用自有 runner 标签 [self-hosted, os=ubuntu, arch=x64]（替代官方 ubuntu-latest 三段式）
 #   4. 上下文 github.* → atomgit.*；系统变量 GITHUB_* → ATOMGIT_*（用 $ATOMGIT_PATH 注入 bun）
 #   5. AtomGit Action 不支持 services: 服务容器，改用 docker run 启动 postgres/redis；
 #      runner 无 docker 时经 docker info 预检自动跳过，集成测试在无 DB 时自跳过
@@ -20,7 +20,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "feat/**", "fix/**", "infra/**", "upgrade/**"]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -32,7 +32,7 @@ stages:
     jobs:
       ci:
         name: Lint, test and build
-        runs-on: [ubuntu-latest, x64, medium]
+        runs-on: [self-hosted, os=ubuntu, arch=x64]
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/agrippa_test
           REDIS_URL: redis://localhost:6379
@@ -136,7 +136,7 @@ stages:
 
       docker:
         name: Docker images
-        runs-on: [ubuntu-latest, x64, small]
+        runs-on: [self-hosted, os=ubuntu, arch=x64]
         steps:
           - name: Checkout
             uses: checkout

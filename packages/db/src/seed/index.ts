@@ -147,6 +147,11 @@ export async function seed(db: Db): Promise<void> {
       nameI18n: { en: "Plan Breakdown", "zh-CN": "计划拆解" },
     },
     {
+      slug: "pm.weekly-report",
+      scenario: "project-management",
+      nameI18n: { en: "Weekly Report", "zh-CN": "项目周报" },
+    },
+    {
       slug: "swdev.requirements-dev",
       scenario: "software-development",
       nameI18n: { en: "Requirements Development", "zh-CN": "需求开发" },
@@ -209,6 +214,18 @@ export async function seed(db: Db): Promise<void> {
         "zh-CN": "将目标或需求文档拆解为里程碑与可估算的任务。",
       },
       sortOrder: 2,
+    },
+    {
+      scenario: "project-management",
+      slug: "weekly-report",
+      template: "pm.weekly-report",
+      faber: "navigator",
+      nameI18n: { en: "Weekly Report", "zh-CN": "项目周报" },
+      descriptionI18n: {
+        en: "Compose a modular weekly report from user notes, with review before publishing.",
+        "zh-CN": "基于用户素材生成模块化周报，发布前审核确认。",
+      },
+      sortOrder: 3,
     },
     {
       scenario: "software-development",
