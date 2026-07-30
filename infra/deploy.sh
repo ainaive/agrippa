@@ -237,15 +237,22 @@ api_ok() {
   [ "$(compose ps --format '{{.Health}}' api 2>/dev/null | head -n1)" = "healthy" ]
 }
 
-# The worker has no HTTP surface and no healthcheck, so verify two things.
+# The worker has no HTTP surface and no healthcheck, so verify THREE things:
+# every expected replica running, RestartCount steady, and a fresh registration.
+# All three are load-bearing; none is instrumentation.
 #
 # A fresh executor_registrations row alone is NOT enough: the worker registers
 # (apps/worker/src/index.ts) before it starts its pg-boss consumers, so it can
 # register and then die during consumer setup and still look deployed. And
 # registrations are global per executor, so with WORKER_REPLICAS > 1 one healthy
-# replica would mask the rest. Also require every expected replica to be
-# running — compose sets no restart policy, so a crashed worker leaves an exited
-# container that this catches.
+# replica would mask the rest — hence the replica count.
+#
+# The replica count is not enough either, now that compose sets
+# `restart: unless-stopped` so the stack survives a host reboot: a crash-looping
+# worker reads as running between restarts, and it has already registered before
+# it dies. That is what the RestartCount comparison below is for. Deleting it
+# restores the masking exactly — infra/deploy.test.ts covers that, but this
+# comment is what a reader trusts first.
 #
 # Residual gap, accepted: a worker that stays up but wedges *after* registering
 # is not detected. Closing that needs a readiness signal written after
