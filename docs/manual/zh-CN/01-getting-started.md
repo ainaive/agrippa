@@ -12,7 +12,7 @@ cp infra/env/.env.example infra/env/.env
 #   AGRIPPA_SECRET_KEY   ← openssl rand -base64 32   （务必备份！）
 #   BETTER_AUTH_SECRET   ← openssl rand -base64 32
 #   ANTHROPIC_API_KEY    ← 你的密钥；或留空并设置 AGRIPPA_EXECUTOR=fake
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 ```
 
 `POSTGRES_PASSWORD` 必须使用**十六进制**：它会被拼接进 `DATABASE_URL`，而 base64 可能产生 `/`，导致该 URL 无法解析。它还只在数据库卷首次创建时生效——之后再修改必须同时执行 `ALTER ROLE`（见[运维 → 轮换数据库密码](06-operations.md#轮换数据库密码)）。

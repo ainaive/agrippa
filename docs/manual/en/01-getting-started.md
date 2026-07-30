@@ -12,7 +12,7 @@ cp infra/env/.env.example infra/env/.env
 #   AGRIPPA_SECRET_KEY   ← openssl rand -base64 32   (back it up!)
 #   BETTER_AUTH_SECRET   ← openssl rand -base64 32
 #   ANTHROPIC_API_KEY    ← your key, or leave empty with AGRIPPA_EXECUTOR=fake
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 ```
 
 `POSTGRES_PASSWORD` must be **hex**: it is interpolated into `DATABASE_URL`, and base64 can emit `/`, which makes the URL unparseable. It is also applied only when the database volume is first created — changing it later needs an `ALTER ROLE` as well ([Operations → rotating the database password](06-operations.md#rotating-the-database-password)).

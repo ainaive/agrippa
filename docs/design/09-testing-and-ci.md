@@ -81,7 +81,7 @@ On PR + push to `main` / `feat/**`:
 
 ```
 bun install
-docker compose -f infra/docker-compose.dev.yml up -d   # pg + redis
+docker compose -p agrippa-dev -f infra/docker-compose.dev.yml up -d   # pg + redis
 bun run db:migrate && bun run db:seed
 bun dev            # api + worker + web concurrently (bun --filter)
 bun run check      # biome + tsc

@@ -11,6 +11,8 @@
 | `postgres` | System of record | Also carries the job queue (pg-boss) — no separate broker |
 | `redis` | Live-event fan-out only | **Disposable**: if it's down, live streams degrade to replay/polling; correctness is unaffected |
 
+Every command in this manual names the compose project explicitly (`-p agrippa`). The project is also pinned in the compose file, so the flag is redundant *until* something sets `COMPOSE_PROJECT_NAME` in your shell — then an unpinned command silently operates a different stack, which for `down -v` means deleting the wrong volumes. If you are running a second stack deliberately (a restore drill, a staging copy), substitute its project name rather than dropping the flag.
+
 ## First-run: create the admin
 
 Self-registration is **closed** — the instance is invite-only, so the very first user can't sign up. Create the org admin out-of-band, exactly once, then sign in:
@@ -21,7 +23,7 @@ Self-registration is **closed** — the instance is invite-only, so the very fir
 # would NOT reach the process; and keeping them in the api service's
 # environment: would park an admin password in a long-lived container.
 read -r -s -p 'admin password: ' PW; echo
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec \
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env exec \
   -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
   api bun apps/api/src/cli/bootstrap-admin.ts
@@ -36,7 +38,7 @@ sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
 If the api container isn't up yet, use `run` instead of `exec` — note the `-e` flags go **before** the service name:
 
 ```sh
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
   -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
   api bun apps/api/src/cli/bootstrap-admin.ts
@@ -95,9 +97,9 @@ Workers register the executors they can actually run, at boot and on a 60 s hear
 This matters because **Requirement Delivery** binds its reviewer slot to `codex-cli`. Check after any deploy:
 
 ```sh
-docker compose logs worker | grep -i codex
-docker compose exec worker codex --version
-docker compose exec -T postgres psql -U agrippa -d agrippa \
+docker compose -p agrippa logs worker | grep -i codex
+docker compose -p agrippa exec worker codex --version
+docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
   -c "select executor_id, registered_at from executor_registrations order by 1;"
 ```
 
@@ -166,7 +168,7 @@ Drop and recreate rather than `pg_restore --clean`: `--clean` only drops what th
 
 A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** a worker has registered its executors. The replica count matters because the worker registers before it starts consuming the queue, so a fresh registration alone would pass a worker that died during startup. Residual gap: a worker that stays up but wedges after registering is not detected.
 
-Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
+Pull new images and `docker compose -p agrippa up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 
 ### Upgrading from a deployment created before the compose project was named
 
@@ -176,7 +178,7 @@ Releases up to and including `v0.2.0` shipped `infra/docker-compose.yml` with no
 # 0. ONLY if you already ran `docker compose up -d` on the new code, which
 #    created an empty agrippa stack. Confirm `docker volume ls` still shows your
 #    data under infra_* first — this deletes the new, empty volumes.
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env down -v
 
 # 1. stop the old stack — WITHOUT -v, which would delete the data
 docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
@@ -217,7 +219,7 @@ for v in pgdata artifacts workspaces; do
 done
 
 # 4. start under the new project name and verify before cleaning up
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 curl -fsS http://127.0.0.1:3000/healthz
 
 # 5. only once you're satisfied — this is the irreversible step
@@ -245,9 +247,9 @@ Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (
 | `git.push` fails / `pr.open needs a stored repo credential` | Publishing needs a token even for public repos (anonymous HTTPS is read-only) — add a connection with a token that has contents + pull-request write access. |
 | `pr.open is not supported for provider 'generic-git'` | The branch was pushed but only GitHub/GitLab/GitCode connections can create the PR — recreate the connection with the right provider, or open the PR manually. |
 | Need to inspect what an agent actually did on disk | Set `AGRIPPA_KEEP_WORKSPACES=1` on the worker and re-run; workspaces persist under `WORKSPACE_ROOT/<runId>`. |
-| Submission rejected `executor_unavailable` | No live worker registered that executor. For `codex-cli`, check `docker compose logs worker \| grep -i codex` — the reason string comes straight from the CLI probe. |
+| Submission rejected `executor_unavailable` | No live worker registered that executor. For `codex-cli`, check `docker compose -p agrippa logs worker \| grep -i codex` — the reason string comes straight from the CLI probe. |
 | Run sits `queued` with a deferral event mentioning provider auth | The worker has no usable credential for the provider that step resolved to — add the key to worker env, or a project credential under Settings → Providers. |
 | `healthz` returns 503 | The api can't reach Postgres — check `DATABASE_URL` and the postgres service. |
-| (Docker) sandboxing is suspect | Expected: under Docker's default profiles bubblewrap **cannot** create namespaces, and the sandbox degrades silently. Restoring it needs `seccomp=unconfined` *and* `CAP_SYS_ADMIN` — a worse trade than accepting the container as the boundary (see [design/08](../../design/08-deployment.md)). Use the VM topology if you need OS-level sandboxing. Probe: `docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true`. |
+| (Docker) sandboxing is suspect | Expected: under Docker's default profiles bubblewrap **cannot** create namespaces, and the sandbox degrades silently. Restoring it needs `seccomp=unconfined` *and* `CAP_SYS_ADMIN` — a worse trade than accepting the container as the boundary (see [design/08](../../design/08-deployment.md)). Use the VM topology if you need OS-level sandboxing. Probe: `docker compose -p agrippa exec worker bwrap --unshare-all --ro-bind / / /bin/true`. |
 | (VM) worker stuck in "activating" | Its `ExecStartPre` is waiting for the api's `/healthz` (up to 120 s) — check `journalctl -u agrippa-api` for why the api isn't healthy. |
 | (VM) agent commands fail, or sandboxing is suspect on Ubuntu 24.04 | AppArmor's `apparmor_restrict_unprivileged_userns` can block bubblewrap — and without bwrap the sandbox degrades **silently**. Probe with `sudo -u agrippa bwrap --unshare-all --ro-bind / / /bin/true`; if it fails, allow unprivileged user namespaces (or install a bwrap AppArmor profile) and restart the worker. |
