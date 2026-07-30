@@ -68,6 +68,8 @@ case "$1" in
             echo "\${STUB_API_HEALTH:-healthy}" ;;
           *"{{.Service}}"*)
             for _ in $(seq 1 "\${STUB_WORKERS_RUNNING:-1}"); do echo worker; done ;;
+          *"-q"*)
+            for i in $(seq 1 "\${STUB_WORKERS_RUNNING:-1}"); do echo "workerctr$i"; done ;;
         esac
         exit 0 ;;
       build) exit "\${STUB_BUILD_RC:-0}" ;;
@@ -84,7 +86,20 @@ case "$1" in
         exit 0 ;;
     esac
     exit 0 ;;
-  inspect) echo "ghcr.io/ainaive/agrippa-api:\${STUB_RUNNING_TAG:-latest}"; exit 0 ;;
+  inspect)
+    case "$*" in
+      *RestartCount*)
+        # STUB_RESTART_GROWS simulates a crash-looping worker: the count must
+        # CHANGE between probes, so a fixed value would not reproduce it.
+        if [ "\${STUB_RESTART_GROWS:-0}" = "1" ]; then
+          c=$(cat "$STUB_LOG.restarts" 2>/dev/null || echo 0)
+          c=$((c + 1)); echo "$c" > "$STUB_LOG.restarts"; echo "$c"
+        else
+          echo "\${STUB_RESTART_COUNT:-0}"
+        fi ;;
+      *) echo "ghcr.io/ainaive/agrippa-api:\${STUB_RUNNING_TAG:-latest}" ;;
+    esac
+    exit 0 ;;
   images)  exit 0 ;;
   rmi)     exit 0 ;;
 esac
@@ -418,6 +433,21 @@ describe("infra/deploy.sh", () => {
     const r = await run({ COMPOSE_PROJECT_NAME: "agrippadrill" });
     expect(r.exitCode).toBe(0);
     expectEveryComposeCallIsPinned(r.log, "agrippadrill");
+  }, 20_000);
+
+  it("fails a deploy whose worker is crash-looping, not just one that is down", async () => {
+    // Compose gained `restart: unless-stopped` so the stack returns after a
+    // host reboot. That alone would have made this deploy report SUCCESS: a
+    // crash-looping worker is "running" between restarts, and it registers its
+    // executors before it can die during consumer setup — so both the replica
+    // count and the fresh-registration check pass on the upswing of each loop.
+    //
+    // The stub's count increments per probe, which is what a restart policy
+    // actually produces and what a fixed value could not reproduce.
+    const r = await run({ STUB_RESTART_GROWS: "1" });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("worker never became ready");
+    expect(r.stderr).toContain("rolling back");
   }, 20_000);
 
   it("fails with its own message when the compose file has no name:", async () => {

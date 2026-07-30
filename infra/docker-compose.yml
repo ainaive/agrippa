@@ -11,6 +11,11 @@ name: agrippa
 
 services:
   api:
+    # unless-stopped, not always: an operator who deliberately stops the stack
+    # should find it still stopped after a reboot. Without any policy the whole
+    # instance stays down silently after a host restart — nothing supervises
+    # compose here (infra/janus/agrippa-deploy@.service is the one-shot deploy).
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: infra/Dockerfile.api
@@ -53,6 +58,12 @@ services:
       retries: 5
 
   worker:
+    # See deploy.sh worker_ok(): this policy means a crash-looping worker shows
+    # as "running" between restarts, and it registers its executors BEFORE it
+    # can die during consumer setup — so it would satisfy both halves of the
+    # readiness check. worker_ok() therefore also fails on RestartCount moving
+    # during verification. Do not add this policy without that check.
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: infra/Dockerfile.worker
@@ -100,6 +111,7 @@ services:
 
   postgres:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: agrippa
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agrippa}
@@ -114,6 +126,7 @@ services:
 
   redis:
     image: redis:7
+    restart: unless-stopped
 
 volumes:
   pgdata:

@@ -250,6 +250,19 @@ api_ok() {
 # Residual gap, accepted: a worker that stays up but wedges *after* registering
 # is not detected. Closing that needs a readiness signal written after
 # boss.work() returns, which is an apps/worker change.
+# Summed RestartCount across the worker containers. Empty/again-unavailable
+# reads return 0 rather than failing: this is a tie-breaker on top of the two
+# checks below, and a docker hiccup should not by itself fail a deploy.
+worker_restarts() {
+  local ids
+  ids="$(compose ps -q worker 2>/dev/null || true)"
+  [ -n "$ids" ] || { printf '0'; return 0; }
+  # word-splitting is intended — docker inspect takes many ids
+  # shellcheck disable=SC2086
+  docker inspect -f '{{.RestartCount}}' $ids 2>/dev/null |
+    awk '{s += $1} END {print s + 0}'
+}
+
 worker_ok() {
   local since="$1" n running expected
   # Take digits only: the env file may carry an inline comment or CRLF endings,
@@ -265,6 +278,18 @@ worker_ok() {
   # push the total past the stated budget. statement_timeout goes through
   # PGOPTIONS, not an inline `set`: a `set` statement prints "SET" to stdout,
   # which would corrupt the count this reads.
+  # Compose now sets `restart: unless-stopped` so the stack returns after a host
+  # reboot. That breaks the assumption above on its own: a crash-looping worker
+  # is "running" between restarts, and it registers its executors BEFORE it can
+  # die during consumer setup, so it would satisfy both the replica count and
+  # the fresh-registration check and report a failed deploy as successful.
+  # RestartCount moving during verification is what distinguishes looping from
+  # up. Baseline is taken once per stack_ok() call, after `up -d` recreated the
+  # containers, so it starts from whatever the fresh containers report.
+  local restarts
+  restarts="$(worker_restarts)"
+  [ "$restarts" = "${worker_restart_baseline:-$restarts}" ] || return 1
+
   local budget="${probe_budget:-10}"
   [ "$budget" -gt 1 ] 2>/dev/null || budget=1
   [ "$budget" -le 10 ] || budget=10
@@ -289,6 +314,10 @@ worker_ok() {
 # slowest step.
 stack_ok() {
   local since=$(($(date +%s) - 5))
+  # Captured after `up -d` recreated the containers, so a worker that starts
+  # crash-looping during verification shows as a change rather than a level.
+  worker_restart_baseline="$(worker_restarts)"
+
   local deadline=$(($(date +%s) + HEALTH_TIMEOUT))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     probe_budget=$((deadline - $(date +%s)))

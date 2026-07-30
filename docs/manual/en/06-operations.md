@@ -117,6 +117,8 @@ Changes to `deploy.sh` itself land one deploy later: the running script was read
 
 The host checkout sits on a **detached HEAD** at the deployed commit, so `git pull` there fails rather than quietly advancing the tree past the running images — compose config, `.env` defaults and Dockerfiles all come from that tree. To see what is deployed, `git -C /opt/agrippa log -1`; to change it, move the `deploy` branch and push.
 
+All four services are `restart: unless-stopped`, so the stack comes back after a host reboot; nothing else supervises it. Note this is coupled to verification — a crash-looping worker looks "running" between restarts, so the deploy also fails if the workers' restart count moves while it is being verified. Do not remove one without the other.
+
 It always rebuilds, deliberately: the SPA and the API are baked into the api image, so a bare `git pull && docker compose up -d` restarts the **old** code and looks like it worked. Build cache keeps a docs-only deploy cheap. A `flock` serializes concurrent deploys, and only the current and previous image tags are kept (each pair is ~4 GB).
 
 Two things it will not do. It **only deploys commits reachable from the `deploy` branch** — an arbitrary SHA is refused, which is what keeps the root-level grant meaningful. And **rollback does not revert the database**: the API applies migrations on boot before it is healthy, and some are irreversible.
