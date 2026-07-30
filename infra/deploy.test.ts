@@ -356,4 +356,44 @@ describe("infra/deploy.sh", () => {
     // (The surrounding prose explains that, so match the command, not the word.)
     expect(r.stderr).not.toContain("-d agrippa --clean");
   }, 20_000);
+
+  it("detaches HEAD instead of dragging the checked-out branch along", async () => {
+    // The live host was checked out on a local branch named `main` that tracked
+    // GitHub's origin/main — a ref deploy.sh never fetches, since it fetches the
+    // deploy ref alone. Every deploy force-moved that branch to the deploy tip,
+    // so `main` named one thing and pointed at another, reported "ahead 13" of a
+    // ref nobody updates.
+    //
+    // The cost is not just the confusing name. On a branch, a stray `git pull`
+    // on the host advances the tree past the running images; compose config,
+    // .env defaults and Dockerfiles are read from that tree, so manual compose
+    // commands — including the restore procedure this script prints on rollback
+    // — would run against config that does not match what is running. Detached,
+    // that pull fails outright.
+    //
+    // Deploy and main must differ for this to mean anything: if `deploy` were an
+    // ancestor of the checked-out branch, resetting would leave the branch where
+    // it was and the case would pass with or without the detach.
+    const mainSha = new TextDecoder().decode(git(appDir, "rev-parse", "main").stdout).trim();
+    git(appDir, "checkout", "-q", "deploy");
+    writeFileSync(path.join(appDir, "infra", "docker-compose.yml"), "services:\n  api:\n  # v2\n");
+    git(appDir, "commit", "-aqm", "a commit that is on deploy but not on main");
+    const deployTip = new TextDecoder().decode(git(appDir, "rev-parse", "deploy").stdout).trim();
+    git(appDir, "checkout", "-q", "main");
+    expect(deployTip).not.toBe(mainSha); // precondition
+
+    const r = await run();
+    expect(r.exitCode).toBe(0);
+
+    // HEAD is at the deployed commit and on no branch at all
+    const head = new TextDecoder().decode(git(appDir, "rev-parse", "HEAD").stdout).trim();
+    const branch = new TextDecoder()
+      .decode(git(appDir, "rev-parse", "--abbrev-ref", "HEAD").stdout)
+      .trim();
+    expect(head).toBe(deployTip);
+    expect(branch).toBe("HEAD"); // what git reports when detached
+
+    // ...and the local branch was left exactly where the operator had it
+    expect(new TextDecoder().decode(git(appDir, "rev-parse", "main").stdout).trim()).toBe(mainSha);
+  }, 20_000);
 });

@@ -280,6 +280,22 @@ stack_ok() {
 }
 
 # ── build ────────────────────────────────────────────────────────────────────
+# Detach first. With HEAD on a local branch, `reset --hard` force-moves that
+# branch on every deploy, so its name drifts from whatever it tracks — a host
+# checked out on "main" ends up with "main" pointing at the deploy branch's tip
+# and reported as ahead of a stale origin nobody fetches.
+#
+# The bigger reason is that detaching makes `git pull` here fail ("You are not
+# currently on a branch") instead of quietly advancing the tree past the running
+# images. Compose config, .env defaults and Dockerfiles are all read from this
+# tree, so a tree ahead of the deployed commit means manual compose commands —
+# including the restore procedure this script prints on rollback — run against a
+# config that does not match what is running.
+#
+# With no argument it detaches at the current commit and leaves the working tree
+# alone, so the reset below still does all the forcing. Detaching here also
+# covers rollback(), which resets too and only ever runs after this point.
+git checkout -q --detach
 # Always build: the cache makes a docs-only deploy cheap, and change-detection
 # that guesses wrong fails silently by running stale code.
 git reset --hard -q "$sha"

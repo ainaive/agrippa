@@ -61,6 +61,10 @@ Secrets policy: the master key and the deployment's **fallback** provider API ke
   It refuses any commit **not reachable from `deploy`** — the privileged path that lets Janus call
   it as root would otherwise make every branch deployable, and root-owning the tree would buy
   nothing.
+  The host checkout is left on a **detached HEAD** at the deployed commit: on a local branch, each
+  deploy would force-move that branch, and a stray `git pull` would advance the tree past the
+  running images — compose config, `.env` defaults and Dockerfiles are read from that tree, so
+  manual compose commands would then use config that does not match what is running.
   Verification covers **both** services: the api's compose healthcheck, and a fresh
   `executor_registrations` heartbeat proving the worker registered its executors. Rollback restores
   the previous commit's *code and config*, not the database — the api migrates on boot before it is

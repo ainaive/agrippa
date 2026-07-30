@@ -112,6 +112,8 @@ docker compose exec -T postgres psql -U agrippa -d agrippa \
 
 Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode 拉取代码、构建以所部署提交号打标签的镜像、启动、等待 `/healthz`，若新版本起不来则**回滚到上一个标签**。可随时手动执行；向 `deploy` 分支推送时，Janus 会通过 `.janus/deploy.yml` 自动运行同一个脚本。
 
+服务器上的工作副本处于**游离 HEAD**（detached HEAD）状态，指向已部署的那个提交，因此在该目录执行 `git pull` 会直接失败，而不会悄悄把工作树推进到运行中镜像之后——Compose 配置、`.env` 默认值与 Dockerfile 都取自这棵工作树。查看当前部署的提交用 `git -C /opt/agrippa log -1`；要变更则移动 `deploy` 分支并推送。
+
 它每次都会重新构建，这是刻意为之：SPA 与 API 都在构建镜像时打包进 api 镜像，因此单纯的 `git pull && docker compose up -d` 会重启**旧**代码，且看起来像是成功了。构建缓存让纯文档变更的部署依然很快。脚本用 `flock` 串行化并发部署，并且只保留当前与上一个镜像标签（每组约 4 GB）。
 
 有两点它不会做。它**只部署能从 `deploy` 分支追溯到的提交**——任意 SHA 会被拒绝，这正是那条 root 级授权得以成立的前提。以及**回滚不会还原数据库**：API 在启动、尚未健康之前就会执行迁移，其中部分不可逆。
