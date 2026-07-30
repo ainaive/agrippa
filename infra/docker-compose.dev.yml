@@ -1,5 +1,5 @@
 # Development dependencies only — api/worker/web run on the host via `bun dev`.
-# Usage: docker compose -f infra/docker-compose.dev.yml up -d
+# Usage: docker compose -p agrippa-dev -f infra/docker-compose.dev.yml up -d
 #
 # Named, like the production file. Without `name:` the project falls back to the
 # parent directory — `infra` — which is exactly what the production stack was

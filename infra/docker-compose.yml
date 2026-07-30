@@ -1,7 +1,7 @@
 # Agrippa production stack (docs/design/08-deployment.md).
 # Usage:
 #   cp infra/env/.env.example infra/env/.env   # fill in the secrets
-#   docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+#   docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 #
 # Pinned explicitly: the project name otherwise defaults to the compose file's
 # directory, so the volumes below would be created as `infra_pgdata` etc. —

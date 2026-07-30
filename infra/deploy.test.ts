@@ -54,6 +54,13 @@ case "$1" in
   compose)
     case "$sub" in
       config)
+        # STUB_CONFIG_RC: compose itself refuses to render — an unresolvable
+        # \${VAR:?…} is the realistic case. The message goes to STDERR, which is
+        # the whole point: it is the only place the offending variable is named.
+        if [ "\${STUB_CONFIG_RC:-0}" != "0" ]; then
+          echo "error while interpolating services.postgres.environment.POSTGRES_PASSWORD: required variable POSTGRES_PASSWORD is missing a value: set POSTGRES_PASSWORD" >&2
+          exit "$STUB_CONFIG_RC"
+        fi
         # deploy.sh greps this for the tag it expects to have set
         [ "\${STUB_CONFIG_TAG:-1}" = "1" ] &&
           echo "    image: ghcr.io/ainaive/agrippa-api:\${AGRIPPA_VERSION}"
@@ -297,6 +304,21 @@ describe("infra/deploy.sh", () => {
     const r = await run({ STUB_CONFIG_TAG: "0" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("did not reach compose");
+  }, 20_000);
+
+  it("reports a compose config failure as itself, not as a tagging problem", async () => {
+    // These were one pipeline with 2>/dev/null, so every non-zero `compose
+    // config` — an unresolvable variable most of all — was reported as
+    // "AGRIPPA_VERSION did not reach compose; images would be mistagged".
+    // Making POSTGRES_PASSWORD required means an upgrading operator hits
+    // exactly this path and is pointed at image tagging.
+    const r = await run({ STUB_CONFIG_RC: "1" });
+    expect(r.exitCode).not.toBe(0);
+    // compose's own stderr survives, naming the variable at fault
+    expect(r.stderr).toContain("POSTGRES_PASSWORD");
+    // and it is NOT relabelled — this assertion is what the fix earns; without
+    // it the case would pass against the old single-pipeline form too
+    expect(r.stderr).not.toContain("did not reach compose");
   }, 20_000);
 
   it("treats HEALTH_TIMEOUT as wall-clock even when probes are slow", async () => {

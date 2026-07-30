@@ -370,6 +370,16 @@ git --no-pager log -1 --format='    %h %s' | cat
 # rollback would silently restore the wrong image. Log messages stay short.
 export AGRIPPA_VERSION="$sha"
 log "build ($AGRIPPA_VERSION)"
+# Two checks, deliberately separate. `compose config` fails for reasons that
+# have nothing to do with tagging — an unresolvable ${VAR:?…} is the common one
+# now that POSTGRES_PASSWORD is required — and its stderr is the only place that
+# names the variable at fault. These used to be one pipeline with 2>/dev/null,
+# which threw that away and relabelled every failure as a tagging problem: an
+# operator upgrading without POSTGRES_PASSWORD was told their images would be
+# mistagged. Rendering twice is fine — it is a local template expansion.
+config_err="$(compose config 2>&1 >/dev/null)" ||
+  rollback "compose config failed, the stack cannot render: $config_err"
+
 # Prove the tag reached compose before spending minutes building — the .env
 # file also defines AGRIPPA_VERSION, and shell precedence is the only reason
 # ours wins.
