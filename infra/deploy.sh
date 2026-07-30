@@ -78,11 +78,19 @@ die() {
 COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:/{print $2; exit}' "$COMPOSE_FILE")}"
 [ -n "$COMPOSE_PROJECT" ] || die "no 'name:' in $COMPOSE_FILE and COMPOSE_PROJECT_NAME is unset"
 
-# The dumps below are a full copy of production, and this host also runs Janus
-# as an unprivileged `janus` user that the deploy design treats as untrusted.
-# An inherited 022 umask would write them 0644 in a 0755 directory — readable by
-# exactly the account the root-owned tree exists to keep out.
-umask 077
+# Set explicitly, so file modes do not depend on who invoked this — a systemd
+# unit, a login shell and the test harness must all produce the same image.
+#
+# It must be PERMISSIVE. `git reset --hard` below creates every file it rewrites
+# under this umask, the image build COPYs those modes verbatim, and the
+# containers run as non-root `bun` against a root-owned /app. A 077 here shipped
+# 0600 source files and the app died at boot with `EACCES reading
+# /app/packages/db/src/client.ts`. It sat latent through every earlier deploy
+# because none of them changed a file under apps/ or packages/.
+#
+# The dump still needs 077; it gets it in a subshell at the point it is written,
+# and $STATE_DIR is 0700 root-owned besides.
+umask 022
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 
@@ -149,7 +157,12 @@ dump=""
 if [ "$(compose ps --status running --services 2>/dev/null | grep -cx postgres)" -eq 1 ]; then
   dump="$STATE_DIR/pgdump-$(date +%Y%m%d-%H%M%S)-${short_sha}.dump"
   log "database dump → $dump"
-  if compose exec -T postgres pg_dump -U agrippa -Fc agrippa > "$dump" 2>/dev/null; then
+  # Tight umask scoped to this one redirect: the dump is a full copy of
+  # production and this host runs Janus as an untrusted `janus` user. Scoped
+  # rather than script-wide because a script-wide 077 also clamps everything
+  # `git reset --hard` writes. Created private in the subshell, so it is never
+  # briefly world-readable.
+  if ( umask 077; compose exec -T postgres pg_dump -U agrippa -Fc agrippa > "$dump" ) 2>/dev/null; then
     # keep the most recent few; each is small but they accumulate per deploy
     ls -1t "$STATE_DIR"/pgdump-*.dump 2>/dev/null | tail -n +$((KEEP_DUMPS + 1)) | xargs -r rm -f
   else

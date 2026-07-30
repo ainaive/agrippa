@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -259,6 +260,36 @@ describe("infra/deploy.sh", () => {
     expect(dumps.length).toBe(1);
     expect(statSync(path.join(stateDir, dumps[0] as string)).mode & 0o777).toBe(0o600);
     expect(statSync(stateDir).mode & 0o777).toBe(0o700);
+  }, 20_000);
+
+  it("leaves rewritten source files readable by the image's non-root user", async () => {
+    // The images COPY whatever modes the tree has, /app stays root-owned, and
+    // the containers run as `bun`. deploy.sh used to set a script-wide `umask
+    // 077` to protect the database dump, which also applied to `git reset
+    // --hard` — so every file a deploy REWROTE landed 0600 and the app died at
+    // boot with `EACCES reading /app/packages/db/src/client.ts`. Latent until
+    // the first deploy that changed anything under apps/ or packages/.
+    //
+    // The file has to be CREATED by the reset to mean anything: one that is
+    // already present at the right mode proves nothing, because git would not
+    // touch it.
+    const srcDir = path.join(appDir, "packages", "db", "src");
+    mkdirSync(srcDir, { recursive: true });
+    const src = path.join(srcDir, "client.ts");
+    writeFileSync(src, "export const x = 1;\n");
+    git(appDir, "add", "-A");
+    git(appDir, "commit", "-qm", "add application source");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    git(appDir, "reset", "--hard", "-q", "HEAD~1");
+    expect(existsSync(src)).toBe(false); // precondition: the reset must create it
+
+    const r = await run();
+    expect(r.exitCode).toBe(0);
+
+    // Exactly 0644, not merely "readable": the point of setting the umask
+    // explicitly is determinism, and a `mode & 0o044` check would also pass
+    // under a 002 umask that left the file group-WRITABLE.
+    expect(statSync(src).mode & 0o777).toBe(0o644);
   }, 20_000);
 
   it("retains only the newest KEEP_DUMPS dumps", async () => {
