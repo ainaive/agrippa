@@ -74,9 +74,18 @@ case "$1" in
             [ -n "\${STUB_HEALTH_DELAY:-}" ] && /bin/sleep "$STUB_HEALTH_DELAY"
             echo "\${STUB_API_HEALTH:-healthy}" ;;
           *"{{.Service}}"*)
-            for _ in $(seq 1 "\${STUB_WORKERS_RUNNING:-1}"); do echo worker; done ;;
+            # NOT \`seq 1 $n\`: BSD seq counts DOWN when first > last, so
+            # \`seq 1 0\` emits "1 0" on macOS and nothing on GNU/CI. That made
+            # STUB_WORKERS_RUNNING=0 mean "two workers" locally and "no workers"
+            # in CI — the dead-worker case was silently testing a count mismatch
+            # on every developer machine.
+            i=0
+            while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do echo worker; i=$((i + 1)); done ;;
           *"-q"*)
-            for i in $(seq 1 "\${STUB_WORKERS_RUNNING:-1}"); do echo "workerctr$i"; done ;;
+            i=0
+            while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do
+              i=$((i + 1)); echo "workerctr$i"
+            done ;;
         esac
         exit 0 ;;
       build) exit "\${STUB_BUILD_RC:-0}" ;;
@@ -295,6 +304,20 @@ describe("infra/deploy.sh", () => {
   it("fails when a worker replica is not running, even with a fresh registration", async () => {
     // the case that used to pass: api healthy, registration present, worker dead
     const r = await run({ STUB_WORKERS_RUNNING: "0", STUB_REGISTRATIONS: "1" });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("worker never became ready");
+  }, 20_000);
+
+  it("fails when MORE workers run than WORKER_REPLICAS expects", async () => {
+    // The other half of the equality check, and the one nothing covered. This
+    // is what `docker compose up --scale worker=3` produces against
+    // WORKER_REPLICAS=1 — the design doc recommended exactly that until it was
+    // corrected, and it rolls back a perfectly healthy stack.
+    //
+    // Worth its own case rather than trusting the `running=0` one: relaxing
+    // `-eq` to `-ge` is a plausible refactor, it keeps that case green, and it
+    // would silently let an out-of-band-scaled stack pass verification.
+    const r = await run({ STUB_WORKERS_RUNNING: "3", STUB_REGISTRATIONS: "1" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("worker never became ready");
   }, 20_000);

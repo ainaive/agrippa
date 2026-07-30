@@ -236,6 +236,8 @@ Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (
 
 | Symptom | Likely cause / fix |
 |---|---|
+| Deploy fails `AGRIPPA_VERSION did not reach compose; images would be mistagged` | Compose could not render the file at all — most often a required variable is unset (`POSTGRES_PASSWORD` since it became mandatory). The message is wrong because the *previous* release's `deploy.sh` discarded compose's stderr, and script changes only take effect one deploy later. Your stack was rolled back and is running. Run `docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env config` by hand to see the real error, fix it, redeploy. Deploys from this release onward report the cause directly. |
+| Deploy rolls back with `worker never became ready` after you scaled workers | You scaled out of band (`--scale`). `deploy.sh` requires the running worker count to equal `WORKER_REPLICAS` exactly — set that variable in `infra/env/.env` instead and redeploy. |
 | Run stuck in `queued` | No worker running, or the enqueue was lost — the worker's sweeper re-enqueues queued runs older than 30 s automatically once a worker is up. Check worker logs. |
 | Live progress lags ~1 s, no push | `REDIS_URL` unset/unreachable — SSE falls back to DB polling. Harmless; restore Redis for instant updates. |
 | Submission rejected `skill_not_granted` / `mcp_not_granted` / `model_unresolvable` | Grant the resource under Project → Settings → Resources (models must cover the tiers the template requests). |
