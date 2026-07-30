@@ -50,15 +50,6 @@ KEEP_DUMPS="${KEEP_DUMPS:-5}"
 
 COMPOSE_FILE="$APP_DIR/infra/docker-compose.yml"
 ENV_FILE="$APP_DIR/infra/env/.env"
-# Name the project explicitly rather than letting compose resolve it from the
-# file's `name:`. The restore procedure printed on failure is copy-pasted by an
-# operator into a shell that may not share this one's environment, and without
-# -p it resolves against whatever `name:` the tree happens to carry — which is
-# the WRONG STACK if this deploy was run with COMPOSE_PROJECT_NAME set. Found by
-# running the restore drill against a throwaway stack: the printed commands
-# would have dropped the production database.
-COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:/{print $2; exit}' "$COMPOSE_FILE")}"
-[ -n "$COMPOSE_PROJECT" ] || die "could not determine the compose project name from $COMPOSE_FILE"
 LAST_GOOD="$STATE_DIR/last-good"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -70,6 +61,22 @@ die() {
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0"
 [ -f "$COMPOSE_FILE" ] || die "no compose file at $COMPOSE_FILE"
 [ -f "$ENV_FILE" ] || die "no env file at $ENV_FILE"
+
+# Name the project explicitly rather than letting compose resolve it from the
+# file's `name:`. The restore procedure printed on failure is copy-pasted by an
+# operator into a shell that may not share this one's environment, and without
+# -p it resolves against whatever `name:` the tree happens to carry — which is
+# the WRONG STACK if this deploy was run with COMPOSE_PROJECT_NAME set. Found by
+# running the restore drill against a throwaway stack: the printed commands
+# would have dropped the production database.
+#
+# Deliberately below die() and the -f guard above, not beside the other
+# assignments. It was above both, which made those guards dead code: a missing
+# compose file killed the script on awk's own error under `set -e`, and a
+# compose file with no `name:` reached a `die` that did not exist yet — exit
+# 127, `die: command not found`, no explanation.
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:/{print $2; exit}' "$COMPOSE_FILE")}"
+[ -n "$COMPOSE_PROJECT" ] || die "no 'name:' in $COMPOSE_FILE and COMPOSE_PROJECT_NAME is unset"
 
 # The dumps below are a full copy of production, and this host also runs Janus
 # as an unprivileged `janus` user that the deploy design treats as untrusted.
@@ -230,19 +237,39 @@ api_ok() {
   [ "$(compose ps --format '{{.Health}}' api 2>/dev/null | head -n1)" = "healthy" ]
 }
 
-# The worker has no HTTP surface and no healthcheck, so verify two things.
+# The worker has no HTTP surface and no healthcheck, so verify THREE things:
+# every expected replica running, RestartCount steady, and a fresh registration.
+# All three are load-bearing; none is instrumentation.
 #
 # A fresh executor_registrations row alone is NOT enough: the worker registers
 # (apps/worker/src/index.ts) before it starts its pg-boss consumers, so it can
 # register and then die during consumer setup and still look deployed. And
 # registrations are global per executor, so with WORKER_REPLICAS > 1 one healthy
-# replica would mask the rest. Also require every expected replica to be
-# running — compose sets no restart policy, so a crashed worker leaves an exited
-# container that this catches.
+# replica would mask the rest — hence the replica count.
+#
+# The replica count is not enough either, now that compose sets
+# `restart: unless-stopped` so the stack survives a host reboot: a crash-looping
+# worker reads as running between restarts, and it has already registered before
+# it dies. That is what the RestartCount comparison below is for. Deleting it
+# restores the masking exactly — infra/deploy.test.ts covers that, but this
+# comment is what a reader trusts first.
 #
 # Residual gap, accepted: a worker that stays up but wedges *after* registering
 # is not detected. Closing that needs a readiness signal written after
 # boss.work() returns, which is an apps/worker change.
+# Summed RestartCount across the worker containers. Empty/again-unavailable
+# reads return 0 rather than failing: this is a tie-breaker on top of the two
+# checks below, and a docker hiccup should not by itself fail a deploy.
+worker_restarts() {
+  local ids
+  ids="$(compose ps -q worker 2>/dev/null || true)"
+  [ -n "$ids" ] || { printf '0'; return 0; }
+  # word-splitting is intended — docker inspect takes many ids
+  # shellcheck disable=SC2086
+  docker inspect -f '{{.RestartCount}}' $ids 2>/dev/null |
+    awk '{s += $1} END {print s + 0}'
+}
+
 worker_ok() {
   local since="$1" n running expected
   # Take digits only: the env file may carry an inline comment or CRLF endings,
@@ -258,12 +285,27 @@ worker_ok() {
   # push the total past the stated budget. statement_timeout goes through
   # PGOPTIONS, not an inline `set`: a `set` statement prints "SET" to stdout,
   # which would corrupt the count this reads.
+  # Compose now sets `restart: unless-stopped` so the stack returns after a host
+  # reboot. That breaks the assumption above on its own: a crash-looping worker
+  # is "running" between restarts, and it registers its executors BEFORE it can
+  # die during consumer setup, so it would satisfy both the replica count and
+  # the fresh-registration check and report a failed deploy as successful.
+  # RestartCount moving during verification is what distinguishes looping from
+  # up. Baseline is taken once per stack_ok() call, after `up -d` recreated the
+  # containers, so it starts from whatever the fresh containers report.
+  local restarts
+  restarts="$(worker_restarts)"
+  [ "$restarts" = "${worker_restart_baseline:-$restarts}" ] || return 1
+
   local budget="${probe_budget:-10}"
   [ "$budget" -gt 1 ] 2>/dev/null || budget=1
   [ "$budget" -le 10 ] || budget=10
-  # spelled out rather than via compose(): `timeout` needs a real command
+  # Spelled out rather than via compose(): `timeout` needs a real command. Keep
+  # -p in step with compose() — this was the one invocation without it, and it
+  # would query a different project than `up -d` acted on whenever the deployed
+  # commit's `name:` differs from the tree's at script start.
   n="$(timeout "$budget" \
-    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+    docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
     exec -T -e PGCONNECT_TIMEOUT=2 -e PGOPTIONS="-c statement_timeout=${budget}s" \
     postgres psql -U agrippa -d agrippa -tAc \
     "select count(*) from executor_registrations where registered_at > to_timestamp($since);" \
@@ -279,6 +321,10 @@ worker_ok() {
 # slowest step.
 stack_ok() {
   local since=$(($(date +%s) - 5))
+  # Captured after `up -d` recreated the containers, so a worker that starts
+  # crash-looping during verification shows as a change rather than a level.
+  worker_restart_baseline="$(worker_restarts)"
+
   local deadline=$(($(date +%s) + HEALTH_TIMEOUT))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     probe_budget=$((deadline - $(date +%s)))
@@ -324,6 +370,16 @@ git --no-pager log -1 --format='    %h %s' | cat
 # rollback would silently restore the wrong image. Log messages stay short.
 export AGRIPPA_VERSION="$sha"
 log "build ($AGRIPPA_VERSION)"
+# Two checks, deliberately separate. `compose config` fails for reasons that
+# have nothing to do with tagging — an unresolvable ${VAR:?…} is the common one
+# now that POSTGRES_PASSWORD is required — and its stderr is the only place that
+# names the variable at fault. These used to be one pipeline with 2>/dev/null,
+# which threw that away and relabelled every failure as a tagging problem: an
+# operator upgrading without POSTGRES_PASSWORD was told their images would be
+# mistagged. Rendering twice is fine — it is a local template expansion.
+config_err="$(compose config 2>&1 >/dev/null)" ||
+  rollback "compose config failed, the stack cannot render: $config_err"
+
 # Prove the tag reached compose before spending minutes building — the .env
 # file also defines AGRIPPA_VERSION, and shell precedence is the only reason
 # ours wins.

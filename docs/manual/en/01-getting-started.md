@@ -8,11 +8,14 @@ Requirements: Docker with Compose, ~2 GB RAM.
 git clone https://github.com/ainaive/agrippa && cd agrippa
 cp infra/env/.env.example infra/env/.env
 # edit infra/env/.env:
+#   POSTGRES_PASSWORD    ← openssl rand -hex 24    (hex, not base64 — see below)
 #   AGRIPPA_SECRET_KEY   ← openssl rand -base64 32   (back it up!)
 #   BETTER_AUTH_SECRET   ← openssl rand -base64 32
 #   ANTHROPIC_API_KEY    ← your key, or leave empty with AGRIPPA_EXECUTOR=fake
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 ```
+
+`POSTGRES_PASSWORD` must be **hex**: it is interpolated into `DATABASE_URL`, and base64 can emit `/`, which makes the URL unparseable. It is also applied only when the database volume is first created — changing it later needs an `ALTER ROLE` as well ([Operations → rotating the database password](06-operations.md#rotating-the-database-password)).
 
 Open `http://localhost:3000`. The stack is four services: **api** (also serves the web app), **worker** (executes runs), **postgres**, **redis**. Migrations and builtin content (scenarios, task types, templates, models, skills) apply automatically on boot.
 

@@ -1,7 +1,7 @@
 # Agrippa production stack (docs/design/08-deployment.md).
 # Usage:
 #   cp infra/env/.env.example infra/env/.env   # fill in the secrets
-#   docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+#   docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 #
 # Pinned explicitly: the project name otherwise defaults to the compose file's
 # directory, so the volumes below would be created as `infra_pgdata` etc. —
@@ -11,6 +11,11 @@ name: agrippa
 
 services:
   api:
+    # unless-stopped, not always: an operator who deliberately stops the stack
+    # should find it still stopped after a reboot. Without any policy the whole
+    # instance stays down silently after a host restart — nothing supervises
+    # compose here (infra/janus/agrippa-deploy@.service is the one-shot deploy).
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: infra/Dockerfile.api
@@ -18,7 +23,7 @@ services:
     ports:
       - "${AGRIPPA_PORT:-3000}:3000"
     environment:
-      DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:-agrippa}@postgres:5432/agrippa
+      DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/agrippa
       REDIS_URL: redis://redis:6379
       AGRIPPA_BASE_URL: ${AGRIPPA_BASE_URL:-http://localhost:3000}
       AGRIPPA_SECRET_KEY: ${AGRIPPA_SECRET_KEY:?set AGRIPPA_SECRET_KEY (openssl rand -base64 32)}
@@ -51,8 +56,22 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+      # The api migrates, seeds and publishes builtin templates under top-level
+      # await BEFORE it opens the listener, so every probe until then is a
+      # connection refusal. Without start_period those count as failures and a
+      # slow-but-successful migration reads as `unhealthy` at ~75s. It survives
+      # today only because deploy.sh polls for "healthy" in a loop; it would be
+      # fatal for anything that gates on the api's health during `up`.
+      start_period: 180s
+      start_interval: 3s
 
   worker:
+    # See deploy.sh worker_ok(): this policy means a crash-looping worker shows
+    # as "running" between restarts, and it registers its executors BEFORE it
+    # can die during consumer setup — so it would satisfy both halves of the
+    # readiness check. worker_ok() therefore also fails on RestartCount moving
+    # during verification. Do not add this policy without that check.
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: infra/Dockerfile.worker
@@ -68,7 +87,7 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     image: ghcr.io/ainaive/agrippa-worker:${AGRIPPA_VERSION:-latest}
     environment:
-      DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:-agrippa}@postgres:5432/agrippa
+      DATABASE_URL: postgres://agrippa:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/agrippa
       REDIS_URL: redis://redis:6379
       AGRIPPA_SECRET_KEY: ${AGRIPPA_SECRET_KEY:?set AGRIPPA_SECRET_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -100,9 +119,10 @@ services:
 
   postgres:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: agrippa
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agrippa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: agrippa
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -114,6 +134,7 @@ services:
 
   redis:
     image: redis:7
+    restart: unless-stopped
 
 volumes:
   pgdata:

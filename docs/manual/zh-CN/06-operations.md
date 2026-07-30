@@ -11,6 +11,8 @@
 | `postgres` | 事实来源 | 同时承载任务队列（pg-boss）——无需额外消息中间件 |
 | `redis` | 仅用于实时事件分发 | **可丢弃**：宕机时实时流降级为回放/轮询，正确性不受影响 |
 
+本手册中的每条命令都会显式指定 Compose 项目名（`-p agrippa`）。项目名同样固定写在 Compose 文件里，因此只要 shell 中没有设置 `COMPOSE_PROJECT_NAME`，这个参数就是冗余的；一旦设置了，未指定项目名的命令就会悄悄作用到另一套栈上——对 `down -v` 而言，这意味着删除错误的数据卷。如果你是有意在运行第二套栈（恢复演练、预发布副本等），请把它替换成那套栈的项目名，而不是把该参数去掉。
+
 ## 首次运行：创建管理员
 
 自助注册已**关闭**——实例采用邀请制，因此第一位用户无法自行注册。需要离线创建一次组织管理员，然后登录：
@@ -20,7 +22,7 @@
 # 本身做变量插值，写在那里进程读不到；而写进 api 服务的 environment: 又会把管理员
 # 密码长期留在容器环境里。
 read -r -s -p 'admin password: ' PW; echo
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec \
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env exec \
   -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
   api bun apps/api/src/cli/bootstrap-admin.ts
@@ -35,7 +37,7 @@ sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
 若 api 容器尚未启动，把 `exec` 换成 `run`——注意 `-e` 选项必须写在服务名**之前**：
 
 ```sh
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
   -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
   api bun apps/api/src/cli/bootstrap-admin.ts
@@ -94,13 +96,31 @@ worker 会在启动时以及每 60 秒的心跳中，把自己真正能跑的执
 这一点很关键，因为**需求交付**把评审代理位绑定在了 `codex-cli` 上。每次部署后都应确认：
 
 ```sh
-docker compose logs worker | grep -i codex
-docker compose exec worker codex --version
-docker compose exec -T postgres psql -U agrippa -d agrippa \
+docker compose -p agrippa logs worker | grep -i codex
+docker compose -p agrippa exec worker codex --version
+docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
   -c "select executor_id, registered_at from executor_registrations order by 1;"
 ```
 
 即使执行器已注册，步骤解析到的服务商仍需要凭证。`openai` 与 `anthropic` 可用 worker 环境变量（如 `OPENAI_API_KEY`）；`dashscope` 以及组织自行注册的自定义服务商**只能用项目凭证**。注意 `dashscope` 根本无法支撑 `codex-cli` 代理位——它在目录中只提供 `anthropic` 线路协议，因为 Codex ≥ 0.122 移除了百炼 OpenAI 兼容模式所用的 chat 线路 API。这类代理位请改指向提供 `openai` 协议的服务商，或改用 `claude-agent-sdk`。
+
+## 轮换数据库密码
+
+`POSTGRES_PASSWORD` 只在数据卷**首次初始化**时被 Postgres 读取，之后每次启动都会忽略它；而 Compose 仍然一直用它来拼接 `DATABASE_URL`。因此只改环境文件不会轮换任何东西，只会让 URL 与角色对不上：api 与 worker 会报 `password authentication failed for user "agrippa"`，`/healthz` 返回 503，部署随即回滚——而且回滚也救不回来，因为 `infra/env/.env` 未纳入版本控制，`git reset --hard` 不会还原它。
+
+正确顺序是先改角色，再改文件：
+
+```sh
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
+NEW=$(openssl rand -hex 24)          # 用十六进制：该值会进入 URL，而 base64 可能产生 /
+
+$C exec -T postgres psql -U agrippa -d agrippa \
+    -c "ALTER ROLE agrippa WITH PASSWORD '$NEW'"
+# 上一步成功之后，再把同样的值写入 infra/env/.env
+$C up -d api worker                  # 使其读取新的 DATABASE_URL
+```
+
+**从依赖旧默认值的部署升级？** 早期版本在该变量未设置时会默认使用字面量 `agrippa`。现在它是必填项，因此请把它设置为 `agrippa`——也就是角色实际持有的密码——或者先用上面的方法轮换。设置成其他任何值都无法通过认证。
 
 ## 备份——三样东西
 
@@ -116,6 +136,10 @@ Compose 部署请使用 **`sudo infra/deploy.sh [<commit>]`**：它从 GitCode �
 
 服务器上的工作副本处于**游离 HEAD**（detached HEAD）状态，指向已部署的那个提交，因此在该目录执行 `git pull` 会直接失败，而不会悄悄把工作树推进到运行中镜像之后——Compose 配置、`.env` 默认值与 Dockerfile 都取自这棵工作树。查看当前部署的提交用 `git -C /opt/agrippa log -1`；要变更则移动 `deploy` 分支并推送。
 
+api 的健康检查设置了 180 秒的 `start_period`：迁移与种子数据都在监听端口打开之前执行，若不设置，一次较慢但成功的迁移会在部署过程中显示为 `unhealthy`。
+
+四个服务都设置了 `restart: unless-stopped`，因此主机重启后整套栈会自行恢复——没有别的东西在托管它。注意这与部署校验是绑定的：崩溃重启循环中的 worker 在两次重启之间看起来是 "running"，因此校验期间若 worker 的重启计数发生变化，本次部署同样判定失败。二者不可只去其一。
+
 它每次都会重新构建，这是刻意为之：SPA 与 API 都在构建镜像时打包进 api 镜像，因此单纯的 `git pull && docker compose up -d` 会重启**旧**代码，且看起来像是成功了。构建缓存让纯文档变更的部署依然很快。脚本用 `flock` 串行化并发部署，并且只保留当前与上一个镜像标签（每组约 4 GB）。
 
 有两点它不会做。它**只部署能从 `deploy` 分支追溯到的提交**——任意 SHA 会被拒绝，这正是那条 root 级授权得以成立的前提。以及**回滚不会还原数据库**：API 在启动、尚未健康之前就会执行迁移，其中部分不可逆。
@@ -129,7 +153,7 @@ Janus 并非通过 `sudo` 获得 root。它的服务启用了 `NoNewPrivileges`�
 ```sh
 # 部署失败时会打印所用的转储文件路径；请把它赋给变量，而不是照抄占位符
 DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
-C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
 
 $C stop api worker                       # dropdb 要求没有任何连接
 $C exec -T postgres dropdb -U agrippa --if-exists agrippa
@@ -143,7 +167,7 @@ $C start api worker                      # 仅在还原成功之后
 
 只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**已有 worker 注册了执行器时，部署才算成功。副本数之所以重要，是因为 worker 在开始消费队列之前就会先注册，仅凭一条新注册记录会放过一个启动途中就挂掉的 worker。已知残留缺口：worker 起来了但注册后卡死，这种情况检测不到。
 
-拉取新镜像后 `docker compose up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
+拉取新镜像后 `docker compose -p agrippa up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
 
 ### 从「compose 项目未命名」时期的部署升级
 
@@ -153,7 +177,7 @@ $C start api worker                      # 仅在还原成功之后
 # 0. 仅当你已经在新代码上执行过 `docker compose up -d`、因而生成了一套空的
 #    agrippa 栈时才需要这一步。执行前先用 `docker volume ls` 确认数据仍在
 #    infra_* 下——这一步会删除那些新建的空卷。
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env down -v
 
 # 1. 停掉旧栈——不要加 -v，那会删掉数据
 docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
@@ -191,7 +215,7 @@ for v in pgdata artifacts workspaces; do
 done
 
 # 4. 以新项目名启动，确认无误后再清理
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 curl -fsS http://127.0.0.1:3000/healthz
 
 # 5. 确认没问题后再执行这一步——不可逆
@@ -208,6 +232,8 @@ docker volume rm infra_pgdata infra_artifacts infra_workspaces
 
 | 现象 | 可能原因 / 处理 |
 |---|---|
+| 部署失败并提示 `AGRIPPA_VERSION did not reach compose; images would be mistagged` | Compose 根本无法渲染该文件——几乎总是某个必填变量未设置，而变为必填的正是 `POSTGRES_PASSWORD`。请在 `infra/env/.env` 中设置它（参见 `infra/env/.env.example`）后重新部署；你的服务栈已回滚且仍在运行，因此并不紧急。提示里之所以提到镜像标签，是因为*上一个*版本的 `deploy.sh` 丢弃了 Compose 的 stderr，而对该脚本的修改要到下一次部署才生效。**不要在 `/opt/agrippa` 里直接跑 `compose config` 来排查**——回滚已经把工作副本重置回上一个提交，而那份 Compose 文件仍为该密码提供了默认值，因此它会正常渲染、什么问题都看不出来。要看到 Compose 的真实报错，请显式渲染失败的那个提交（其 SHA 见部署输出中的 `after a failed deploy of …` 一行）：`cd /opt/agrippa && git show <failed-sha>:infra/docker-compose.yml \| docker compose -p agrippa -f - --env-file infra/env/.env config --quiet`。请保留 `--quiet`：不加它，Compose 会把完整解析后的模型打印出来，其中包含 `AGRIPPA_SECRET_KEY`、`BETTER_AUTH_SECRET`、`ANTHROPIC_API_KEY` 以及数据库密码——直接落到你的终端，以及你随后粘贴进去的任何故障记录里。`--quiet` 只做校验，并把错误输出到 stderr，不打印任何内容。从本版本起，部署会直接报告真实原因。 |
+| 扩容 worker 后部署回滚并提示 `worker never became ready` | 你是在带外扩容的（`--scale`）。`deploy.sh` 要求运行中的 worker 数量与 `WORKER_REPLICAS` **完全相等**——请改为在 `infra/env/.env` 中设置该变量后重新部署。 |
 | 执行卡在「排队中」 | 没有 worker 在运行，或入队丢失——worker 启动后其巡检器会自动补投超过 30 秒的排队执行。查看 worker 日志。 |
 | 实时进度延迟约 1 秒、无推送 | `REDIS_URL` 未设置或不可达——SSE 退化为数据库轮询。无害；恢复 Redis 即恢复即时推送。 |
 | 提交被拒 `skill_not_granted` / `mcp_not_granted` / `model_unresolvable` | 到 项目 → 设置 → 资源授权 打开对应资源（模型需覆盖模板请求的档位）。 |
@@ -219,9 +245,9 @@ docker volume rm infra_pgdata infra_artifacts infra_workspaces
 | `git.push` 失败 / `pr.open needs a stored repo credential` | 发布即使面向公开仓库也需要令牌（匿名 HTTPS 只读）——请添加带令牌的仓库连接，令牌需具备内容与合并请求的写权限。 |
 | `pr.open is not supported for provider 'generic-git'` | 分支已推送，但只有 GitHub/GitLab/GitCode 连接能自动创建合并请求——请用正确的托管平台重建连接，或手动开 PR。 |
 | 想看智能体在磁盘上到底做了什么 | 给 worker 设置 `AGRIPPA_KEEP_WORKSPACES=1` 后重跑；工作区保留在 `WORKSPACE_ROOT/<runId>`。 |
-| 提交被拒 `executor_unavailable` | 没有任何在线 worker 注册过该执行器。若是 `codex-cli`，执行 `docker compose logs worker \| grep -i codex`——原因字符串直接来自 CLI 探测。 |
+| 提交被拒 `executor_unavailable` | 没有任何在线 worker 注册过该执行器。若是 `codex-cli`，执行 `docker compose -p agrippa logs worker \| grep -i codex`——原因字符串直接来自 CLI 探测。 |
 | 执行停在 `queued`，且事件里提到服务商鉴权被延后 | worker 没有该步骤所解析服务商的可用凭证——把密钥加进 worker 环境变量，或在设置 → 模型服务商中添加项目凭证。 |
 | `healthz` 返回 503 | api 连不上 Postgres——检查 `DATABASE_URL` 与 postgres 服务。 |
-| （Docker）怀疑沙箱未生效 | 属预期：在 Docker 默认配置下 bubblewrap **无法**创建命名空间，沙箱会静默降级。要恢复它需要同时放开 `seccomp=unconfined` 与 `CAP_SYS_ADMIN`，这比接受"容器即边界"更不划算（见 [design/08](../../design/08-deployment.md)）。需要操作系统级沙箱请改用 VM 部署方式。探测命令：`docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true`。 |
+| （Docker）怀疑沙箱未生效 | 属预期：在 Docker 默认配置下 bubblewrap **无法**创建命名空间，沙箱会静默降级。要恢复它需要同时放开 `seccomp=unconfined` 与 `CAP_SYS_ADMIN`，这比接受"容器即边界"更不划算（见 [design/08](../../design/08-deployment.md)）。需要操作系统级沙箱请改用 VM 部署方式。探测命令：`docker compose -p agrippa exec worker bwrap --unshare-all --ro-bind / / /bin/true`。 |
 | （虚拟机）worker 卡在「activating」 | 其 `ExecStartPre` 正在等待 api 的 `/healthz`（最长 120 秒）——用 `journalctl -u agrippa-api` 排查 api 为何不健康。 |
 | （虚拟机）Ubuntu 24.04 上智能体命令失败，或怀疑沙箱失效 | AppArmor 的 `apparmor_restrict_unprivileged_userns` 可能拦截 bubblewrap——而没有 bwrap 时沙箱会**静默**降级。用 `sudo -u agrippa bwrap --unshare-all --ro-bind / / /bin/true` 探测；若失败，放行非特权用户命名空间（或为 bwrap 安装 AppArmor 配置文件）后重启 worker。 |

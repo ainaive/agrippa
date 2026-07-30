@@ -11,6 +11,8 @@
 | `postgres` | System of record | Also carries the job queue (pg-boss) — no separate broker |
 | `redis` | Live-event fan-out only | **Disposable**: if it's down, live streams degrade to replay/polling; correctness is unaffected |
 
+Every command in this manual names the compose project explicitly (`-p agrippa`). The project is also pinned in the compose file, so the flag is redundant *until* something sets `COMPOSE_PROJECT_NAME` in your shell — then an unpinned command silently operates a different stack, which for `down -v` means deleting the wrong volumes. If you are running a second stack deliberately (a restore drill, a staging copy), substitute its project name rather than dropping the flag.
+
 ## First-run: create the admin
 
 Self-registration is **closed** — the instance is invite-only, so the very first user can't sign up. Create the org admin out-of-band, exactly once, then sign in:
@@ -21,7 +23,7 @@ Self-registration is **closed** — the instance is invite-only, so the very fir
 # would NOT reach the process; and keeping them in the api service's
 # environment: would park an admin password in a long-lived container.
 read -r -s -p 'admin password: ' PW; echo
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env exec \
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env exec \
   -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
   api bun apps/api/src/cli/bootstrap-admin.ts
@@ -36,7 +38,7 @@ sudo -u agrippa env AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
 If the api container isn't up yet, use `run` instead of `exec` — note the `-e` flags go **before** the service name:
 
 ```sh
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env run --rm --no-deps \
   -e AGRIPPA_BOOTSTRAP_EMAIL=you@example.com \
   -e AGRIPPA_BOOTSTRAP_PASSWORD="$PW" \
   api bun apps/api/src/cli/bootstrap-admin.ts
@@ -95,13 +97,31 @@ Workers register the executors they can actually run, at boot and on a 60 s hear
 This matters because **Requirement Delivery** binds its reviewer slot to `codex-cli`. Check after any deploy:
 
 ```sh
-docker compose logs worker | grep -i codex
-docker compose exec worker codex --version
-docker compose exec -T postgres psql -U agrippa -d agrippa \
+docker compose -p agrippa logs worker | grep -i codex
+docker compose -p agrippa exec worker codex --version
+docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
   -c "select executor_id, registered_at from executor_registrations order by 1;"
 ```
 
 A registered executor still needs a credential for the provider a step resolves to. `openai` takes worker env (`OPENAI_API_KEY`), so does `anthropic`; `dashscope` and org-registered custom providers are **project-credential only**. Note that `dashscope` cannot back a `codex-cli` slot at all — its catalog entry serves the `anthropic` wire protocol only, because Codex ≥ 0.122 dropped the chat wire API Bailian's OpenAI-compatible mode speaks. Point such a slot at a provider that serves the `openai` protocol, or at `claude-agent-sdk`.
+
+## Rotating the database password
+
+`POSTGRES_PASSWORD` is read by Postgres **only when the data volume is first initialized**. On every later boot it is ignored, while compose keeps building `DATABASE_URL` from it — so editing the env file alone does not rotate anything, it just makes the URL stop matching the role. The api and worker then fail with `password authentication failed for user "agrippa"`, `/healthz` returns 503, and a deploy rolls back — unsuccessfully, because `infra/env/.env` is untracked and survives `git reset --hard`.
+
+Change the role first, then the file:
+
+```sh
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
+NEW=$(openssl rand -hex 24)          # hex: this ends up in a URL, and base64 can emit /
+
+$C exec -T postgres psql -U agrippa -d agrippa \
+    -c "ALTER ROLE agrippa WITH PASSWORD '$NEW'"
+# only once that succeeded — put the same value in infra/env/.env
+$C up -d api worker                  # picks up the new DATABASE_URL
+```
+
+**Upgrading from a stack that relied on the old default?** Earlier versions defaulted the password to the literal `agrippa` when the variable was unset. It is now required, so set it to `agrippa` — the value your role actually has — or rotate with the recipe above first. Any other value will not authenticate.
 
 ## Backup — three things
 
@@ -117,6 +137,10 @@ Changes to `deploy.sh` itself land one deploy later: the running script was read
 
 The host checkout sits on a **detached HEAD** at the deployed commit, so `git pull` there fails rather than quietly advancing the tree past the running images — compose config, `.env` defaults and Dockerfiles all come from that tree. To see what is deployed, `git -C /opt/agrippa log -1`; to change it, move the `deploy` branch and push.
 
+The api's healthcheck has a 180s `start_period`, because migrations and seeding run before the listener opens — without it a slow migration shows as `unhealthy` partway through a deploy.
+
+All four services are `restart: unless-stopped`, so the stack comes back after a host reboot; nothing else supervises it. Note this is coupled to verification — a crash-looping worker looks "running" between restarts, so the deploy also fails if the workers' restart count moves while it is being verified. Do not remove one without the other.
+
 It always rebuilds, deliberately: the SPA and the API are baked into the api image, so a bare `git pull && docker compose up -d` restarts the **old** code and looks like it worked. Build cache keeps a docs-only deploy cheap. A `flock` serializes concurrent deploys, and only the current and previous image tags are kept (each pair is ~4 GB).
 
 Two things it will not do. It **only deploys commits reachable from the `deploy` branch** — an arbitrary SHA is refused, which is what keeps the root-level grant meaningful. And **rollback does not revert the database**: the API applies migrations on boot before it is healthy, and some are irreversible.
@@ -130,7 +154,7 @@ The script therefore takes a `pg_dump` before every deploy, into `/var/lib/agrip
 ```sh
 # the deploy prints the dump path it took; assign it rather than pasting a placeholder
 DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
-C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
 
 $C stop api worker                       # dropdb needs zero connections
 $C exec -T postgres dropdb -U agrippa --if-exists agrippa
@@ -144,7 +168,7 @@ Drop and recreate rather than `pg_restore --clean`: `--clean` only drops what th
 
 A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** a worker has registered its executors. The replica count matters because the worker registers before it starts consuming the queue, so a fresh registration alone would pass a worker that died during startup. Residual gap: a worker that stays up but wedges after registering is not detected.
 
-Pull new images and `docker compose up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
+Pull new images and `docker compose -p agrippa up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 
 ### Upgrading from a deployment created before the compose project was named
 
@@ -154,7 +178,7 @@ Releases up to and including `v0.2.0` shipped `infra/docker-compose.yml` with no
 # 0. ONLY if you already ran `docker compose up -d` on the new code, which
 #    created an empty agrippa stack. Confirm `docker volume ls` still shows your
 #    data under infra_* first — this deletes the new, empty volumes.
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env down -v
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env down -v
 
 # 1. stop the old stack — WITHOUT -v, which would delete the data
 docker compose -p infra -f infra/docker-compose.yml --env-file infra/env/.env down
@@ -195,7 +219,7 @@ for v in pgdata artifacts workspaces; do
 done
 
 # 4. start under the new project name and verify before cleaning up
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 curl -fsS http://127.0.0.1:3000/healthz
 
 # 5. only once you're satisfied — this is the irreversible step
@@ -212,6 +236,8 @@ Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (
 
 | Symptom | Likely cause / fix |
 |---|---|
+| Deploy fails `AGRIPPA_VERSION did not reach compose; images would be mistagged` | Compose could not render the file at all — almost always a required variable is unset, and `POSTGRES_PASSWORD` is the one that became mandatory. Set it in `infra/env/.env` (see `infra/env/.env.example`) and redeploy; your stack was rolled back and is still running, so this is not urgent. The message names tagging because the *previous* release's `deploy.sh` discarded compose's stderr, and script changes only take effect one deploy later. **Do not check by running `compose config` in `/opt/agrippa`** — the rollback already reset the checkout to the previous commit, whose compose file still defaulted the password, so it renders cleanly and tells you nothing. To see compose's real error, render the commit that failed (its SHA is in the deploy's `after a failed deploy of …` line): `cd /opt/agrippa && git show <failed-sha>:infra/docker-compose.yml \| docker compose -p agrippa -f - --env-file infra/env/.env config --quiet`. Keep `--quiet`: without it Compose prints the fully resolved model, which carries `AGRIPPA_SECRET_KEY`, `BETTER_AUTH_SECRET`, `ANTHROPIC_API_KEY` and the database password — straight into your terminal and any incident notes you paste it into. `--quiet` validates and reports the error on stderr without printing any of it. Deploys from this release onward report the cause directly. |
+| Deploy rolls back with `worker never became ready` after you scaled workers | You scaled out of band (`--scale`). `deploy.sh` requires the running worker count to equal `WORKER_REPLICAS` exactly — set that variable in `infra/env/.env` instead and redeploy. |
 | Run stuck in `queued` | No worker running, or the enqueue was lost — the worker's sweeper re-enqueues queued runs older than 30 s automatically once a worker is up. Check worker logs. |
 | Live progress lags ~1 s, no push | `REDIS_URL` unset/unreachable — SSE falls back to DB polling. Harmless; restore Redis for instant updates. |
 | Submission rejected `skill_not_granted` / `mcp_not_granted` / `model_unresolvable` | Grant the resource under Project → Settings → Resources (models must cover the tiers the template requests). |
@@ -223,9 +249,9 @@ Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (
 | `git.push` fails / `pr.open needs a stored repo credential` | Publishing needs a token even for public repos (anonymous HTTPS is read-only) — add a connection with a token that has contents + pull-request write access. |
 | `pr.open is not supported for provider 'generic-git'` | The branch was pushed but only GitHub/GitLab/GitCode connections can create the PR — recreate the connection with the right provider, or open the PR manually. |
 | Need to inspect what an agent actually did on disk | Set `AGRIPPA_KEEP_WORKSPACES=1` on the worker and re-run; workspaces persist under `WORKSPACE_ROOT/<runId>`. |
-| Submission rejected `executor_unavailable` | No live worker registered that executor. For `codex-cli`, check `docker compose logs worker \| grep -i codex` — the reason string comes straight from the CLI probe. |
+| Submission rejected `executor_unavailable` | No live worker registered that executor. For `codex-cli`, check `docker compose -p agrippa logs worker \| grep -i codex` — the reason string comes straight from the CLI probe. |
 | Run sits `queued` with a deferral event mentioning provider auth | The worker has no usable credential for the provider that step resolved to — add the key to worker env, or a project credential under Settings → Providers. |
 | `healthz` returns 503 | The api can't reach Postgres — check `DATABASE_URL` and the postgres service. |
-| (Docker) sandboxing is suspect | Expected: under Docker's default profiles bubblewrap **cannot** create namespaces, and the sandbox degrades silently. Restoring it needs `seccomp=unconfined` *and* `CAP_SYS_ADMIN` — a worse trade than accepting the container as the boundary (see [design/08](../../design/08-deployment.md)). Use the VM topology if you need OS-level sandboxing. Probe: `docker compose exec worker bwrap --unshare-all --ro-bind / / /bin/true`. |
+| (Docker) sandboxing is suspect | Expected: under Docker's default profiles bubblewrap **cannot** create namespaces, and the sandbox degrades silently. Restoring it needs `seccomp=unconfined` *and* `CAP_SYS_ADMIN` — a worse trade than accepting the container as the boundary (see [design/08](../../design/08-deployment.md)). Use the VM topology if you need OS-level sandboxing. Probe: `docker compose -p agrippa exec worker bwrap --unshare-all --ro-bind / / /bin/true`. |
 | (VM) worker stuck in "activating" | Its `ExecStartPre` is waiting for the api's `/healthz` (up to 120 s) — check `journalctl -u agrippa-api` for why the api isn't healthy. |
 | (VM) agent commands fail, or sandboxing is suspect on Ubuntu 24.04 | AppArmor's `apparmor_restrict_unprivileged_userns` can block bubblewrap — and without bwrap the sandbox degrades **silently**. Probe with `sudo -u agrippa bwrap --unshare-all --ro-bind / / /bin/true`; if it fails, allow unprivileged user namespaces (or install a bwrap AppArmor profile) and restart the worker. |

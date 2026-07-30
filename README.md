@@ -22,7 +22,7 @@ M1 implemented — all three layers work end to end (see the [M1 plan](docs/plan
 
 ```sh
 bun install
-docker compose -f infra/docker-compose.dev.yml up -d   # postgres + redis (or use local installs)
+docker compose -p agrippa-dev -f infra/docker-compose.dev.yml up -d   # postgres + redis (or use local installs)
 cat > .env.local <<EOF         # created once; Bun loads it automatically (git-ignored)
 DATABASE_URL=postgres://localhost:5432/agrippa
 AGRIPPA_SECRET_KEY=$(openssl rand -base64 32)
@@ -46,7 +46,7 @@ Sign in at :5173 with that account, create a project, grant models/skills under 
 
 ```sh
 cp infra/env/.env.example infra/env/.env    # fill in the secrets
-docker compose -f infra/docker-compose.yml --env-file infra/env/.env up -d
+docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env up -d
 ```
 
 **Self-hosted** (VM, systemd — no Docker; Ubuntu 22.04/24.04):

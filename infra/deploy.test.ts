@@ -54,6 +54,13 @@ case "$1" in
   compose)
     case "$sub" in
       config)
+        # STUB_CONFIG_RC: compose itself refuses to render — an unresolvable
+        # \${VAR:?…} is the realistic case. The message goes to STDERR, which is
+        # the whole point: it is the only place the offending variable is named.
+        if [ "\${STUB_CONFIG_RC:-0}" != "0" ]; then
+          echo "error while interpolating services.postgres.environment.POSTGRES_PASSWORD: required variable POSTGRES_PASSWORD is missing a value: set POSTGRES_PASSWORD" >&2
+          exit "$STUB_CONFIG_RC"
+        fi
         # deploy.sh greps this for the tag it expects to have set
         [ "\${STUB_CONFIG_TAG:-1}" = "1" ] &&
           echo "    image: ghcr.io/ainaive/agrippa-api:\${AGRIPPA_VERSION}"
@@ -67,7 +74,18 @@ case "$1" in
             [ -n "\${STUB_HEALTH_DELAY:-}" ] && /bin/sleep "$STUB_HEALTH_DELAY"
             echo "\${STUB_API_HEALTH:-healthy}" ;;
           *"{{.Service}}"*)
-            for _ in $(seq 1 "\${STUB_WORKERS_RUNNING:-1}"); do echo worker; done ;;
+            # NOT \`seq 1 $n\`: BSD seq counts DOWN when first > last, so
+            # \`seq 1 0\` emits "1 0" on macOS and nothing on GNU/CI. That made
+            # STUB_WORKERS_RUNNING=0 mean "two workers" locally and "no workers"
+            # in CI — the dead-worker case was silently testing a count mismatch
+            # on every developer machine.
+            i=0
+            while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do echo worker; i=$((i + 1)); done ;;
+          *"-q"*)
+            i=0
+            while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do
+              i=$((i + 1)); echo "workerctr$i"
+            done ;;
         esac
         exit 0 ;;
       build) exit "\${STUB_BUILD_RC:-0}" ;;
@@ -84,7 +102,20 @@ case "$1" in
         exit 0 ;;
     esac
     exit 0 ;;
-  inspect) echo "ghcr.io/ainaive/agrippa-api:\${STUB_RUNNING_TAG:-latest}"; exit 0 ;;
+  inspect)
+    case "$*" in
+      *RestartCount*)
+        # STUB_RESTART_GROWS simulates a crash-looping worker: the count must
+        # CHANGE between probes, so a fixed value would not reproduce it.
+        if [ "\${STUB_RESTART_GROWS:-0}" = "1" ]; then
+          c=$(cat "$STUB_LOG.restarts" 2>/dev/null || echo 0)
+          c=$((c + 1)); echo "$c" > "$STUB_LOG.restarts"; echo "$c"
+        else
+          echo "\${STUB_RESTART_COUNT:-0}"
+        fi ;;
+      *) echo "ghcr.io/ainaive/agrippa-api:\${STUB_RUNNING_TAG:-latest}" ;;
+    esac
+    exit 0 ;;
   images)  exit 0 ;;
   rmi)     exit 0 ;;
 esac
@@ -126,6 +157,26 @@ const run = async (scenario: Scenario = {}, args: string[] = [], script = SCRIPT
     proc.exited,
   ]);
   return { stdout, stderr, exitCode, log: readFileSync(stubLog, "utf8") };
+};
+
+/**
+ * Assert EVERY compose invocation names the project — not merely that one did.
+ *
+ * The first version of this asserted `expect(r.log).toContain("-p agrippa")`
+ * over the whole log, which passes if a single call carries the flag. The
+ * worker readiness probe had never carried it, and those tests were green
+ * anyway. Asserting over an aggregate cannot see a missing element; the check
+ * has to be per-invocation.
+ *
+ * The stub writes one line per `docker` call containing its full argv, so a
+ * compose call is a line beginning with "compose ".
+ */
+const expectEveryComposeCallIsPinned = (log: string, project: string) => {
+  const calls = log.split("\n").filter((l) => l.startsWith("compose "));
+  // guard against the filter silently matching nothing and passing vacuously
+  expect(calls.length).toBeGreaterThan(3);
+  const unpinned = calls.filter((l) => !l.includes(`-p ${project} `));
+  expect(unpinned).toEqual([]);
 };
 
 const git = (cwd: string, ...args: string[]) =>
@@ -257,11 +308,40 @@ describe("infra/deploy.sh", () => {
     expect(r.stderr).toContain("worker never became ready");
   }, 20_000);
 
+  it("fails when MORE workers run than WORKER_REPLICAS expects", async () => {
+    // The other half of the equality check, and the one nothing covered. This
+    // is what `docker compose up --scale worker=3` produces against
+    // WORKER_REPLICAS=1 — the design doc recommended exactly that until it was
+    // corrected, and it rolls back a perfectly healthy stack.
+    //
+    // Worth its own case rather than trusting the `running=0` one: relaxing
+    // `-eq` to `-ge` is a plausible refactor, it keeps that case green, and it
+    // would silently let an out-of-band-scaled stack pass verification.
+    const r = await run({ STUB_WORKERS_RUNNING: "3", STUB_REGISTRATIONS: "1" });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("worker never became ready");
+  }, 20_000);
+
   it("aborts before building when the version does not reach compose", async () => {
     // guards the class of bug where the tag silently fails to propagate
     const r = await run({ STUB_CONFIG_TAG: "0" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("did not reach compose");
+  }, 20_000);
+
+  it("reports a compose config failure as itself, not as a tagging problem", async () => {
+    // These were one pipeline with 2>/dev/null, so every non-zero `compose
+    // config` — an unresolvable variable most of all — was reported as
+    // "AGRIPPA_VERSION did not reach compose; images would be mistagged".
+    // Making POSTGRES_PASSWORD required means an upgrading operator hits
+    // exactly this path and is pointed at image tagging.
+    const r = await run({ STUB_CONFIG_RC: "1" });
+    expect(r.exitCode).not.toBe(0);
+    // compose's own stderr survives, naming the variable at fault
+    expect(r.stderr).toContain("POSTGRES_PASSWORD");
+    // and it is NOT relabelled — this assertion is what the fix earns; without
+    // it the case would pass against the old single-pipeline form too
+    expect(r.stderr).not.toContain("did not reach compose");
   }, 20_000);
 
   it("treats HEALTH_TIMEOUT as wall-clock even when probes are slow", async () => {
@@ -373,16 +453,65 @@ describe("infra/deploy.sh", () => {
     // possible shape for a recovery procedure.
     const r = await run({ STUB_UP_RC: "1" });
     expect(r.stderr).toContain("-p agrippa");
-    // and the deploy's own invocations are pinned the same way
-    expect(r.log).toContain("-p agrippa");
+
+    const drill = await run({ COMPOSE_PROJECT_NAME: "agrippadrill", STUB_UP_RC: "1" });
+    expect(drill.stderr).toContain("-p agrippadrill");
+  }, 40_000);
+
+  it("names the compose project in every command it runs", async () => {
+    // Deliberately the SUCCESS path. The restore-hint case above forces `up -d`
+    // to fail, which makes rollback's own `up -d` fail too, so the script dies
+    // before stack_ok — and the worker readiness probe, the one invocation that
+    // spells out `docker compose` instead of using compose(), never executes.
+    // Asserting pinning there proved nothing about it: the probe was missing -p
+    // for two commits while these tests were green.
+    //
+    // One run per test, because the stub log is a file that accumulates across
+    // run() calls within a test — a second run's assertions would see the first
+    // run's lines and flag them under the other project's name.
+    const r = await run();
+    expect(r.exitCode).toBe(0);
+    expectEveryComposeCallIsPinned(r.log, "agrippa");
   }, 20_000);
 
-  it("honours COMPOSE_PROJECT_NAME in both the commands and the hint", async () => {
-    // A deploy run against a non-default project must not print commands that
-    // silently target the default one.
-    const r = await run({ COMPOSE_PROJECT_NAME: "agrippadrill", STUB_UP_RC: "1" });
-    expect(r.stderr).toContain("-p agrippadrill");
-    expect(r.log).toContain("-p agrippadrill");
+  it("names the overridden project in every command, not just some", async () => {
+    const r = await run({ COMPOSE_PROJECT_NAME: "agrippadrill" });
+    expect(r.exitCode).toBe(0);
+    expectEveryComposeCallIsPinned(r.log, "agrippadrill");
+  }, 20_000);
+
+  it("fails a deploy whose worker is crash-looping, not just one that is down", async () => {
+    // Compose gained `restart: unless-stopped` so the stack returns after a
+    // host reboot. That alone would have made this deploy report SUCCESS: a
+    // crash-looping worker is "running" between restarts, and it registers its
+    // executors before it can die during consumer setup — so both the replica
+    // count and the fresh-registration check pass on the upswing of each loop.
+    //
+    // The stub's count increments per probe, which is what a restart policy
+    // actually produces and what a fixed value could not reproduce.
+    const r = await run({ STUB_RESTART_GROWS: "1" });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("worker never became ready");
+    expect(r.stderr).toContain("rolling back");
+  }, 20_000);
+
+  it("fails with its own message when the compose file has no name:", async () => {
+    // The project derivation used to sit above both die() and the -f guard, so
+    // this path exited 127 with "die: command not found" and no explanation,
+    // and a missing compose file died on awk's error rather than the guard's.
+    // Reachable by re-deploying or rolling back to any commit predating
+    // `name: agrippa` in the compose file.
+    writeFileSync(path.join(appDir, "infra", "docker-compose.yml"), "services:\n  api:\n");
+    git(appDir, "commit", "-aqm", "compose file without a name: key");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+
+    const r = await run();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.exitCode).not.toBe(127); // 127 is the bug: die() not yet defined
+    expect(r.stderr).toContain("no 'name:'");
+    // and it bailed before touching anything
+    expect(r.log).not.toContain("build");
+    expect(r.log).not.toContain("up -d");
   }, 20_000);
 
   it("detaches HEAD instead of dragging the checked-out branch along", async () => {

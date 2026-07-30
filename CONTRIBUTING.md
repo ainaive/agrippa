@@ -4,7 +4,7 @@ Thanks for helping build 硅基工坊. This guide covers the development environ
 
 ## Development environment
 
-Requirements: **Bun ≥ 1.3**, **PostgreSQL ≥ 17** (local install or `docker compose -f infra/docker-compose.dev.yml up -d`), optional Redis (only for live SSE fan-out; everything degrades gracefully without it), `git`.
+Requirements: **Bun ≥ 1.3**, **PostgreSQL ≥ 17** (local install or `docker compose -p agrippa-dev -f infra/docker-compose.dev.yml up -d`), optional Redis (only for live SSE fan-out; everything degrades gracefully without it), `git`.
 
 ```sh
 bun install
