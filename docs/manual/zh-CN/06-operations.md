@@ -129,7 +129,7 @@ Janus 并非通过 `sudo` 获得 root。它的服务启用了 `NoNewPrivileges`�
 ```sh
 # 部署失败时会打印所用的转储文件路径；请把它赋给变量，而不是照抄占位符
 DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
-C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
 
 $C stop api worker                       # dropdb 要求没有任何连接
 $C exec -T postgres dropdb -U agrippa --if-exists agrippa

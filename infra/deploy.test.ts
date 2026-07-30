@@ -128,6 +128,26 @@ const run = async (scenario: Scenario = {}, args: string[] = [], script = SCRIPT
   return { stdout, stderr, exitCode, log: readFileSync(stubLog, "utf8") };
 };
 
+/**
+ * Assert EVERY compose invocation names the project — not merely that one did.
+ *
+ * The first version of this asserted `expect(r.log).toContain("-p agrippa")`
+ * over the whole log, which passes if a single call carries the flag. The
+ * worker readiness probe had never carried it, and those tests were green
+ * anyway. Asserting over an aggregate cannot see a missing element; the check
+ * has to be per-invocation.
+ *
+ * The stub writes one line per `docker` call containing its full argv, so a
+ * compose call is a line beginning with "compose ".
+ */
+const expectEveryComposeCallIsPinned = (log: string, project: string) => {
+  const calls = log.split("\n").filter((l) => l.startsWith("compose "));
+  // guard against the filter silently matching nothing and passing vacuously
+  expect(calls.length).toBeGreaterThan(3);
+  const unpinned = calls.filter((l) => !l.includes(`-p ${project} `));
+  expect(unpinned).toEqual([]);
+};
+
 const git = (cwd: string, ...args: string[]) =>
   Bun.spawnSync(["git", "-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd });
 
@@ -373,16 +393,50 @@ describe("infra/deploy.sh", () => {
     // possible shape for a recovery procedure.
     const r = await run({ STUB_UP_RC: "1" });
     expect(r.stderr).toContain("-p agrippa");
-    // and the deploy's own invocations are pinned the same way
-    expect(r.log).toContain("-p agrippa");
+
+    const drill = await run({ COMPOSE_PROJECT_NAME: "agrippadrill", STUB_UP_RC: "1" });
+    expect(drill.stderr).toContain("-p agrippadrill");
+  }, 40_000);
+
+  it("names the compose project in every command it runs", async () => {
+    // Deliberately the SUCCESS path. The restore-hint case above forces `up -d`
+    // to fail, which makes rollback's own `up -d` fail too, so the script dies
+    // before stack_ok — and the worker readiness probe, the one invocation that
+    // spells out `docker compose` instead of using compose(), never executes.
+    // Asserting pinning there proved nothing about it: the probe was missing -p
+    // for two commits while these tests were green.
+    //
+    // One run per test, because the stub log is a file that accumulates across
+    // run() calls within a test — a second run's assertions would see the first
+    // run's lines and flag them under the other project's name.
+    const r = await run();
+    expect(r.exitCode).toBe(0);
+    expectEveryComposeCallIsPinned(r.log, "agrippa");
   }, 20_000);
 
-  it("honours COMPOSE_PROJECT_NAME in both the commands and the hint", async () => {
-    // A deploy run against a non-default project must not print commands that
-    // silently target the default one.
-    const r = await run({ COMPOSE_PROJECT_NAME: "agrippadrill", STUB_UP_RC: "1" });
-    expect(r.stderr).toContain("-p agrippadrill");
-    expect(r.log).toContain("-p agrippadrill");
+  it("names the overridden project in every command, not just some", async () => {
+    const r = await run({ COMPOSE_PROJECT_NAME: "agrippadrill" });
+    expect(r.exitCode).toBe(0);
+    expectEveryComposeCallIsPinned(r.log, "agrippadrill");
+  }, 20_000);
+
+  it("fails with its own message when the compose file has no name:", async () => {
+    // The project derivation used to sit above both die() and the -f guard, so
+    // this path exited 127 with "die: command not found" and no explanation,
+    // and a missing compose file died on awk's error rather than the guard's.
+    // Reachable by re-deploying or rolling back to any commit predating
+    // `name: agrippa` in the compose file.
+    writeFileSync(path.join(appDir, "infra", "docker-compose.yml"), "services:\n  api:\n");
+    git(appDir, "commit", "-aqm", "compose file without a name: key");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+
+    const r = await run();
+    expect(r.exitCode).not.toBe(0);
+    expect(r.exitCode).not.toBe(127); // 127 is the bug: die() not yet defined
+    expect(r.stderr).toContain("no 'name:'");
+    // and it bailed before touching anything
+    expect(r.log).not.toContain("build");
+    expect(r.log).not.toContain("up -d");
   }, 20_000);
 
   it("detaches HEAD instead of dragging the checked-out branch along", async () => {

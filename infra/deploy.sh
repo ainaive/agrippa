@@ -50,15 +50,6 @@ KEEP_DUMPS="${KEEP_DUMPS:-5}"
 
 COMPOSE_FILE="$APP_DIR/infra/docker-compose.yml"
 ENV_FILE="$APP_DIR/infra/env/.env"
-# Name the project explicitly rather than letting compose resolve it from the
-# file's `name:`. The restore procedure printed on failure is copy-pasted by an
-# operator into a shell that may not share this one's environment, and without
-# -p it resolves against whatever `name:` the tree happens to carry — which is
-# the WRONG STACK if this deploy was run with COMPOSE_PROJECT_NAME set. Found by
-# running the restore drill against a throwaway stack: the printed commands
-# would have dropped the production database.
-COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:/{print $2; exit}' "$COMPOSE_FILE")}"
-[ -n "$COMPOSE_PROJECT" ] || die "could not determine the compose project name from $COMPOSE_FILE"
 LAST_GOOD="$STATE_DIR/last-good"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -70,6 +61,22 @@ die() {
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0"
 [ -f "$COMPOSE_FILE" ] || die "no compose file at $COMPOSE_FILE"
 [ -f "$ENV_FILE" ] || die "no env file at $ENV_FILE"
+
+# Name the project explicitly rather than letting compose resolve it from the
+# file's `name:`. The restore procedure printed on failure is copy-pasted by an
+# operator into a shell that may not share this one's environment, and without
+# -p it resolves against whatever `name:` the tree happens to carry — which is
+# the WRONG STACK if this deploy was run with COMPOSE_PROJECT_NAME set. Found by
+# running the restore drill against a throwaway stack: the printed commands
+# would have dropped the production database.
+#
+# Deliberately below die() and the -f guard above, not beside the other
+# assignments. It was above both, which made those guards dead code: a missing
+# compose file killed the script on awk's own error under `set -e`, and a
+# compose file with no `name:` reached a `die` that did not exist yet — exit
+# 127, `die: command not found`, no explanation.
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(awk '/^name:/{print $2; exit}' "$COMPOSE_FILE")}"
+[ -n "$COMPOSE_PROJECT" ] || die "no 'name:' in $COMPOSE_FILE and COMPOSE_PROJECT_NAME is unset"
 
 # The dumps below are a full copy of production, and this host also runs Janus
 # as an unprivileged `janus` user that the deploy design treats as untrusted.
@@ -261,9 +268,12 @@ worker_ok() {
   local budget="${probe_budget:-10}"
   [ "$budget" -gt 1 ] 2>/dev/null || budget=1
   [ "$budget" -le 10 ] || budget=10
-  # spelled out rather than via compose(): `timeout` needs a real command
+  # Spelled out rather than via compose(): `timeout` needs a real command. Keep
+  # -p in step with compose() — this was the one invocation without it, and it
+  # would query a different project than `up -d` acted on whenever the deployed
+  # commit's `name:` differs from the tree's at script start.
   n="$(timeout "$budget" \
-    docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+    docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
     exec -T -e PGCONNECT_TIMEOUT=2 -e PGOPTIONS="-c statement_timeout=${budget}s" \
     postgres psql -U agrippa -d agrippa -tAc \
     "select count(*) from executor_registrations where registered_at > to_timestamp($since);" \

@@ -130,7 +130,7 @@ The script therefore takes a `pg_dump` before every deploy, into `/var/lib/agrip
 ```sh
 # the deploy prints the dump path it took; assign it rather than pasting a placeholder
 DUMP=/var/lib/agrippa-deploy/pgdump-20260730-064413-070e868.dump
-C="docker compose -f infra/docker-compose.yml --env-file infra/env/.env"
+C="docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env"
 
 $C stop api worker                       # dropdb needs zero connections
 $C exec -T postgres dropdb -U agrippa --if-exists agrippa
