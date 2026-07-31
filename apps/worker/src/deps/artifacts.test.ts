@@ -120,6 +120,86 @@ describe("DiskArtifactStore path containment", () => {
     }
   });
 
+  it("inlines past 64 KB when the caller raises the inline limit", async () => {
+    const ws = freshWorkspace();
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    const content = "r".repeat(100 * 1024); // 100 KB — over the default threshold
+    writeFileSync(path.join(ws, ".agrippa/artifacts/report.json"), content);
+
+    // without the override, the same file goes to disk
+    const onDisk = await store.store(
+      "run-1",
+      "report",
+      "json",
+      { path: ".agrippa/artifacts/report.json" },
+      ws,
+    );
+    expect(onDisk.inline).toBeNull();
+    expect(onDisk.storageRef).not.toBeNull();
+
+    // with it (the engine's interaction-artifact path), it inlines whole
+    const inlined = await store.store(
+      "run-2",
+      "report",
+      "json",
+      { path: ".agrippa/artifacts/report.json" },
+      ws,
+      { inlineLimitBytes: 2 * 1024 * 1024 },
+    );
+    expect(inlined.inline).toBe(content);
+    expect(inlined.storageRef).toBeNull();
+
+    // engine-provided inline sources honor the same override
+    const inlineSource = await store.store("run-3", "report", "json", { inline: content }, ws, {
+      inlineLimitBytes: 2 * 1024 * 1024,
+    });
+    expect(inlineSource.inline).toBe(content);
+    expect(inlineSource.storageRef).toBeNull();
+  });
+
+  it("spills to disk when content exceeds even a raised inline limit", async () => {
+    const ws = freshWorkspace();
+    const content = "x".repeat(200 * 1024);
+    const stored = await store.store("run-1", "report", "json", { inline: content }, ws, {
+      inlineLimitBytes: 128 * 1024,
+    });
+    expect(stored.inline).toBeNull();
+    expect(stored.storageRef).not.toBeNull();
+    expect(stored.size).toBe(200 * 1024);
+  });
+
+  it("stamps every store with the content's sha256 — the push-time evidence anchor", async () => {
+    const ws = freshWorkspace();
+    const content = "p".repeat(100 * 1024); // over the 64 KB threshold → disk
+    const expected = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+
+    const spilled = await store.store("run-hash", "changes", "patch", { inline: content }, ws);
+    expect(spilled.inline).toBeNull();
+    expect(spilled.sha256).toBe(expected);
+
+    const inlined = await store.store("run-hash", "small", "patch", { inline: "tiny diff" }, ws);
+    expect(inlined.sha256).toBe(new Bun.CryptoHasher("sha256").update("tiny diff").digest("hex"));
+
+    // file-kind artifacts stream to disk; the digest must describe the bytes
+    // actually WRITTEN (hashed in the same pass), not a re-read of the
+    // agent-mutable source
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    writeFileSync(path.join(ws, ".agrippa/artifacts/blob"), content);
+    const streamed = await store.store(
+      "run-hash",
+      "blob",
+      "file",
+      { path: ".agrippa/artifacts/blob" },
+      ws,
+    );
+    expect(streamed.sha256).toBe(expected);
+    const storedBytes = new Uint8Array(await Bun.file(streamed.storageRef as string).arrayBuffer());
+    expect(new Bun.CryptoHasher("sha256").update(storedBytes).digest("hex")).toBe(
+      streamed.sha256 as string,
+    );
+    expect(streamed.size).toBe(storedBytes.byteLength);
+  });
+
   it("falls back to the default cap when the size env is not a valid number", async () => {
     const ws = freshWorkspace();
     await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });

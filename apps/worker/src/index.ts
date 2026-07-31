@@ -1,3 +1,4 @@
+import { hostname } from "node:os";
 import {
   type ApprovalExpirePayload,
   EXECUTOR_CATALOG,
@@ -7,7 +8,7 @@ import {
   QUEUE_RUN_EXECUTE,
   type RunExecutePayload,
 } from "@agrippa/core";
-import { checkpoints, createDb, executorRegistrations, runs } from "@agrippa/db";
+import { awaitSchema, checkpoints, createDb, executorRegistrations, runs } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
@@ -29,11 +30,36 @@ import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
+import {
+  markBootStarted,
+  markConsumersReady,
+  touchWorkerHeartbeat,
+  WORKER_SCHEMA_WAIT_MS,
+} from "./deps/readiness";
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitScmService } from "./deps/scm";
 import { GitWorkspaceManager } from "./deps/workspace";
 
 const db = createDb();
+// inside a compose container the hostname IS the container id — the identity
+// deploy verification counts readiness rows by. Boot-start clears any prior
+// boot's readiness FIRST, so a boot that wedges below never looks ready.
+const containerId = hostname();
+
+// The api migrates on boot; this worker only reads and writes, so it waits for
+// the schema its own build expects rather than crashing on a table the
+// database has not been given yet (a crash-looping worker fails deploy
+// verification and rolls back a good deploy). createDb() is lazy, so nothing
+// has touched the database before this point.
+//
+// The bound MUST exceed deploy.sh's HEALTH_TIMEOUT (180s) — see
+// WORKER_SCHEMA_WAIT_MS below.
+await awaitSchema(db, {
+  timeoutMs: WORKER_SCHEMA_WAIT_MS,
+  log: (msg) => console.log(`[worker] ${msg}`),
+});
+
+await markBootStarted(db, containerId);
 const bus = process.env.REDIS_URL
   ? new RedisEventBus(process.env.REDIS_URL)
   : new InProcessEventBus();
@@ -178,6 +204,10 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
   }
 });
 
+// every boss.work() above has returned — only now is this replica actually
+// consuming, which is the signal deploy verification counts (issue #15)
+await markConsumersReady(db, containerId);
+
 async function scheduleApprovalExpiry(runId: string): Promise<void> {
   const rows = await db
     .select()
@@ -217,6 +247,10 @@ async function markRunFailed(runId: string, err: unknown): Promise<void> {
  */
 setInterval(async () => {
   try {
+    // liveness beat FIRST: deploy verification reads it through a sliding
+    // window, so a transient error in the sweep work below must not skip it
+    await touchWorkerHeartbeat(db, containerId);
+
     const stragglers = await db
       .select({ id: runs.id })
       .from(runs)
@@ -235,7 +269,9 @@ setInterval(async () => {
   }
 }, 60_000);
 
-console.log(`[worker] up — slots=${SLOTS} redis=${Boolean(process.env.REDIS_URL)}`);
+console.log(
+  `[worker] up — container=${containerId} slots=${SLOTS} redis=${Boolean(process.env.REDIS_URL)}`,
+);
 
 process.on("SIGTERM", async () => {
   deps.logger.info("draining…");

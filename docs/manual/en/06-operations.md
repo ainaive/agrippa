@@ -79,7 +79,7 @@ Documented in `infra/env/.env.example`; the full set:
 | `APT_MIRROR` | build | Closer Debian mirror for the worker image build |
 | `WORKER_SLOTS` | worker | Concurrent runs per worker (default 2) |
 | `WORKSPACE_ROOT` | worker | Per-run checkout directory (default `/work/runs` in the image) |
-| `ARTIFACT_STORAGE_ROOT` | worker | Large-artifact storage (>64 KB; smaller ones live in Postgres) |
+| `ARTIFACT_STORAGE_ROOT` | worker | Artifact storage for text artifacts >64 KiB and `file`-kind artifacts of any size, both up to the per-artifact cap below (smaller text ones — and checkpoint-driving ones up to 2 MiB — live in Postgres) |
 | `AGRIPPA_TEMPLATES_DIR` | api, worker | Builtin templates location (set in the images) |
 | `AGRIPPA_WEB_DIST` | api | SPA dist directory to serve (set in the api image) |
 | `AGRIPPA_MIGRATE_ON_BOOT` | api | `0` disables boot-time migrate/seed |
@@ -126,7 +126,7 @@ $C up -d api worker                  # picks up the new DATABASE_URL
 ## Backup — three things
 
 1. The **database** — Compose: the `pgdata` volume; VM: `pg_dump agrippa` — schedule per your policy.
-2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata and small artifacts survive in Postgres).
+2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads of text artifacts over 64 KiB and of `file`-kind artifacts of any size (metadata, small text artifacts, and checkpoint-driving artifacts survive in Postgres). Publish-time patch verification is unaffected: it compares a freshly staged workspace diff against the digest on the artifact row in Postgres and never reads the volume.
 3. **`AGRIPPA_SECRET_KEY`** — without it, every stored git token and MCP credential is unrecoverable. Redis needs no backup.
 
 ## Upgrades & scaling
@@ -166,7 +166,12 @@ $C start api worker                      # only once the restore succeeded
 
 Drop and recreate rather than `pg_restore --clean`: `--clean` only drops what the archive contains, so tables the failed migration *added* would survive, and can block the restore through dependencies. `--single-transaction` with `--exit-on-error` means a partial restore rolls back instead of leaving a half-populated database. Stopping the app first is not optional — `dropdb` refuses while the api and worker hold connections.
 
-A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** a worker has registered its executors. The replica count matters because the worker registers before it starts consuming the queue, so a fresh registration alone would pass a worker that died during startup. Residual gap: a worker that stays up but wedges after registering is not detected.
+A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** each expected replica has a ready-and-alive row in `worker_heartbeats` (matched to the running containers' identities, so rows from foreign containers on the same database never count): `consumers_ready_at` set (cleared at every boot start, re-set only after all queue consumers have started — so a worker that registers its executors and then wedges during startup no longer reads as deployed) plus a fresh 60 s heartbeat proving the process is alive. Requiring liveness rather than a post-deploy ready stamp means rollbacks and same-commit redeploys that reuse unchanged, healthy containers verify without a reboot. Inspect the rows with:
+
+```sh
+docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
+  -c "select container_id, consumers_ready_at, heartbeat_at from worker_heartbeats order by 2 desc;"
+```
 
 Pull new images and `docker compose -p agrippa up -d` (VM: `sudo /opt/agrippa/infra/vm/deploy.sh`, which restarts the api first — see the VM section above). The api migrates on boot under an advisory lock, so rolling multiple replicas is safe. Draining workers is safe too: a killed worker's in-flight runs stay `running`, the queue retries them, and the engine **resumes step-granularly** — completed steps are never re-executed and token usage is never double-counted. Scale run throughput with `WORKER_REPLICAS` × `WORKER_SLOTS`.
 

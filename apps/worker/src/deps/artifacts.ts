@@ -1,4 +1,4 @@
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ArtifactKind } from "@agrippa/core";
@@ -24,7 +24,10 @@ class ArtifactTooLargeError extends Error {
   }
 }
 
-const EMPTY: StoredArtifact = { inline: null, storageRef: null, size: 0, mime: null };
+const EMPTY: StoredArtifact = { inline: null, storageRef: null, size: 0, mime: null, sha256: null };
+
+const sha256Hex = (content: string | Uint8Array): string =>
+  new Bun.CryptoHasher("sha256").update(content).digest("hex");
 
 /**
  * Resolve a workspace-relative artifact source to a real path that is provably
@@ -47,7 +50,11 @@ async function resolveContainedPath(workspaceDir: string, rel: string): Promise<
   return real;
 }
 
-/** ≤64 KB inline in Postgres; larger content on the artifacts volume. */
+/**
+ * ≤64 KB inline in Postgres; larger content on the artifacts volume. The
+ * engine raises the inline threshold per call (opts.inlineLimitBytes) for
+ * checkpoint-driving artifacts, which must inline whole to survive resume.
+ */
 export class DiskArtifactStore implements ArtifactStore {
   async store(
     runId: string,
@@ -55,13 +62,15 @@ export class DiskArtifactStore implements ArtifactStore {
     kind: ArtifactKind,
     source: { inline?: unknown; path?: string },
     workspaceDir: string,
+    opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact> {
+    const inlineLimit = opts?.inlineLimitBytes ?? INLINE_LIMIT;
     // engine-provided inline content (patch diffs, links) is always text
     if (source.inline !== undefined) {
       const content =
         typeof source.inline === "string" ? source.inline : JSON.stringify(source.inline);
       const mime = kind === "json" ? "application/json" : "text/markdown";
-      return this.storeText(runId, key, content, mime);
+      return this.storeText(runId, key, content, mime, inlineLimit);
     }
     if (!source.path) return EMPTY;
 
@@ -78,11 +87,45 @@ export class DiskArtifactStore implements ArtifactStore {
 
     // small text can inline in Postgres; `file`-kind (possibly binary) and any
     // large artifact stream straight to disk byte-exact, never fully buffered
-    if (kind !== "file" && size <= INLINE_LIMIT) {
-      return this.storeText(runId, key, await file.text(), mime);
+    if (kind !== "file" && size <= inlineLimit) {
+      return this.storeText(runId, key, await file.text(), mime, inlineLimit);
     }
-    const storageRef = await this.writeToDisk(runId, key, file);
-    return { inline: null, storageRef, size, mime };
+    return { inline: null, mime, ...(await this.streamToDisk(runId, key, file)) };
+  }
+
+  /**
+   * Single-pass spill: hash and count exactly the bytes being written — the
+   * source lives in the (agent-mutable) workspace, so re-reading it to hash
+   * after the copy could describe different content than what was stored, and
+   * a file growing mid-copy must trip the size cap, not land oversized.
+   */
+  private async streamToDisk(
+    runId: string,
+    key: string,
+    file: ReturnType<typeof Bun.file>,
+  ): Promise<{ storageRef: string; size: number; sha256: string }> {
+    const dir = path.join(STORAGE_ROOT, runId);
+    await mkdir(dir, { recursive: true });
+    const storageRef = path.join(dir, key);
+    const hasher = new Bun.CryptoHasher("sha256");
+    const writer = Bun.file(storageRef).writer();
+    let written = 0;
+    try {
+      for await (const chunk of file.stream()) {
+        written += chunk.byteLength;
+        if (written > maxArtifactSize()) throw new ArtifactTooLargeError(key, written);
+        hasher.update(chunk);
+        // write() returns a Promise when the sink applies backpressure —
+        // ignoring it lets end() run before those chunks land
+        await writer.write(chunk);
+      }
+      await writer.end();
+    } catch (err) {
+      await Promise.resolve(writer.end()).catch(() => {});
+      await unlink(storageRef).catch(() => {});
+      throw err;
+    }
+    return { storageRef, size: written, sha256: hasher.digest("hex") };
   }
 
   private async storeText(
@@ -90,20 +133,18 @@ export class DiskArtifactStore implements ArtifactStore {
     key: string,
     content: string,
     mime: string | null,
+    inlineLimit: number,
   ): Promise<StoredArtifact> {
     const size = Buffer.byteLength(content);
     if (size === 0) return EMPTY;
     if (size > maxArtifactSize()) throw new ArtifactTooLargeError(key, size);
-    if (size <= INLINE_LIMIT) return { inline: content, storageRef: null, size, mime };
+    const sha256 = sha256Hex(content);
+    if (size <= inlineLimit) return { inline: content, storageRef: null, size, mime, sha256 };
     const storageRef = await this.writeToDisk(runId, key, content);
-    return { inline: null, storageRef, size, mime };
+    return { inline: null, storageRef, size, mime, sha256 };
   }
 
-  private async writeToDisk(
-    runId: string,
-    key: string,
-    data: string | Uint8Array | Blob,
-  ): Promise<string> {
+  private async writeToDisk(runId: string, key: string, data: string): Promise<string> {
     const dir = path.join(STORAGE_ROOT, runId);
     await mkdir(dir, { recursive: true });
     const storageRef = path.join(dir, key);

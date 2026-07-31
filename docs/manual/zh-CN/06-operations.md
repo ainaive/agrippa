@@ -78,7 +78,7 @@ docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env 
 | `APT_MIRROR` | 构建期 | 构建 worker 镜像时使用的就近 Debian 镜像源 |
 | `WORKER_SLOTS` | worker | 单 worker 并发执行数（默认 2） |
 | `WORKSPACE_ROOT` | worker | 每次执行的检出目录（镜像内默认 `/work/runs`） |
-| `ARTIFACT_STORAGE_ROOT` | worker | 大产出物存储（>64 KB；更小的存于 Postgres） |
+| `ARTIFACT_STORAGE_ROOT` | worker | 产出物存储：超过 64 KiB 的文本产出物以及任意大小的 `file` 类产出物，两者都受下方单个产出物上限约束（更小的文本产出物以及驱动检查点的产出物（上限 2 MiB）存于 Postgres） |
 | `AGRIPPA_TEMPLATES_DIR` | api、worker | 内置模板位置（镜像内已设置） |
 | `AGRIPPA_WEB_DIST` | api | 要托管的 SPA 构建目录（api 镜像内已设置） |
 | `AGRIPPA_MIGRATE_ON_BOOT` | api | 设为 `0` 关闭启动时迁移/植入 |
@@ -125,7 +125,7 @@ $C up -d api worker                  # 使其读取新的 DATABASE_URL
 ## 备份——三样东西
 
 1. **数据库** —— Compose：`pgdata` 卷；虚拟机：`pg_dump agrippa` ——按你的策略定期执行。
-2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后超过 64 KB 的下载不可恢复（元数据与小产出物在 Postgres 中仍在）。
+2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后，超过 64 KiB 的文本产出物以及任意大小的 `file` 类产出物的下载不可恢复（元数据、小的文本产出物以及驱动检查点的产出物在 Postgres 中仍在）。发布时的补丁校验不受影响：它将重新生成的工作区 diff 与 Postgres 产出物记录上的摘要比对，从不读取该卷。
 3. **`AGRIPPA_SECRET_KEY`** ——没有它，所有已存的 git 令牌和 MCP 凭证都无法解密。Redis 无需备份。
 
 ## 升级与扩容
@@ -165,7 +165,12 @@ $C start api worker                      # 仅在还原成功之后
 
 要先删库重建，而不是用 `pg_restore --clean`：`--clean` 只会删除归档中存在的对象，因此失败迁移**新增**的表会残留下来，并可能因依赖关系导致还原失败。`--single-transaction` 配合 `--exit-on-error` 可保证部分还原会整体回滚，而不是留下一个半成品数据库。先停掉应用不是可选项——api 与 worker 仍持有连接时 `dropdb` 会拒绝执行。
 
-只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**已有 worker 注册了执行器时，部署才算成功。副本数之所以重要，是因为 worker 在开始消费队列之前就会先注册，仅凭一条新注册记录会放过一个启动途中就挂掉的 worker。已知残留缺口：worker 起来了但注册后卡死，这种情况检测不到。
+只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**每个预期副本在 `worker_heartbeats` 中「就绪且存活」时，部署才算成功（记录按当前运行容器的身份匹配，同一数据库上其他来源容器的记录不会计入）：`consumers_ready_at` 已设置（每次启动开始时会先清空，只有全部队列消费者启动完成后才重新写入——因此「注册了执行器但随后启动途中卡死」的 worker 不会再被误判为部署成功），并且 60 秒心跳仍然新鲜（证明进程存活）。校验存活而非要求部署后的新就绪时间戳，意味着回滚或同一提交的重新部署在复用未变更且健康的容器时无需重启即可通过验证。可用以下命令查看：
+
+```sh
+docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
+  -c "select container_id, consumers_ready_at, heartbeat_at from worker_heartbeats order by 2 desc;"
+```
 
 拉取新镜像后 `docker compose -p agrippa up -d` 即可（虚拟机：`sudo /opt/agrippa/infra/vm/deploy.sh`，会先重启 api——见上文虚拟机一节）。api 在启动时于咨询锁下迁移，多副本滚动升级安全。worker 排空同样安全：被终止的 worker 上进行中的执行保持 `running`，队列会重试，引擎**按步骤粒度续跑**——已完成的步骤不会重跑，Token 用量也不会重复计入。吞吐量 = `WORKER_REPLICAS` × `WORKER_SLOTS`。
 

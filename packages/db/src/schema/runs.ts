@@ -187,7 +187,10 @@ export const artifacts = pgTable("artifacts", {
   mime: text("mime"),
   size: integer("size"),
   storageRef: text("storage_ref"), // large artifacts on disk
-  inline: jsonb("inline"), // small artifacts (≤64 KB) inline
+  inline: jsonb("inline"), // small artifacts inline (≤64 KB; checkpoint-driving ones ≤2 MiB)
+  // store-time content digest (hex). Integrity anchor for patch evidence at
+  // git.push: the disk store is agent-writable, this row is not.
+  sha256: text("sha256"),
   createdAt: createdAtCol(),
 });
 

@@ -80,7 +80,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   let scm: InstanceType<typeof GitScmService>;
 
   beforeAll(async () => {
-    await db.execute(sql`drop schema public cascade`);
+    await db.execute(sql`drop schema if exists public cascade`);
     await db.execute(sql`create schema public`);
     await db.execute(sql`drop schema if exists drizzle cascade`);
     await migrateDb(db);

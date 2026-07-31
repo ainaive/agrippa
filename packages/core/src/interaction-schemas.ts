@@ -86,10 +86,21 @@ export const reviewFindingSchema = z.object({
 });
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
 
-// caps keep typical reports well under the 64 KB inline artifact limit (an
-// interaction artifact that only exists on disk cannot drive its checkpoint);
-// a pathological maximal report can still exceed it, which the engine reports
-// as a distinct too-large contract violation rather than "no findings"
+/**
+ * Inline-size allowance for artifacts that drive a checkpoint. An interaction
+ * artifact that only exists on disk cannot drive its checkpoint — resume
+ * re-reads it from the DB row — so this bound must dominate every schema-valid
+ * payload. Worst cases, with every string at its `.max()` (UTF-16 code units)
+ * and each unit costing up to 6 bytes as an escaped JSON sequence (`\uXXXX`):
+ *   review-report: 5000 + 50×(64+500+300+2000+2000) ≈ 248K units ≈ 1.49 MB
+ *   questions:     20×(64+2000+20×200+2000)         ≈ 162K units ≈ 0.97 MB
+ * plus <10 KB of structural JSON. 2 MiB strictly dominates both, so only
+ * schema-invalid (or whitespace-padded) content can exceed it — and that fails
+ * as a distinct too-large contract violation, never as "no findings".
+ * Changing any `.max()` in the schemas above requires re-deriving this bound.
+ */
+export const INTERACTION_ARTIFACT_MAX_BYTES = 2 * 1024 * 1024;
+
 // strict + required findings: a malformed report must never read as a clean
 // one — `{}` or {"findingz": …} auto-passing the review gate is exactly the
 // failure this guards against. Nested objects stay tolerant of extra keys.

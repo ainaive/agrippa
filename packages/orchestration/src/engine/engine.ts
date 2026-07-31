@@ -1,5 +1,6 @@
 import {
   type CheckpointStoredResponse,
+  INTERACTION_ARTIFACT_MAX_BYTES,
   isCredentialGatedExecutor,
   isTerminalRunStatus,
   type ProviderCatalog,
@@ -259,6 +260,8 @@ class RunEngine {
   private currentStepRowId: string | null = null;
   private currentIteration = 1;
   private producedArtifacts = new Set<string>();
+  /** Store-time sha256 per artifact key — the integrity anchor for content too large to sit in artifactValues. */
+  private artifactDigests: Record<string, string> = {};
   /** Latest inline value per artifact key — the `artifacts.<key>` expression root. */
   private artifactValues: Record<string, unknown> = {};
   /** Latest decided response per checkpoint id — the `checkpoints.<id>` root. */
@@ -423,6 +426,7 @@ class RunEngine {
     for (const a of priorArtifacts) {
       this.producedArtifacts.add(a.artifactKey);
       this.artifactValues[a.artifactKey] = a.inline ?? "";
+      if (a.sha256) this.artifactDigests[a.artifactKey] = a.sha256;
     }
     // decided checkpoint responses re-enter the expression context on resume
     const decidedCheckpoints = await db
@@ -1091,14 +1095,10 @@ class RunEngine {
       if (patchContracts.length > 0) {
         const current = await this.wrapScm(step, () => this.deps.workspace.diff(this.run.id));
         for (const contract of patchContracts) {
-          const stored = this.artifactValues[contract.key] ?? "";
-          if (stored !== current) {
-            throw new RunFailure(
-              "contract_violation",
-              `workspace changed after the reviewed '${contract.key}' evidence — refusing to publish unapproved changes`,
-            );
-          }
-          expectedPatch ??= stored;
+          this.assertPatchEvidenceMatches(contract.key, current);
+          // proven byte-identical to the reviewed patch, so it can serve as
+          // the SCM adapter's expected snapshot
+          expectedPatch ??= current;
         }
       }
       const result = await this.wrapScm(step, () =>
@@ -1595,12 +1595,17 @@ class RunEngine {
     row: StepRow,
     event: { key: string; kind: string; path?: string; inline?: unknown },
   ): Promise<void> {
+    // a checkpoint-driving artifact must inline whole in Postgres (resume
+    // re-reads it from the DB row), so it gets the larger allowance sized to
+    // dominate any schema-valid payload
+    const interactionKind = this.interactionSources.get(event.key);
     const stored = await this.deps.artifacts.store(
       this.run.id,
       event.key,
       event.kind as never,
       { inline: event.inline, path: event.path },
       this.workspaceDir,
+      interactionKind ? { inlineLimitBytes: INTERACTION_ARTIFACT_MAX_BYTES } : undefined,
     );
     // a missing OR empty source produced no bytes — don't create a zero-byte row
     // (and don't mark the key produced, so a required-but-empty artifact still
@@ -1610,12 +1615,11 @@ class RunEngine {
     // schema NOW, while the producing step's attempt is still open — so a
     // malformed report fails the step (template retry/onFailure apply) instead
     // of silently auto-passing the gate later
-    const interactionKind = this.interactionSources.get(event.key);
     if (interactionKind) {
       if (stored.inline === null) {
         throw new StepFailed(`interaction artifact '${event.key}' exceeds the inline limit`, {
           code: "contract_violation",
-          message: `artifact '${event.key}' is too large to drive its checkpoint (${stored.size} bytes; inline limit applies)`,
+          message: `artifact '${event.key}' is too large to drive its checkpoint (${stored.size} bytes; limit ${INTERACTION_ARTIFACT_MAX_BYTES})`,
         });
       }
       const parsed =
@@ -1641,8 +1645,10 @@ class RunEngine {
       size: stored.size,
       storageRef: stored.storageRef,
       inline: stored.inline ?? null,
+      sha256: stored.sha256,
     });
     this.producedArtifacts.add(event.key);
+    if (stored.sha256) this.artifactDigests[event.key] = stored.sha256;
     if (stored.inline !== null) {
       this.artifactValues[event.key] = stored.inline;
     } else {
@@ -1652,6 +1658,41 @@ class RunEngine {
       });
       this.artifactValues[event.key] = "";
     }
+  }
+
+  /**
+   * The workspace's current diff must equal the reviewed patch byte for byte.
+   * Small patches compare against the Postgres inline value directly; a patch
+   * over the inline threshold compares against its store-time sha256 instead.
+   * The digest lives in Postgres, which agent subprocesses hold no credentials
+   * for — the spilled file shares an agent-writable volume, so bytes read back
+   * from disk could be rewritten after review and are never trusted as
+   * evidence. This is tamper-resistance within the documented posture, not a
+   * boundary: under compose (no functional inner sandbox) a read-write agent
+   * that recovers worker credentials from /proc can reach the DB and forge far
+   * more than a digest — the accepted container-is-the-boundary residual
+   * (design 08), closed by the VM topology's OS sandbox / M2 isolation.
+   * A spilled patch without a digest (legacy row) is unverifiable and fails.
+   */
+  private assertPatchEvidenceMatches(key: string, current: string): void {
+    const drift = (): RunFailure =>
+      new RunFailure(
+        "contract_violation",
+        `workspace changed after the reviewed '${key}' evidence — refusing to publish unapproved changes`,
+      );
+    const inline = this.artifactValues[key];
+    if (typeof inline === "string" && inline !== "") {
+      if (inline !== current) throw drift();
+      return;
+    }
+    const digest = this.artifactDigests[key];
+    if (!digest) {
+      throw new RunFailure(
+        "contract_violation",
+        `patch evidence '${key}' has no integrity digest — refusing to publish unverifiable changes`,
+      );
+    }
+    if (new Bun.CryptoHasher("sha256").update(current).digest("hex") !== digest) throw drift();
   }
 
   private async recordUsage(event: UsageDelta, row: StepRow, attempt: number): Promise<void> {

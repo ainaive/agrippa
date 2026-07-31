@@ -97,15 +97,30 @@ case "$1" in
         case "$*" in
           *pg_dump*) printf 'FAKEDUMP'; exit "\${STUB_DUMP_RC:-0}" ;;
           *psql*)
-            # the worker readiness probe; STUB_PROBE_DELAY makes it slow
+            # the worker readiness probe (distinct consumers-ready containers);
+            # STUB_PROBE_DELAY makes it slow
             [ -n "\${STUB_PROBE_DELAY:-}" ] && /bin/sleep "$STUB_PROBE_DELAY"
-            echo "\${STUB_REGISTRATIONS:-1}"; exit 0 ;;
+            echo "\${STUB_READY_CONTAINERS:-1}"; exit 0 ;;
         esac
         exit 0 ;;
     esac
     exit 0 ;;
   inspect)
     case "$*" in
+      *Config.Hostname*)
+        # worker_ok scopes its readiness query to these hostnames; mirror the
+        # ps -q stub so the id set matches the "running" container list.
+        # STUB_HOSTNAME_STYLE=compose emits a dash-and-dot-bearing name, what
+        # a compose hostname: key or a future docker default would produce
+        i=0
+        while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do
+          i=$((i + 1))
+          if [ "\${STUB_HOSTNAME_STYLE:-short}" = "compose" ]; then
+            echo "agrippa-worker-$i.local"
+          else
+            echo "workerctr$i"
+          fi
+        done ;;
       *RestartCount*)
         # STUB_RESTART_GROWS simulates a crash-looping worker: the count must
         # CHANGE between probes, so a fixed value would not reproduce it.
@@ -374,9 +389,9 @@ describe("infra/deploy.sh", () => {
     expect(r.stderr).toContain("rolling back");
   }, 20_000);
 
-  it("fails when a worker replica is not running, even with a fresh registration", async () => {
-    // the case that used to pass: api healthy, registration present, worker dead
-    const r = await run({ STUB_WORKERS_RUNNING: "0", STUB_REGISTRATIONS: "1" });
+  it("fails when a worker replica is not running, even with a fresh ready row", async () => {
+    // the case that used to pass: api healthy, ready row present, worker dead
+    const r = await run({ STUB_WORKERS_RUNNING: "0", STUB_READY_CONTAINERS: "1" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("worker never became ready");
   }, 20_000);
@@ -390,9 +405,67 @@ describe("infra/deploy.sh", () => {
     // Worth its own case rather than trusting the `running=0` one: relaxing
     // `-eq` to `-ge` is a plausible refactor, it keeps that case green, and it
     // would silently let an out-of-band-scaled stack pass verification.
-    const r = await run({ STUB_WORKERS_RUNNING: "3", STUB_REGISTRATIONS: "1" });
+    const r = await run({ STUB_WORKERS_RUNNING: "3", STUB_READY_CONTAINERS: "1" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("worker never became ready");
+  }, 20_000);
+
+  it("fails when fewer containers are consumers-ready than WORKER_REPLICAS", async () => {
+    // the issue #15 case: both replicas run, but one wedged inside consumer
+    // setup and never wrote its worker_heartbeats readiness row — the old
+    // global-registration check could not see it
+    writeFileSync(
+      path.join(appDir, "infra", "env", ".env"),
+      "AGRIPPA_PORT=127.0.0.1:3001\nWORKER_REPLICAS=2\n",
+    );
+    git(appDir, "commit", "-aqm", "two replicas");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    const r = await run({ STUB_WORKERS_RUNNING: "2", STUB_READY_CONTAINERS: "1" });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("worker never became ready");
+  }, 20_000);
+
+  it("accepts hostnames carrying dashes and dots, without rewriting them", async () => {
+    // the readiness ids must match what os.hostname() wrote byte for byte;
+    // stripping characters instead of accepting them would silently produce a
+    // never-matching id list and roll back a healthy deploy
+    const r = await run({ STUB_HOSTNAME_STYLE: "compose", STUB_READY_CONTAINERS: "1" });
+    expect(r.exitCode).toBe(0);
+    const psql = r.log.split("\n").find((l) => l.includes("worker_heartbeats"));
+    expect(psql).toContain("'agrippa-worker-1.local'");
+  }, 20_000);
+
+  it("rejects WORKER_REPLICAS=0 before building anything", async () => {
+    // 0 makes worker verification vacuous: 0 running == 0 expected and
+    // 0 ready >= 0 expected both pass with no workers at all
+    writeFileSync(
+      path.join(appDir, "infra", "env", ".env"),
+      "AGRIPPA_PORT=127.0.0.1:3001\nWORKER_REPLICAS=0\n",
+    );
+    git(appDir, "commit", "-aqm", "zero replicas");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    const r = await run({});
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("WORKER_REPLICAS");
+    expect(r.log).not.toContain("build");
+  }, 20_000);
+
+  it("passes when every expected replica is consumers-ready", async () => {
+    // the positive control for the case above — proves the failure came from
+    // the row count, not from WORKER_REPLICAS=2 breaking something else
+    writeFileSync(
+      path.join(appDir, "infra", "env", ".env"),
+      "AGRIPPA_PORT=127.0.0.1:3001\nWORKER_REPLICAS=2\n",
+    );
+    git(appDir, "commit", "-aqm", "two replicas");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    const r = await run({ STUB_WORKERS_RUNNING: "2", STUB_READY_CONTAINERS: "2" });
+    expect(r.exitCode).toBe(0);
+    // the readiness query is scoped to THIS fleet's container hostnames — a
+    // ready row from a foreign container must not be able to satisfy it
+    const psql = r.log.split("\n").find((l) => l.includes("worker_heartbeats"));
+    expect(psql).toContain("'workerctr1'");
+    expect(psql).toContain("'workerctr2'");
   }, 20_000);
 
   it("aborts before building when the version does not reach compose", async () => {

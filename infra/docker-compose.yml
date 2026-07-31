@@ -106,6 +106,18 @@ services:
     volumes:
       - workspaces:/work/runs # throwaway per-run checkouts (worker only)
       - artifacts:/work/artifacts # shared with the API for downloads
+    # No `api: service_healthy` dependency on purpose. The worker must not run
+    # against a schema older than its own build (the api migrates on boot), but
+    # that ordering lives IN THE IMAGE — awaitSchema() at the top of
+    # apps/worker/src/index.ts waits for the migration journal to reach this
+    # build's newest migration. That covers what a compose dependency cannot:
+    # host reboots and `docker start` (restart policies ignore depends_on), the
+    # VM/systemd topology, and AGRIPPA_MIGRATE_ON_BOOT=0 (where api health says
+    # nothing about the schema). It also keeps `compose up -d` from blocking on
+    # another service's health, which is what turns a crash-looping api into an
+    # unbounded deploy hang (see the timeout in infra/deploy.sh).
+    # Booting concurrently with the api is otherwise fine: pg-boss installs and
+    # migrates its own schema under its own advisory lock.
     depends_on:
       postgres:
         condition: service_healthy

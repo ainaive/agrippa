@@ -81,16 +81,32 @@ export type StoredArtifact = {
   storageRef: string | null;
   size: number;
   mime: string | null;
+  /**
+   * Hex sha256 of the stored bytes, computed at store time. The integrity
+   * anchor for patch evidence at git.push: it lives in Postgres, which agent
+   * subprocesses are never given credentials for, while the disk store shares
+   * a writable volume with them. Posture-level tamper resistance, not an
+   * integrity boundary — an agent that recovers worker credentials can reach
+   * the database anyway (see the sandboxing residual in docs/design/08).
+   * Null only for empty stores.
+   */
+  sha256: string | null;
 };
 
 export interface ArtifactStore {
-  /** Persist artifact content (inline value or a workspace-relative file path). */
+  /**
+   * Persist artifact content (inline value or a workspace-relative file path).
+   * `opts.inlineLimitBytes` overrides the store's inline threshold — the
+   * engine passes INTERACTION_ARTIFACT_MAX_BYTES for checkpoint-driving
+   * artifacts, which must inline whole (resume re-reads them from the DB row).
+   */
   store(
     runId: string,
     key: string,
     kind: ArtifactKind,
     source: { inline?: unknown; path?: string },
     workspaceDir: string,
+    opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact>;
 }
 

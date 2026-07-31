@@ -130,23 +130,42 @@ export class FakeResourceMaterializer implements ResourceMaterializer {
 }
 
 export class InMemoryArtifactStore implements ArtifactStore {
+  /** Default mirrors DiskArtifactStore's 64 KiB threshold so the compliance suite exercises the same inline policy. */
+  constructor(private readonly inlineLimitBytes: number = 64 * 1024) {}
+
   async store(
-    _runId: string,
-    _key: string,
+    runId: string,
+    key: string,
     _kind: string,
     source: { inline?: unknown; path?: string },
     workspaceDir: string,
+    opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact> {
+    const limit = opts?.inlineLimitBytes ?? this.inlineLimitBytes;
     if (source.inline !== undefined) {
-      const size = JSON.stringify(source.inline).length;
-      return { inline: source.inline, storageRef: null, size, mime: null };
+      const content =
+        typeof source.inline === "string" ? source.inline : JSON.stringify(source.inline);
+      const size = Buffer.byteLength(content);
+      const sha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+      // over-limit keeps a non-null storageRef so the engine reads "stored,
+      // not inline" rather than "produced no bytes"
+      if (size > limit) {
+        return { inline: null, storageRef: `mem://${runId}/${key}`, size, mime: null, sha256 };
+      }
+      return { inline: source.inline, storageRef: null, size, mime: null, sha256 };
     }
     if (source.path) {
       const file = Bun.file(path.resolve(workspaceDir, source.path));
       const content = (await file.exists()) ? await file.text() : "";
-      return { inline: content, storageRef: null, size: content.length, mime: file.type || null };
+      const size = Buffer.byteLength(content);
+      const mime = file.type || null;
+      const sha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+      if (size > limit) {
+        return { inline: null, storageRef: `mem://${runId}/${key}`, size, mime, sha256 };
+      }
+      return { inline: content, storageRef: null, size, mime, sha256 };
     }
-    return { inline: null, storageRef: null, size: 0, mime: null };
+    return { inline: null, storageRef: null, size: 0, mime: null, sha256: null };
   }
 }
 
