@@ -1,4 +1,4 @@
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ArtifactKind } from "@agrippa/core";
@@ -28,13 +28,6 @@ const EMPTY: StoredArtifact = { inline: null, storageRef: null, size: 0, mime: n
 
 const sha256Hex = (content: string | Uint8Array): string =>
   new Bun.CryptoHasher("sha256").update(content).digest("hex");
-
-/** Stream-hash a file so a 25 MB artifact never has to sit in memory whole. */
-async function sha256HexOfFile(file: ReturnType<typeof Bun.file>): Promise<string> {
-  const hasher = new Bun.CryptoHasher("sha256");
-  for await (const chunk of file.stream()) hasher.update(chunk);
-  return hasher.digest("hex");
-}
 
 /**
  * Resolve a workspace-relative artifact source to a real path that is provably
@@ -97,8 +90,40 @@ export class DiskArtifactStore implements ArtifactStore {
     if (kind !== "file" && size <= inlineLimit) {
       return this.storeText(runId, key, await file.text(), mime, inlineLimit);
     }
-    const storageRef = await this.writeToDisk(runId, key, file);
-    return { inline: null, storageRef, size, mime, sha256: await sha256HexOfFile(file) };
+    return { inline: null, mime, ...(await this.streamToDisk(runId, key, file)) };
+  }
+
+  /**
+   * Single-pass spill: hash and count exactly the bytes being written — the
+   * source lives in the (agent-mutable) workspace, so re-reading it to hash
+   * after the copy could describe different content than what was stored, and
+   * a file growing mid-copy must trip the size cap, not land oversized.
+   */
+  private async streamToDisk(
+    runId: string,
+    key: string,
+    file: ReturnType<typeof Bun.file>,
+  ): Promise<{ storageRef: string; size: number; sha256: string }> {
+    const dir = path.join(STORAGE_ROOT, runId);
+    await mkdir(dir, { recursive: true });
+    const storageRef = path.join(dir, key);
+    const hasher = new Bun.CryptoHasher("sha256");
+    const writer = Bun.file(storageRef).writer();
+    let written = 0;
+    try {
+      for await (const chunk of file.stream()) {
+        written += chunk.byteLength;
+        if (written > maxArtifactSize()) throw new ArtifactTooLargeError(key, written);
+        hasher.update(chunk);
+        writer.write(chunk);
+      }
+      await writer.end();
+    } catch (err) {
+      await Promise.resolve(writer.end()).catch(() => {});
+      await unlink(storageRef).catch(() => {});
+      throw err;
+    }
+    return { storageRef, size: written, sha256: hasher.digest("hex") };
   }
 
   private async storeText(
@@ -117,11 +142,7 @@ export class DiskArtifactStore implements ArtifactStore {
     return { inline: null, storageRef, size, mime, sha256 };
   }
 
-  private async writeToDisk(
-    runId: string,
-    key: string,
-    data: string | Uint8Array | Blob,
-  ): Promise<string> {
+  private async writeToDisk(runId: string, key: string, data: string): Promise<string> {
     const dir = path.join(STORAGE_ROOT, runId);
     await mkdir(dir, { recursive: true });
     const storageRef = path.join(dir, key);

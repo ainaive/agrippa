@@ -180,7 +180,9 @@ describe("DiskArtifactStore path containment", () => {
     const inlined = await store.store("run-hash", "small", "patch", { inline: "tiny diff" }, ws);
     expect(inlined.sha256).toBe(new Bun.CryptoHasher("sha256").update("tiny diff").digest("hex"));
 
-    // file-kind artifacts stream to disk; the digest must cover those bytes too
+    // file-kind artifacts stream to disk; the digest must describe the bytes
+    // actually WRITTEN (hashed in the same pass), not a re-read of the
+    // agent-mutable source
     await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
     writeFileSync(path.join(ws, ".agrippa/artifacts/blob"), content);
     const streamed = await store.store(
@@ -191,6 +193,11 @@ describe("DiskArtifactStore path containment", () => {
       ws,
     );
     expect(streamed.sha256).toBe(expected);
+    const storedBytes = new Uint8Array(await Bun.file(streamed.storageRef as string).arrayBuffer());
+    expect(new Bun.CryptoHasher("sha256").update(storedBytes).digest("hex")).toBe(
+      streamed.sha256 as string,
+    );
+    expect(streamed.size).toBe(storedBytes.byteLength);
   });
 
   it("falls back to the default cap when the size env is not a valid number", async () => {

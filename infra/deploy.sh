@@ -272,9 +272,12 @@ tree in $APP_DIR, then re-run this script."
   fi
 
   export AGRIPPA_VERSION="$previous"
-  compose up -d || {
+  # Bounded like the main up -d (see the comment there); spelled out because
+  # `timeout` needs a real command, not the compose() function.
+  timeout 600 docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+    up -d || {
     restore_hint
-    die "ROLLBACK FAILED — instance is down; '${previous:0:12}' did not start"
+    die "ROLLBACK FAILED — instance is down; '${previous:0:12}' did not start (or timed out)"
   }
   # Said on both outcomes: the operator cannot tell from here whether a
   # migration ran, and silence would read as "the database is fine".
@@ -310,10 +313,15 @@ api_ok() {
 #     unchanged containers without rebooting them (compose recreates only on
 #     image/config change), so demanding a post-deploy ready stamp would fail
 #     every reused-but-healthy worker.
-#   alive — heartbeat_at is fresh. The 60s sweeper bumps it (and the sweeper
-#     only starts after readiness), so liveness is proven by the running
-#     process. A reused container converges within one sweeper tick, which is
-#     why HEALTH_TIMEOUT must comfortably exceed 60s.
+#   alive — heartbeat_at beats BOTH the deploy start and a sliding 90s window.
+#     The 60s sweeper bumps it (first statement of its tick, so a failing
+#     sweep cannot skip the beat), which means liveness is proven by the
+#     running process: a reused container converges within one tick (why
+#     HEALTH_TIMEOUT must comfortably exceed 60s), and a worker that wedges
+#     after a single post-deploy beat ages out of the sliding window instead
+#     of passing for the rest of verification ($since alone is fixed).
+#   ours — container_id is one of THIS fleet's running containers (see the
+#     scoping comment inside worker_ok).
 #
 # The replica count is still needed for its other half: readiness rows prove
 # the replicas that came up are consuming, not that ONLY the expected replicas
@@ -367,6 +375,25 @@ worker_ok() {
   restarts="$(worker_restarts)"
   [ "$restarts" = "${worker_restart_baseline:-$restarts}" ] || return 1
 
+  # Scope the count to THIS fleet's running containers, matched by the exact
+  # hostname each worker writes ({{.Config.Hostname}} — by construction, not
+  # the 12-char-short-id convention). Without the scoping, any ready row
+  # pointed at the same database keeps counting forever: an operator's debug
+  # `docker run`, a leftover from an out-of-band `--scale`, a second stack —
+  # plus, bounded by the 5s slack in $since, an old container that heartbeated
+  # just before its replacement. `--status running` keeps the set consistent
+  # with the replica-count check above.
+  local host_ids id_list
+  host_ids="$(compose ps -q --status running worker 2>/dev/null |
+    xargs -r docker inspect -f '{{.Config.Hostname}}' 2>/dev/null |
+    tr -cd 'a-zA-Z0-9\n' || true)"
+  [ -n "$host_ids" ] || return 1
+  # word-splitting is intended — it builds the quoted SQL id list (sanitized
+  # to alphanumerics above, so quoting is safe)
+  # shellcheck disable=SC2086
+  id_list="$(printf "'%s'," $host_ids)"
+  id_list="${id_list%,}"
+
   local budget="${probe_budget:-10}"
   [ "$budget" -gt 1 ] 2>/dev/null || budget=1
   [ "$budget" -le 10 ] || budget=10
@@ -378,7 +405,7 @@ worker_ok() {
     docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
     exec -T -e PGCONNECT_TIMEOUT=2 -e PGOPTIONS="-c statement_timeout=${budget}s" \
     postgres psql -U agrippa -d agrippa -tAc \
-    "select count(distinct container_id) from worker_heartbeats where consumers_ready_at is not null and heartbeat_at > to_timestamp($since);" \
+    "select count(distinct container_id) from worker_heartbeats where container_id in ($id_list) and consumers_ready_at is not null and heartbeat_at > greatest(to_timestamp($since), now() - interval '90 seconds');" \
     2>/dev/null | tr -d '[:space:]')"
   # Until the api has applied migration 0012 the table does not exist, the
   # query errors, and $n is empty — correctly not-ready; the caller's
@@ -464,7 +491,17 @@ compose build || rollback "image build failed"
 log "up -d"
 # Not bare: under `set -e` a port collision or mount failure would exit here,
 # leaving the new commit checked out and never rolling back.
-compose up -d || rollback "docker compose up -d failed"
+#
+# Bounded: the worker's depends_on gates on api health, so `up -d` now WAITS
+# for the api healthcheck — and a crash-looping api resets its start_period on
+# every restart, so compose's wait may never reach a terminal state on its
+# own. Without the timeout, a hang runs to the Janus unit's TimeoutStartSec
+# SIGKILL: no rollback, no last-good update, tree left on the new commit.
+# 600s covers the api's 180s start_period plus its retry budget with room.
+# Spelled out because `timeout` needs a real command, not the compose()
+# function.
+timeout 600 docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+  up -d || rollback "docker compose up -d failed or timed out"
 
 log "verifying api + worker (${HEALTH_TIMEOUT}s)"
 stack_ok || rollback "health check failed"

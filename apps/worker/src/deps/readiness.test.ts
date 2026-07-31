@@ -81,9 +81,10 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
     expect(row?.heartbeatAt).not.toBeNull();
   });
 
-  it("deploy verification counts exactly the ready-AND-alive containers", async () => {
-    // the literal worker_ok() predicate from infra/deploy.sh, against every
-    // row state a deploy can encounter
+  it("deploy verification counts exactly the ready-AND-alive containers of THIS fleet", async () => {
+    // the literal worker_ok() predicate from infra/deploy.sh — fleet-scoped id
+    // list, readiness non-null, heartbeat inside both freshness windows —
+    // against every row state a deploy can encounter
     const fresh = new Date();
     const stale = new Date(Date.now() - 10 * 60 * 1000);
     await db.delete(workerHeartbeats);
@@ -96,12 +97,17 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
       { containerId: "p-wedged", startedAt: fresh, consumersReadyAt: null, heartbeatAt: fresh },
       // dead container from a previous deploy: ready but heartbeat stale → excluded
       { containerId: "p-dead", startedAt: stale, consumersReadyAt: stale, heartbeatAt: stale },
+      // ready and beating, but NOT one of this fleet's containers (debug
+      // docker run, out-of-band scale leftover, second stack) → excluded
+      { containerId: "p-orphan", startedAt: fresh, consumersReadyAt: fresh, heartbeatAt: fresh },
     ]);
 
     const since = new Date(Date.now() - 60 * 1000);
     const [row] = (await db.execute(
       sql`select count(distinct container_id)::int as n from worker_heartbeats
-          where consumers_ready_at is not null and heartbeat_at > ${since}`,
+          where container_id in ('p-reused', 'p-fresh', 'p-wedged', 'p-dead')
+            and consumers_ready_at is not null
+            and heartbeat_at > greatest(${since}::timestamptz, now() - interval '90 seconds')`,
     )) as Array<{ n: number }>;
     expect(row?.n).toBe(2);
   });

@@ -1664,9 +1664,14 @@ class RunEngine {
    * The workspace's current diff must equal the reviewed patch byte for byte.
    * Small patches compare against the Postgres inline value directly; a patch
    * over the inline threshold compares against its store-time sha256 instead.
-   * The digest lives in Postgres, which agent subprocesses cannot reach —
-   * the spilled file shares an agent-writable volume, so bytes read back from
-   * disk could be rewritten after review and are never trusted as evidence.
+   * The digest lives in Postgres, which agent subprocesses hold no credentials
+   * for — the spilled file shares an agent-writable volume, so bytes read back
+   * from disk could be rewritten after review and are never trusted as
+   * evidence. This is tamper-resistance within the documented posture, not a
+   * boundary: under compose (no functional inner sandbox) a read-write agent
+   * that recovers worker credentials from /proc can reach the DB and forge far
+   * more than a digest — the accepted container-is-the-boundary residual
+   * (design 08), closed by the VM topology's OS sandbox / M2 isolation.
    * A spilled patch without a digest (legacy row) is unverifiable and fails.
    */
   private assertPatchEvidenceMatches(key: string, current: string): void {

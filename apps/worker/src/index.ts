@@ -228,6 +228,10 @@ async function markRunFailed(runId: string, err: unknown): Promise<void> {
  */
 setInterval(async () => {
   try {
+    // liveness beat FIRST: deploy verification reads it through a sliding
+    // window, so a transient error in the sweep work below must not skip it
+    await touchWorkerHeartbeat(db, containerId);
+
     const stragglers = await db
       .select({ id: runs.id })
       .from(runs)
@@ -241,8 +245,6 @@ setInterval(async () => {
 
     // executor-availability heartbeat (the API's live window is minutes-wide)
     await registerExecutors();
-    // per-container liveness (readiness stays untouched — boot-time only)
-    await touchWorkerHeartbeat(db, containerId);
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }

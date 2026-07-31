@@ -107,6 +107,13 @@ case "$1" in
     exit 0 ;;
   inspect)
     case "$*" in
+      *Config.Hostname*)
+        # worker_ok scopes its readiness query to these hostnames; mirror the
+        # ps -q stub so the id set matches the "running" container list
+        i=0
+        while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do
+          i=$((i + 1)); echo "workerctr$i"
+        done ;;
       *RestartCount*)
         # STUB_RESTART_GROWS simulates a crash-looping worker: the count must
         # CHANGE between probes, so a fixed value would not reproduce it.
@@ -437,6 +444,11 @@ describe("infra/deploy.sh", () => {
     git(appDir, "branch", "-f", "deploy", "HEAD");
     const r = await run({ STUB_WORKERS_RUNNING: "2", STUB_READY_CONTAINERS: "2" });
     expect(r.exitCode).toBe(0);
+    // the readiness query is scoped to THIS fleet's container hostnames — a
+    // ready row from a foreign container must not be able to satisfy it
+    const psql = r.log.split("\n").find((l) => l.includes("worker_heartbeats"));
+    expect(psql).toContain("'workerctr1'");
+    expect(psql).toContain("'workerctr2'");
   }, 20_000);
 
   it("aborts before building when the version does not reach compose", async () => {

@@ -111,6 +111,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      # The api reports healthy only after migrate + seed + template publication
+      # complete (top-level await before the listener opens), so this gate stops
+      # the worker's boot-time DB writes racing a migration the worker depends
+      # on — a worker crash-looping on "relation does not exist" during the one
+      # deploy that ships a new table would otherwise trip deploy.sh's
+      # RestartCount check and roll back a good deploy. Mirrors the VM topology
+      # (agrippa-worker.service: After= + /healthz ExecStartPre). Reboots are
+      # unaffected: restart policies ignore depends_on, and migrations are
+      # already applied by then. NOTE: with AGRIPPA_MIGRATE_ON_BOOT=0 this gate
+      # only proves the api is serving, not that the schema is current.
+      api:
+        condition: service_healthy
     # the worker drains on SIGTERM (pg-boss graceful stop) before exiting; the
     # 10s compose default would SIGKILL it mid-drain
     stop_grace_period: 60s
