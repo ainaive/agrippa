@@ -83,9 +83,12 @@ export type StoredArtifact = {
   mime: string | null;
   /**
    * Hex sha256 of the stored bytes, computed at store time. The integrity
-   * anchor for patch evidence at git.push: it lives in Postgres (which agent
-   * subprocesses cannot reach), while the disk store shares a writable volume
-   * with them. Null only for empty stores.
+   * anchor for patch evidence at git.push: it lives in Postgres, which agent
+   * subprocesses are never given credentials for, while the disk store shares
+   * a writable volume with them. Posture-level tamper resistance, not an
+   * integrity boundary — an agent that recovers worker credentials can reach
+   * the database anyway (see the sandboxing residual in docs/design/08).
+   * Null only for empty stores.
    */
   sha256: string | null;
 };

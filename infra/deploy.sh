@@ -274,7 +274,7 @@ tree in $APP_DIR, then re-run this script."
   export AGRIPPA_VERSION="$previous"
   # Bounded like the main up -d (see the comment there); spelled out because
   # `timeout` needs a real command, not the compose() function.
-  timeout 600 docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+  timeout 300 docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
     up -d || {
     restore_hint
     die "ROLLBACK FAILED — instance is down; '${previous:0:12}' did not start (or timed out)"
@@ -383,11 +383,18 @@ worker_ok() {
   # plus, bounded by the 5s slack in $since, an old container that heartbeated
   # just before its replacement. `--status running` keeps the set consistent
   # with the replica-count check above.
-  local host_ids id_list
-  host_ids="$(compose ps -q --status running worker 2>/dev/null |
-    xargs -r docker inspect -f '{{.Config.Hostname}}' 2>/dev/null |
-    tr -cd 'a-zA-Z0-9\n' || true)"
+  local host_ids raw_ids id_list
+  raw_ids="$(compose ps -q --status running worker 2>/dev/null |
+    xargs -r docker inspect -f '{{.Config.Hostname}}' 2>/dev/null || true)"
+  # Accept a realistic hostname charset and REJECT anything else rather than
+  # stripping it: silently rewriting an id would leave the SQL list unable to
+  # match what os.hostname() wrote, and a healthy deploy would roll back with
+  # no clue why. Docker's default is the 12-char short id, but a compose
+  # `hostname:` or a future default could carry - or . — those still match,
+  # while a quote or space fails the check closed.
+  host_ids="$(printf '%s\n' "$raw_ids" | grep -x '[A-Za-z0-9_.-]\{1,\}' || true)"
   [ -n "$host_ids" ] || return 1
+  [ "$(printf '%s\n' "$host_ids" | wc -l)" -eq "$(printf '%s\n' "$raw_ids" | wc -l)" ] || return 1
   # word-splitting is intended — it builds the quoted SQL id list (sanitized
   # to alphanumerics above, so quoting is safe)
   # shellcheck disable=SC2086
@@ -492,15 +499,16 @@ log "up -d"
 # Not bare: under `set -e` a port collision or mount failure would exit here,
 # leaving the new commit checked out and never rolling back.
 #
-# Bounded: the worker's depends_on gates on api health, so `up -d` now WAITS
-# for the api healthcheck — and a crash-looping api resets its start_period on
-# every restart, so compose's wait may never reach a terminal state on its
-# own. Without the timeout, a hang runs to the Janus unit's TimeoutStartSec
-# SIGKILL: no rollback, no last-good update, tree left on the new commit.
-# 600s covers the api's 180s start_period plus its retry budget with room.
-# Spelled out because `timeout` needs a real command, not the compose()
+# Bounded against a hung docker daemon (or an image pull that stalls), because
+# the whole script runs under the Janus unit's TimeoutStartSec=1800: a SIGKILL
+# there lands mid-deploy with no rollback, no last-good update, and the tree
+# left on the new commit. The budget has to fit the worst path — build, then
+# up 300 + verify 180, then rollback's up 300 + verify 180 = 960s of
+# post-build work. No service waits on another's *health* here (see the worker
+# comment in docker-compose.yml), so `up -d` returns as soon as containers
+# start. Spelled out because `timeout` needs a real command, not the compose()
 # function.
-timeout 600 docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
+timeout 300 docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
   up -d || rollback "docker compose up -d failed or timed out"
 
 log "verifying api + worker (${HEALTH_TIMEOUT}s)"

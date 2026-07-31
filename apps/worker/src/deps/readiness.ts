@@ -14,6 +14,17 @@ import { lt, sql } from "drizzle-orm";
 const DB_NOW = sql`now()`;
 
 /**
+ * How long boot waits for the api to finish migrating (see awaitSchema).
+ *
+ * MUST stay above deploy.sh's HEALTH_TIMEOUT default (180s): the point is that
+ * if the schema never arrives, the worker is still *waiting* — running,
+ * restart-steady, simply not ready — for the whole of deploy verification, so
+ * the deploy fails as "worker never became ready" instead of as a RestartCount
+ * mismatch that reads like a crash loop. A cross-file test guards the ordering.
+ */
+export const WORKER_SCHEMA_WAIT_MS = 300_000;
+
+/**
  * First write of every boot, before anything else touches the DB: a restarted
  * container surrenders the previous boot's readiness, so a boot that wedges
  * anywhere in consumer setup cannot coast on a stale consumers_ready_at.

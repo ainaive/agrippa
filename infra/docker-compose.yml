@@ -106,23 +106,23 @@ services:
     volumes:
       - workspaces:/work/runs # throwaway per-run checkouts (worker only)
       - artifacts:/work/artifacts # shared with the API for downloads
+    # No `api: service_healthy` dependency on purpose. The worker must not run
+    # against a schema older than its own build (the api migrates on boot), but
+    # that ordering lives IN THE IMAGE — awaitSchema() at the top of
+    # apps/worker/src/index.ts waits for the migration journal to reach this
+    # build's newest migration. That covers what a compose dependency cannot:
+    # host reboots and `docker start` (restart policies ignore depends_on), the
+    # VM/systemd topology, and AGRIPPA_MIGRATE_ON_BOOT=0 (where api health says
+    # nothing about the schema). It also keeps `compose up -d` from blocking on
+    # another service's health, which is what turns a crash-looping api into an
+    # unbounded deploy hang (see the timeout in infra/deploy.sh).
+    # Booting concurrently with the api is otherwise fine: pg-boss installs and
+    # migrates its own schema under its own advisory lock.
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
-      # The api reports healthy only after migrate + seed + template publication
-      # complete (top-level await before the listener opens), so this gate stops
-      # the worker's boot-time DB writes racing a migration the worker depends
-      # on — a worker crash-looping on "relation does not exist" during the one
-      # deploy that ships a new table would otherwise trip deploy.sh's
-      # RestartCount check and roll back a good deploy. Mirrors the VM topology
-      # (agrippa-worker.service: After= + /healthz ExecStartPre). Reboots are
-      # unaffected: restart policies ignore depends_on, and migrations are
-      # already applied by then. NOTE: with AGRIPPA_MIGRATE_ON_BOOT=0 this gate
-      # only proves the api is serving, not that the schema is current.
-      api:
-        condition: service_healthy
     # the worker drains on SIGTERM (pg-boss graceful stop) before exiting; the
     # 10s compose default would SIGKILL it mid-drain
     stop_grace_period: 60s

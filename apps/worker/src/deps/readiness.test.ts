@@ -1,7 +1,13 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { createDb, migrateDb, workerHeartbeats } from "@agrippa/db";
+import path from "node:path";
+import { awaitSchema, createDb, expectedSchema, migrateDb, workerHeartbeats } from "@agrippa/db";
 import { eq, sql } from "drizzle-orm";
-import { markBootStarted, markConsumersReady, touchWorkerHeartbeat } from "./readiness";
+import {
+  markBootStarted,
+  markConsumersReady,
+  touchWorkerHeartbeat,
+  WORKER_SCHEMA_WAIT_MS,
+} from "./readiness";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 
@@ -110,6 +116,43 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
             and heartbeat_at > greatest(${since}::timestamptz, now() - interval '90 seconds')`,
     )) as Array<{ n: number }>;
     expect(row?.n).toBe(2);
+  });
+
+  it("waits for the schema this build expects, and proceeds once it is applied", async () => {
+    // an un-migrated database is exactly the boot the wait exists for: the api
+    // has not finished migrating, so the worker must not start writing
+    await db.execute(sql`drop schema if exists public cascade`);
+    await db.execute(sql`create schema public`);
+    await db.execute(sql`drop schema if exists drizzle cascade`);
+    const logs: string[] = [];
+    expect(
+      await awaitSchema(db, {
+        timeoutMs: 300,
+        pollMs: 50,
+        logEveryMs: 0,
+        log: (m) => logs.push(m),
+      }),
+    ).toBe(false);
+    // the diagnosis line names the migration the image expects
+    const expected = await expectedSchema();
+    expect(logs.join("\n")).toContain(expected?.tag as string);
+
+    await migrateDb(db);
+    expect(await awaitSchema(db, { timeoutMs: 300, pollMs: 50 })).toBe(true);
+  });
+
+  it("waits longer than deploy verification does", async () => {
+    // If the schema never arrives the worker must still be WAITING (running,
+    // restart-steady) for all of deploy.sh's HEALTH_TIMEOUT, so the deploy
+    // fails as "worker never became ready" rather than as a restart-count
+    // mismatch that reads like a crash loop. Cross-file so raising
+    // HEALTH_TIMEOUT later cannot silently re-arm the bad signal.
+    const deploySh = await Bun.file(
+      path.resolve(import.meta.dirname, "../../../../infra/deploy.sh"),
+    ).text();
+    const healthTimeout = deploySh.match(/HEALTH_TIMEOUT="\$\{HEALTH_TIMEOUT:-(\d+)\}"/)?.[1];
+    expect(healthTimeout).toBeDefined();
+    expect(WORKER_SCHEMA_WAIT_MS).toBeGreaterThan(Number(healthTimeout) * 1000);
   });
 
   it("prunes containers silent for over a week", async () => {

@@ -109,10 +109,17 @@ case "$1" in
     case "$*" in
       *Config.Hostname*)
         # worker_ok scopes its readiness query to these hostnames; mirror the
-        # ps -q stub so the id set matches the "running" container list
+        # ps -q stub so the id set matches the "running" container list.
+        # STUB_HOSTNAME_STYLE=compose emits a dash-and-dot-bearing name, what
+        # a compose hostname: key or a future docker default would produce
         i=0
         while [ "$i" -lt "\${STUB_WORKERS_RUNNING:-1}" ]; do
-          i=$((i + 1)); echo "workerctr$i"
+          i=$((i + 1))
+          if [ "\${STUB_HOSTNAME_STYLE:-short}" = "compose" ]; then
+            echo "agrippa-worker-$i.local"
+          else
+            echo "workerctr$i"
+          fi
         done ;;
       *RestartCount*)
         # STUB_RESTART_GROWS simulates a crash-looping worker: the count must
@@ -416,6 +423,16 @@ describe("infra/deploy.sh", () => {
     const r = await run({ STUB_WORKERS_RUNNING: "2", STUB_READY_CONTAINERS: "1" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("worker never became ready");
+  }, 20_000);
+
+  it("accepts hostnames carrying dashes and dots, without rewriting them", async () => {
+    // the readiness ids must match what os.hostname() wrote byte for byte;
+    // stripping characters instead of accepting them would silently produce a
+    // never-matching id list and roll back a healthy deploy
+    const r = await run({ STUB_HOSTNAME_STYLE: "compose", STUB_READY_CONTAINERS: "1" });
+    expect(r.exitCode).toBe(0);
+    const psql = r.log.split("\n").find((l) => l.includes("worker_heartbeats"));
+    expect(psql).toContain("'agrippa-worker-1.local'");
   }, 20_000);
 
   it("rejects WORKER_REPLICAS=0 before building anything", async () => {

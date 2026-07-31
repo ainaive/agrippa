@@ -115,7 +115,9 @@ export class DiskArtifactStore implements ArtifactStore {
         written += chunk.byteLength;
         if (written > maxArtifactSize()) throw new ArtifactTooLargeError(key, written);
         hasher.update(chunk);
-        writer.write(chunk);
+        // write() returns a Promise when the sink applies backpressure —
+        // ignoring it lets end() run before those chunks land
+        await writer.write(chunk);
       }
       await writer.end();
     } catch (err) {
