@@ -411,6 +411,21 @@ describe("infra/deploy.sh", () => {
     expect(r.stderr).toContain("worker never became ready");
   }, 20_000);
 
+  it("rejects WORKER_REPLICAS=0 before building anything", async () => {
+    // 0 makes worker verification vacuous: 0 running == 0 expected and
+    // 0 ready >= 0 expected both pass with no workers at all
+    writeFileSync(
+      path.join(appDir, "infra", "env", ".env"),
+      "AGRIPPA_PORT=127.0.0.1:3001\nWORKER_REPLICAS=0\n",
+    );
+    git(appDir, "commit", "-aqm", "zero replicas");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    const r = await run({});
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("WORKER_REPLICAS");
+    expect(r.log).not.toContain("build");
+  }, 20_000);
+
   it("passes when every expected replica is consumers-ready", async () => {
     // the positive control for the case above — proves the failure came from
     // the row count, not from WORKER_REPLICAS=2 breaking something else

@@ -30,15 +30,17 @@ import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
-import { markConsumersReady, touchWorkerHeartbeat } from "./deps/readiness";
+import { markBootStarted, markConsumersReady, touchWorkerHeartbeat } from "./deps/readiness";
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitScmService } from "./deps/scm";
 import { GitWorkspaceManager } from "./deps/workspace";
 
 const db = createDb();
 // inside a compose container the hostname IS the container id — the identity
-// deploy verification counts readiness rows by
+// deploy verification counts readiness rows by. Boot-start clears any prior
+// boot's readiness FIRST, so a boot that wedges below never looks ready.
 const containerId = hostname();
+await markBootStarted(db, containerId);
 const bus = process.env.REDIS_URL
   ? new RedisEventBus(process.env.REDIS_URL)
   : new InProcessEventBus();

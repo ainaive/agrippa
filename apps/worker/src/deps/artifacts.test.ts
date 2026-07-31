@@ -168,16 +168,29 @@ describe("DiskArtifactStore path containment", () => {
     expect(stored.size).toBe(200 * 1024);
   });
 
-  it("reads spilled content back by storageRef, but only inside the storage root", async () => {
+  it("stamps every store with the content's sha256 — the push-time evidence anchor", async () => {
     const ws = freshWorkspace();
     const content = "p".repeat(100 * 1024); // over the 64 KB threshold → disk
-    const stored = await store.store("run-read", "changes", "patch", { inline: content }, ws);
-    expect(stored.storageRef).not.toBeNull();
-    expect(await store.read(stored.storageRef as string)).toBe(content);
+    const expected = new Bun.CryptoHasher("sha256").update(content).digest("hex");
 
-    // a corrupted row must not become an arbitrary-file-read primitive
-    expect(await store.read("/etc/hosts")).toBeNull();
-    expect(await store.read(`${stored.storageRef}/../../../../etc/hosts`)).toBeNull();
+    const spilled = await store.store("run-hash", "changes", "patch", { inline: content }, ws);
+    expect(spilled.inline).toBeNull();
+    expect(spilled.sha256).toBe(expected);
+
+    const inlined = await store.store("run-hash", "small", "patch", { inline: "tiny diff" }, ws);
+    expect(inlined.sha256).toBe(new Bun.CryptoHasher("sha256").update("tiny diff").digest("hex"));
+
+    // file-kind artifacts stream to disk; the digest must cover those bytes too
+    await mkdir(path.join(ws, ".agrippa/artifacts"), { recursive: true });
+    writeFileSync(path.join(ws, ".agrippa/artifacts/blob"), content);
+    const streamed = await store.store(
+      "run-hash",
+      "blob",
+      "file",
+      { path: ".agrippa/artifacts/blob" },
+      ws,
+    );
+    expect(streamed.sha256).toBe(expected);
   });
 
   it("falls back to the default cap when the size env is not a valid number", async () => {

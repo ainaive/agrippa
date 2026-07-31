@@ -9,6 +9,22 @@ import { lt, sql } from "drizzle-orm";
  */
 
 /**
+ * First write of every boot, before anything else touches the DB: a restarted
+ * container surrenders the previous boot's readiness, so a boot that wedges
+ * anywhere in consumer setup cannot coast on a stale consumers_ready_at.
+ */
+export async function markBootStarted(db: Db, containerId: string): Promise<void> {
+  const now = new Date();
+  await db
+    .insert(workerHeartbeats)
+    .values({ containerId, startedAt: now, heartbeatAt: now })
+    .onConflictDoUpdate({
+      target: workerHeartbeats.containerId,
+      set: { startedAt: now, consumersReadyAt: null, heartbeatAt: now },
+    });
+}
+
+/**
  * Call only after boss.work() has returned for every consumer. Writing it any
  * earlier reopens the register-then-wedge gap this row exists to close: a
  * worker that hangs in consumer setup must never look ready.

@@ -81,6 +81,13 @@ export type StoredArtifact = {
   storageRef: string | null;
   size: number;
   mime: string | null;
+  /**
+   * Hex sha256 of the stored bytes, computed at store time. The integrity
+   * anchor for patch evidence at git.push: it lives in Postgres (which agent
+   * subprocesses cannot reach), while the disk store shares a writable volume
+   * with them. Null only for empty stores.
+   */
+  sha256: string | null;
 };
 
 export interface ArtifactStore {
@@ -98,13 +105,6 @@ export interface ArtifactStore {
     workspaceDir: string,
     opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact>;
-  /**
-   * Read previously stored content back by its storageRef; null when missing
-   * or unreadable. The engine needs this for patch-evidence comparison at
-   * git.push — a patch over the inline threshold only exists here, and the
-   * stored bytes ARE the approved evidence.
-   */
-  read(storageRef: string): Promise<string | null>;
 }
 
 export type PullRequestSpec = {

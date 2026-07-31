@@ -62,6 +62,16 @@ die() {
 [ -f "$COMPOSE_FILE" ] || die "no compose file at $COMPOSE_FILE"
 [ -f "$ENV_FILE" ] || die "no env file at $ENV_FILE"
 
+# Reject a zero/garbled replica count before building anything: worker_ok()
+# compares counts against it, and with 0 both "0 running == 0 expected" and
+# "0 ready >= 0 expected" pass vacuously — a deploy with no workers at all
+# would verify as healthy.
+replicas_cfg="$(sed -nE 's/^WORKER_REPLICAS=[[:space:]]*([0-9]+).*/\1/p' "$ENV_FILE" | tail -n1)"
+if grep -q '^WORKER_REPLICAS=' "$ENV_FILE"; then
+  [ -n "$replicas_cfg" ] && [ "$replicas_cfg" -ge 1 ] 2>/dev/null ||
+    die "WORKER_REPLICAS in $ENV_FILE must be a number >= 1"
+fi
+
 # Name the project explicitly rather than letting compose resolve it from the
 # file's `name:`. The restore procedure printed on failure is copy-pasted by an
 # operator into a shell that may not share this one's environment, and without
@@ -288,13 +298,22 @@ api_ok() {
 # consumers-ready row per expected replica. All three are load-bearing; none
 # is instrumentation.
 #
-# The rows come from worker_heartbeats: each container upserts its own row —
+# The rows come from worker_heartbeats: each container upserts its own row,
 # keyed by container id, so counting DISTINCT ids stops one healthy replica
-# from masking the rest — only AFTER boss.work() has returned for all of its
-# consumers (apps/worker/src/index.ts). A worker that registers its executors
-# and then wedges inside consumer setup never writes one, closing the
-# register-then-wedge gap (issue #15) that the old fresh-registration check
-# accepted.
+# from masking the rest. A row counts only when it is BOTH:
+#   ready — consumers_ready_at is non-null. Boot start clears it and only the
+#     completion of every boss.work() call sets it (apps/worker/src/index.ts),
+#     so a worker that registers its executors and then wedges inside consumer
+#     setup never counts — the register-then-wedge gap (issue #15) the old
+#     fresh-registration check accepted. Freshness of this stamp is
+#     deliberately NOT required: a rollback or same-SHA redeploy reuses
+#     unchanged containers without rebooting them (compose recreates only on
+#     image/config change), so demanding a post-deploy ready stamp would fail
+#     every reused-but-healthy worker.
+#   alive — heartbeat_at is fresh. The 60s sweeper bumps it (and the sweeper
+#     only starts after readiness), so liveness is proven by the running
+#     process. A reused container converges within one sweeper tick, which is
+#     why HEALTH_TIMEOUT must comfortably exceed 60s.
 #
 # The replica count is still needed for its other half: readiness rows prove
 # the replicas that came up are consuming, not that ONLY the expected replicas
@@ -304,10 +323,10 @@ api_ok() {
 # Nor is the count enough on its own, now that compose sets
 # `restart: unless-stopped` so the stack survives a host reboot: a crash-
 # looping worker reads as running between restarts, and a loop that gets past
-# consumer setup before dying re-freshens its readiness row on every lap. That
-# is what the RestartCount comparison below is for. Deleting it restores the
-# masking exactly — infra/deploy.test.ts covers that, but this comment is what
-# a reader trusts first.
+# consumer setup before dying re-asserts readiness on every lap. That is what
+# the RestartCount comparison below is for. Deleting it restores the masking
+# exactly — infra/deploy.test.ts covers that, but this comment is what a
+# reader trusts first.
 # Summed RestartCount across the worker containers. Empty/again-unavailable
 # reads return 0 rather than failing: this is a tie-breaker on top of the two
 # checks below, and a docker hiccup should not by itself fail a deploy.
@@ -359,7 +378,7 @@ worker_ok() {
     docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
     exec -T -e PGCONNECT_TIMEOUT=2 -e PGOPTIONS="-c statement_timeout=${budget}s" \
     postgres psql -U agrippa -d agrippa -tAc \
-    "select count(distinct container_id) from worker_heartbeats where consumers_ready_at > to_timestamp($since);" \
+    "select count(distinct container_id) from worker_heartbeats where consumers_ready_at is not null and heartbeat_at > to_timestamp($since);" \
     2>/dev/null | tr -d '[:space:]')"
   # Until the api has applied migration 0012 the table does not exist, the
   # query errors, and $n is empty — correctly not-ready; the caller's

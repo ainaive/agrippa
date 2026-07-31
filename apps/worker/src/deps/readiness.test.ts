@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { createDb, migrateDb, workerHeartbeats } from "@agrippa/db";
 import { eq, sql } from "drizzle-orm";
-import { markConsumersReady, touchWorkerHeartbeat } from "./readiness";
+import { markBootStarted, markConsumersReady, touchWorkerHeartbeat } from "./readiness";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 
@@ -67,6 +67,43 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
     const before = (await rowFor("ctr-touch-ready"))?.consumersReadyAt;
     await touchWorkerHeartbeat(db, "ctr-touch-ready");
     expect((await rowFor("ctr-touch-ready"))?.consumersReadyAt?.getTime()).toBe(before?.getTime());
+  });
+
+  it("boot start surrenders the previous boot's readiness", async () => {
+    // restart-then-wedge: without the boot-start clear, this boot would coast
+    // on the stamp its previous life earned
+    await markConsumersReady(db, "ctr-reboot");
+    expect((await rowFor("ctr-reboot"))?.consumersReadyAt).not.toBeNull();
+
+    await markBootStarted(db, "ctr-reboot");
+    const row = await rowFor("ctr-reboot");
+    expect(row?.consumersReadyAt).toBeNull();
+    expect(row?.heartbeatAt).not.toBeNull();
+  });
+
+  it("deploy verification counts exactly the ready-AND-alive containers", async () => {
+    // the literal worker_ok() predicate from infra/deploy.sh, against every
+    // row state a deploy can encounter
+    const fresh = new Date();
+    const stale = new Date(Date.now() - 10 * 60 * 1000);
+    await db.delete(workerHeartbeats);
+    await db.insert(workerHeartbeats).values([
+      // reused healthy container: old ready stamp, sweeper keeps it alive → counts
+      { containerId: "p-reused", startedAt: stale, consumersReadyAt: stale, heartbeatAt: fresh },
+      // fresh boot that completed consumer setup → counts
+      { containerId: "p-fresh", startedAt: fresh, consumersReadyAt: fresh, heartbeatAt: fresh },
+      // rebooted and wedged in consumer setup: boot-start cleared readiness → excluded
+      { containerId: "p-wedged", startedAt: fresh, consumersReadyAt: null, heartbeatAt: fresh },
+      // dead container from a previous deploy: ready but heartbeat stale → excluded
+      { containerId: "p-dead", startedAt: stale, consumersReadyAt: stale, heartbeatAt: stale },
+    ]);
+
+    const since = new Date(Date.now() - 60 * 1000);
+    const [row] = (await db.execute(
+      sql`select count(distinct container_id)::int as n from worker_heartbeats
+          where consumers_ready_at is not null and heartbeat_at > ${since}`,
+    )) as Array<{ n: number }>;
+    expect(row?.n).toBe(2);
   });
 
   it("prunes containers silent for over a week", async () => {

@@ -1953,20 +1953,21 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
     expect(fx.scm.pushes).toHaveLength(0);
   });
 
-  it("refuses to publish when big-patch evidence cannot be read back", async () => {
+  it("refuses to publish a big patch whose row carries no integrity digest", async () => {
     const fx = await setupV2Fixture();
     const { impl, rev } = await walkBigPatchToDecidedGate(fx);
 
-    // a lost artifacts volume (or a corrupted row) — the stored bytes ARE the
-    // approved evidence, so the push must fail, never proceed unverified
+    // a legacy row from before digests existed — spilled bytes on the shared
+    // volume are agent-writable and can never substitute for the digest, so
+    // the push must fail as unverifiable, never proceed on disk contents
     await fx.db
       .update(artifacts)
-      .set({ storageRef: "mem://void/changes" })
+      .set({ sha256: null })
       .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "changes")));
     expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
     const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
     expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
-    expect((run?.error as { message: string } | null)?.message).toContain("not readable");
+    expect((run?.error as { message: string } | null)?.message).toContain("integrity digest");
     expect(fx.scm.pushes).toHaveLength(0);
   });
 

@@ -24,7 +24,17 @@ class ArtifactTooLargeError extends Error {
   }
 }
 
-const EMPTY: StoredArtifact = { inline: null, storageRef: null, size: 0, mime: null };
+const EMPTY: StoredArtifact = { inline: null, storageRef: null, size: 0, mime: null, sha256: null };
+
+const sha256Hex = (content: string | Uint8Array): string =>
+  new Bun.CryptoHasher("sha256").update(content).digest("hex");
+
+/** Stream-hash a file so a 25 MB artifact never has to sit in memory whole. */
+async function sha256HexOfFile(file: ReturnType<typeof Bun.file>): Promise<string> {
+  const hasher = new Bun.CryptoHasher("sha256");
+  for await (const chunk of file.stream()) hasher.update(chunk);
+  return hasher.digest("hex");
+}
 
 /**
  * Resolve a workspace-relative artifact source to a real path that is provably
@@ -88,7 +98,7 @@ export class DiskArtifactStore implements ArtifactStore {
       return this.storeText(runId, key, await file.text(), mime, inlineLimit);
     }
     const storageRef = await this.writeToDisk(runId, key, file);
-    return { inline: null, storageRef, size, mime };
+    return { inline: null, storageRef, size, mime, sha256: await sha256HexOfFile(file) };
   }
 
   private async storeText(
@@ -101,9 +111,10 @@ export class DiskArtifactStore implements ArtifactStore {
     const size = Buffer.byteLength(content);
     if (size === 0) return EMPTY;
     if (size > maxArtifactSize()) throw new ArtifactTooLargeError(key, size);
-    if (size <= inlineLimit) return { inline: content, storageRef: null, size, mime };
+    const sha256 = sha256Hex(content);
+    if (size <= inlineLimit) return { inline: content, storageRef: null, size, mime, sha256 };
     const storageRef = await this.writeToDisk(runId, key, content);
-    return { inline: null, storageRef, size, mime };
+    return { inline: null, storageRef, size, mime, sha256 };
   }
 
   private async writeToDisk(
@@ -116,13 +127,5 @@ export class DiskArtifactStore implements ArtifactStore {
     const storageRef = path.join(dir, key);
     await Bun.write(storageRef, data);
     return storageRef;
-  }
-
-  async read(storageRef: string): Promise<string | null> {
-    // refs come from our own artifact rows, but stay inside the storage root
-    // anyway — a corrupted row must not become an arbitrary-file-read primitive
-    if (!isWithin(STORAGE_ROOT, path.resolve(storageRef))) return null;
-    const file = Bun.file(storageRef);
-    return (await file.exists()) ? await file.text() : null;
   }
 }

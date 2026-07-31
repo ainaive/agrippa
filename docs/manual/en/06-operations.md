@@ -126,7 +126,7 @@ $C up -d api worker                  # picks up the new DATABASE_URL
 ## Backup — three things
 
 1. The **database** — Compose: the `pgdata` volume; VM: `pg_dump agrippa` — schedule per your policy.
-2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata, small artifacts, and checkpoint-driving artifacts survive in Postgres), and an in-flight run whose reviewed patch exceeded 64 KB will refuse to publish — the push verifies against the stored patch bytes.
+2. The **artifact store** — Compose: the `artifacts` volume; VM: `/var/lib/agrippa/artifacts`. Losing it loses downloads over 64 KB (metadata, small artifacts, and checkpoint-driving artifacts survive in Postgres; publish-time patch verification uses digests stored in Postgres, so it is unaffected).
 3. **`AGRIPPA_SECRET_KEY`** — without it, every stored git token and MCP credential is unrecoverable. Redis needs no backup.
 
 ## Upgrades & scaling
@@ -166,7 +166,7 @@ $C start api worker                      # only once the restore succeeded
 
 Drop and recreate rather than `pg_restore --clean`: `--clean` only drops what the archive contains, so tables the failed migration *added* would survive, and can block the restore through dependencies. `--single-transaction` with `--exit-on-error` means a partial restore rolls back instead of leaving a half-populated database. Stopping the app first is not optional — `dropdb` refuses while the api and worker hold connections.
 
-A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** each expected replica has written a fresh consumers-ready row to `worker_heartbeats`. That row is per-container and written only after all of the worker's queue consumers have started, so a worker that registers its executors and then wedges during startup no longer reads as deployed. Inspect the rows with:
+A deploy is reported successful only once the api reports healthy **and** every expected worker replica is running **and** each expected replica has a ready-and-alive row in `worker_heartbeats`: `consumers_ready_at` set (cleared at every boot start, re-set only after all queue consumers have started — so a worker that registers its executors and then wedges during startup no longer reads as deployed) plus a fresh 60 s heartbeat proving the process is alive. Requiring liveness rather than a post-deploy ready stamp means rollbacks and same-commit redeploys that reuse unchanged, healthy containers verify without a reboot. Inspect the rows with:
 
 ```sh
 docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \

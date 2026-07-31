@@ -92,6 +92,13 @@
       "when": 1785448470832,
       "tag": "0012_worker_heartbeats",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1785466249628,
+      "tag": "0013_artifact_sha256",
+      "breakpoints": true
     }
   ]
 }

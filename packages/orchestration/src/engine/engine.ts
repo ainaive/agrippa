@@ -260,8 +260,8 @@ class RunEngine {
   private currentStepRowId: string | null = null;
   private currentIteration = 1;
   private producedArtifacts = new Set<string>();
-  /** storageRef per artifact key, for content too large to sit in artifactValues. */
-  private artifactRefs: Record<string, string> = {};
+  /** Store-time sha256 per artifact key — the integrity anchor for content too large to sit in artifactValues. */
+  private artifactDigests: Record<string, string> = {};
   /** Latest inline value per artifact key — the `artifacts.<key>` expression root. */
   private artifactValues: Record<string, unknown> = {};
   /** Latest decided response per checkpoint id — the `checkpoints.<id>` root. */
@@ -426,7 +426,7 @@ class RunEngine {
     for (const a of priorArtifacts) {
       this.producedArtifacts.add(a.artifactKey);
       this.artifactValues[a.artifactKey] = a.inline ?? "";
-      if (a.storageRef) this.artifactRefs[a.artifactKey] = a.storageRef;
+      if (a.sha256) this.artifactDigests[a.artifactKey] = a.sha256;
     }
     // decided checkpoint responses re-enter the expression context on resume
     const decidedCheckpoints = await db
@@ -1095,14 +1095,10 @@ class RunEngine {
       if (patchContracts.length > 0) {
         const current = await this.wrapScm(step, () => this.deps.workspace.diff(this.run.id));
         for (const contract of patchContracts) {
-          const stored = await this.readPatchEvidence(contract.key);
-          if (stored !== current) {
-            throw new RunFailure(
-              "contract_violation",
-              `workspace changed after the reviewed '${contract.key}' evidence — refusing to publish unapproved changes`,
-            );
-          }
-          expectedPatch ??= stored;
+          this.assertPatchEvidenceMatches(contract.key, current);
+          // proven byte-identical to the reviewed patch, so it can serve as
+          // the SCM adapter's expected snapshot
+          expectedPatch ??= current;
         }
       }
       const result = await this.wrapScm(step, () =>
@@ -1649,9 +1645,10 @@ class RunEngine {
       size: stored.size,
       storageRef: stored.storageRef,
       inline: stored.inline ?? null,
+      sha256: stored.sha256,
     });
     this.producedArtifacts.add(event.key);
-    if (stored.storageRef) this.artifactRefs[event.key] = stored.storageRef;
+    if (stored.sha256) this.artifactDigests[event.key] = stored.sha256;
     if (stored.inline !== null) {
       this.artifactValues[event.key] = stored.inline;
     } else {
@@ -1664,23 +1661,33 @@ class RunEngine {
   }
 
   /**
-   * The exact bytes of a reviewed patch. Inline for patches within the store's
-   * threshold; larger ones read back from the artifact store by storageRef —
-   * the stored bytes ARE the approved evidence, so an unreadable ref must fail
-   * the push (a publish must never proceed on unverifiable evidence).
+   * The workspace's current diff must equal the reviewed patch byte for byte.
+   * Small patches compare against the Postgres inline value directly; a patch
+   * over the inline threshold compares against its store-time sha256 instead.
+   * The digest lives in Postgres, which agent subprocesses cannot reach —
+   * the spilled file shares an agent-writable volume, so bytes read back from
+   * disk could be rewritten after review and are never trusted as evidence.
+   * A spilled patch without a digest (legacy row) is unverifiable and fails.
    */
-  private async readPatchEvidence(key: string): Promise<string> {
+  private assertPatchEvidenceMatches(key: string, current: string): void {
+    const drift = (): RunFailure =>
+      new RunFailure(
+        "contract_violation",
+        `workspace changed after the reviewed '${key}' evidence — refusing to publish unapproved changes`,
+      );
     const inline = this.artifactValues[key];
-    if (typeof inline === "string" && inline !== "") return inline;
-    const ref = this.artifactRefs[key];
-    const content = ref ? await this.deps.artifacts.read(ref) : null;
-    if (content === null) {
+    if (typeof inline === "string" && inline !== "") {
+      if (inline !== current) throw drift();
+      return;
+    }
+    const digest = this.artifactDigests[key];
+    if (!digest) {
       throw new RunFailure(
         "contract_violation",
-        `patch evidence '${key}' is not readable from the artifact store — refusing to publish unverifiable changes`,
+        `patch evidence '${key}' has no integrity digest — refusing to publish unverifiable changes`,
       );
     }
-    return content;
+    if (new Bun.CryptoHasher("sha256").update(current).digest("hex") !== digest) throw drift();
   }
 
   private async recordUsage(event: UsageDelta, row: StepRow, attempt: number): Promise<void> {

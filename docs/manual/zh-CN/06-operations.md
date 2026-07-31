@@ -125,7 +125,7 @@ $C up -d api worker                  # 使其读取新的 DATABASE_URL
 ## 备份——三样东西
 
 1. **数据库** —— Compose：`pgdata` 卷；虚拟机：`pg_dump agrippa` ——按你的策略定期执行。
-2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后超过 64 KB 的下载不可恢复（元数据、小产出物以及驱动检查点的产出物在 Postgres 中仍在），且评审补丁超过 64 KB 的进行中执行将拒绝发布——推送会校验存储的补丁字节。
+2. **产出物存储** —— Compose：`artifacts` 卷；虚拟机：`/var/lib/agrippa/artifacts`。丢失后超过 64 KB 的下载不可恢复（元数据、小产出物以及驱动检查点的产出物在 Postgres 中仍在；发布时的补丁校验使用存于 Postgres 的摘要，不受影响）。
 3. **`AGRIPPA_SECRET_KEY`** ——没有它，所有已存的 git 令牌和 MCP 凭证都无法解密。Redis 无需备份。
 
 ## 升级与扩容
@@ -165,7 +165,7 @@ $C start api worker                      # 仅在还原成功之后
 
 要先删库重建，而不是用 `pg_restore --clean`：`--clean` 只会删除归档中存在的对象，因此失败迁移**新增**的表会残留下来，并可能因依赖关系导致还原失败。`--single-transaction` 配合 `--exit-on-error` 可保证部分还原会整体回滚，而不是留下一个半成品数据库。先停掉应用不是可选项——api 与 worker 仍持有连接时 `dropdb` 会拒绝执行。
 
-只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**每个预期副本都在 `worker_heartbeats` 中写入了新的「消费者就绪」记录时，部署才算成功。该记录以容器为单位，且只有在 worker 的全部队列消费者启动完成后才会写入——因此「注册了执行器但随后启动途中卡死」的 worker 不会再被误判为部署成功。可用以下命令查看：
+只有当 api 报告健康、**且**每个预期的 worker 副本都在运行、**且**每个预期副本在 `worker_heartbeats` 中「就绪且存活」时，部署才算成功：`consumers_ready_at` 已设置（每次启动开始时会先清空，只有全部队列消费者启动完成后才重新写入——因此「注册了执行器但随后启动途中卡死」的 worker 不会再被误判为部署成功），并且 60 秒心跳仍然新鲜（证明进程存活）。校验存活而非要求部署后的新就绪时间戳，意味着回滚或同一提交的重新部署在复用未变更且健康的容器时无需重启即可通过验证。可用以下命令查看：
 
 ```sh
 docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
