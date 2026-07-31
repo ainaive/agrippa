@@ -93,7 +93,7 @@ type FixtureOptions = {
 
 async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const db = sharedDb;
-  await db.execute(sql`drop schema public cascade`);
+  await db.execute(sql`drop schema if exists public cascade`);
   await db.execute(sql`create schema public`);
   await db.execute(sql`drop schema if exists drizzle cascade`);
   await migrateDb(db);
@@ -1104,7 +1104,7 @@ type V2Fixture = {
 
 async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> {
   const db = sharedDb;
-  await db.execute(sql`drop schema public cascade`);
+  await db.execute(sql`drop schema if exists public cascade`);
   await db.execute(sql`create schema public`);
   await db.execute(sql`drop schema if exists drizzle cascade`);
   await migrateDb(db);

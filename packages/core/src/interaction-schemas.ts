@@ -97,6 +97,7 @@ export type ReviewFinding = z.infer<typeof reviewFindingSchema>;
  * plus <10 KB of structural JSON. 2 MiB strictly dominates both, so only
  * schema-invalid (or whitespace-padded) content can exceed it — and that fails
  * as a distinct too-large contract violation, never as "no findings".
+ * Changing any `.max()` in the schemas above requires re-deriving this bound.
  */
 export const INTERACTION_ARTIFACT_MAX_BYTES = 2 * 1024 * 1024;
 

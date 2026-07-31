@@ -6,7 +6,12 @@ import { lt, sql } from "drizzle-orm";
  * executor, so they cannot prove each replica came up; deploy verification
  * (infra/deploy.sh worker_ok) counts fresh consumers_ready_at rows instead —
  * one per expected replica.
+ *
+ * All timestamps are written with the DATABASE clock (`now()`): the deploy
+ * freshness window and the prune predicate compare against Postgres `now()`,
+ * and a skewed worker clock must not shift rows in or out of either.
  */
+const DB_NOW = sql`now()`;
 
 /**
  * First write of every boot, before anything else touches the DB: a restarted
@@ -14,13 +19,12 @@ import { lt, sql } from "drizzle-orm";
  * anywhere in consumer setup cannot coast on a stale consumers_ready_at.
  */
 export async function markBootStarted(db: Db, containerId: string): Promise<void> {
-  const now = new Date();
   await db
     .insert(workerHeartbeats)
-    .values({ containerId, startedAt: now, heartbeatAt: now })
+    .values({ containerId, startedAt: DB_NOW, heartbeatAt: DB_NOW })
     .onConflictDoUpdate({
       target: workerHeartbeats.containerId,
-      set: { startedAt: now, consumersReadyAt: null, heartbeatAt: now },
+      set: { startedAt: DB_NOW, consumersReadyAt: null, heartbeatAt: DB_NOW },
     });
 }
 
@@ -30,13 +34,12 @@ export async function markBootStarted(db: Db, containerId: string): Promise<void
  * worker that hangs in consumer setup must never look ready.
  */
 export async function markConsumersReady(db: Db, containerId: string): Promise<void> {
-  const now = new Date();
   await db
     .insert(workerHeartbeats)
-    .values({ containerId, startedAt: now, consumersReadyAt: now, heartbeatAt: now })
+    .values({ containerId, startedAt: DB_NOW, consumersReadyAt: DB_NOW, heartbeatAt: DB_NOW })
     .onConflictDoUpdate({
       target: workerHeartbeats.containerId,
-      set: { consumersReadyAt: now, heartbeatAt: now },
+      set: { consumersReadyAt: DB_NOW, heartbeatAt: DB_NOW },
     });
   // containers are recreated on every deploy, so rows accumulate one per
   // container forever; a week of silence is far past any freshness window
@@ -47,12 +50,11 @@ export async function markConsumersReady(db: Db, containerId: string): Promise<v
 
 /** Sweeper-interval liveness bump; never touches consumersReadyAt. */
 export async function touchWorkerHeartbeat(db: Db, containerId: string): Promise<void> {
-  const now = new Date();
   await db
     .insert(workerHeartbeats)
-    .values({ containerId, startedAt: now, heartbeatAt: now })
+    .values({ containerId, startedAt: DB_NOW, heartbeatAt: DB_NOW })
     .onConflictDoUpdate({
       target: workerHeartbeats.containerId,
-      set: { heartbeatAt: now },
+      set: { heartbeatAt: DB_NOW },
     });
 }

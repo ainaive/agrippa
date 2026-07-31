@@ -27,7 +27,7 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
   beforeAll(async () => {
     // drop the drizzle schema too — the migrator journals there, and dropping
     // only public makes the migrations silently no-op on the next run
-    await db.execute(sql`drop schema public cascade`);
+    await db.execute(sql`drop schema if exists public cascade`);
     await db.execute(sql`create schema public`);
     await db.execute(sql`drop schema if exists drizzle cascade`);
     await migrateDb(db);

@@ -36,7 +36,7 @@ export async function postgresAvailable(): Promise<boolean> {
 /** Fresh schema per test run: drop everything, migrate, seed builtins. */
 export async function freshTestDb(): Promise<Db> {
   const db = testDb();
-  await db.execute(sql`drop schema public cascade`);
+  await db.execute(sql`drop schema if exists public cascade`);
   await db.execute(sql`create schema public`);
   // the migrator journals into its own "drizzle" schema — reset it too,
   // or migrations silently no-op on the second run
