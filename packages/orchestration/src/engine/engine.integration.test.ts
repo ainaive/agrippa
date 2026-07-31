@@ -1299,6 +1299,44 @@ const REV_CLEAN_ON_2: Record<string, FakeStepBehavior> = {
   },
 };
 
+// a thorough review of a big change: 50 max-detail findings ≈ 105 KB — over
+// the store's default 64 KiB inline threshold, well inside the interaction
+// allowance (INTERACTION_ARTIFACT_MAX_BYTES)
+const BIG_REPORT = {
+  summary: "thorough",
+  findings: Array.from({ length: 50 }, (_, i) => ({
+    id: `f${i + 1}`,
+    severity: "major",
+    file: `src/module-${i}.ts`,
+    line: i + 1,
+    title: `Finding ${i + 1}`,
+    detail: "d".repeat(2000),
+  })),
+};
+const REV_BIG: Record<string, FakeStepBehavior> = {
+  review: {
+    kind: "succeed",
+    events: [{ type: "artifact", key: "review-report", kind: "json", inline: BIG_REPORT }],
+    output: "found 50 issues",
+  },
+};
+
+// a working diff over the store's 64 KiB inline threshold: its patch artifact
+// lands on the artifact store (inline=null), so publish-time evidence has to
+// be read back by storageRef rather than from the expression context
+const BIG_DIFF = `diff --git a/big b/big\n${"+x\n".repeat(40_000)}`;
+
+// an approval wedged between the review and its gate forces the gate to be
+// evaluated by a FRESH engine on the next leg — the report must survive the
+// round-trip through the artifacts row (resume re-reads inline from Postgres)
+const HOLD_BEFORE_GATE_YAML = V2_FIXTURE_YAML.replace(
+  "            - id: review-gate",
+  `            - id: hold-review
+              kind: checkpoint
+              checkpoint: { kind: approval, title: { en: "Hold", zh-CN: "暂停" } }
+            - id: review-gate`,
+);
+
 describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loops, scm)", () => {
   it("runs the full requirement-delivery spine: Q&A loop, plan gate, review-fix loop, platform PR", async () => {
     const fx = await setupV2Fixture();
@@ -1683,6 +1721,253 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
       .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "analyze")));
     expect(analyzeRows.at(-1)?.status).toBe("failed");
     expect((analyzeRows.at(-1)?.error as { code: string } | null)?.code).toBe("contract_violation");
+  });
+
+  it("inlines a schema-valid review report far over 64 KB and drives the gate with it", async () => {
+    const fx = await setupV2Fixture();
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, REV_BIG), fx.runId);
+    for (const response of [
+      { kind: "input", outcome: "answered", answers: { q1: "x" } } as const,
+      { kind: "approval", outcome: "approved" } as const,
+    ]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, REV_BIG), fx.runId);
+    }
+
+    expect(outcome).toBe("waiting_approval");
+    const [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("review-gate");
+    expect((pending?.payload as { findings: unknown[] } | undefined)?.findings).toHaveLength(50);
+    // the report inlined whole — resume re-reads it from this very row
+    const [report] = await fx.db
+      .select()
+      .from(artifacts)
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "review-report")));
+    expect(report?.inline).not.toBeNull();
+    expect(report?.size ?? 0).toBeGreaterThan(64 * 1024);
+  });
+
+  it("fails the producing step when an interaction artifact exceeds the interaction allowance", async () => {
+    // only schema-invalid (or padded) content can exceed 2 MiB — the size
+    // gate fires before parsing, so the failure is deterministic either way
+    const hugeQuestions: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "questions",
+            kind: "json",
+            inline: { questions: [], padding: "x".repeat(3 * 1024 * 1024) },
+          },
+        ],
+        output: "asked far too much",
+      },
+    };
+    const fx = await setupV2Fixture();
+
+    expect(await executeRun(fx.makeDeps(hugeQuestions, REV_CLEAN_ON_2), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    const analyzeRows = await fx.db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, fx.runId), eq(runSteps.stepId, "analyze")));
+    expect((analyzeRows.at(-1)?.error as { message: string } | null)?.message).toContain(
+      "too large",
+    );
+  });
+
+  it("re-reads a large report from its DB row when the gate is reached on resume", async () => {
+    const fx = await setupV2Fixture(HOLD_BEFORE_GATE_YAML);
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, REV_BIG), fx.runId);
+    for (const [checkpointId, response] of [
+      ["clarify-qa", { kind: "input", outcome: "answered", answers: { q1: "x" } }],
+      ["confirm-plan", { kind: "approval", outcome: "approved" }],
+      ["hold-review", { kind: "approval", outcome: "approved" }],
+    ] as const) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      expect(pending?.checkpointId).toBe(checkpointId);
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, REV_BIG), fx.runId);
+    }
+
+    // the leg that evaluated the gate never ran the review step — the 50
+    // findings could only have come from the reloaded artifact row
+    expect(outcome).toBe("waiting_approval");
+    const [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("review-gate");
+    expect((pending?.payload as { findings: unknown[] } | undefined)?.findings).toHaveLength(50);
+  });
+
+  it("fails a resumed run whose pre-validation artifact row was stored non-inline", async () => {
+    // rows written before store-time validation existed can carry
+    // inline=null + a storageRef; the gate must fail loudly, not read "absent"
+    const fx = await setupV2Fixture(HOLD_BEFORE_GATE_YAML);
+
+    let outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2), fx.runId);
+    for (const response of [
+      { kind: "input", outcome: "answered", answers: { q1: "x" } } as const,
+      { kind: "approval", outcome: "approved" } as const,
+    ]) {
+      expect(outcome).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+      outcome = await executeRun(fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2), fx.runId);
+    }
+    expect(outcome).toBe("waiting_approval");
+
+    // paused at hold-review with the report stored — simulate the legacy row
+    await fx.db
+      .update(artifacts)
+      .set({ inline: null, storageRef: "legacy://review-report" })
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "review-report")));
+    const [pending] = await fx.db
+      .select()
+      .from(checkpoints)
+      .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+    expect(pending?.checkpointId).toBe("hold-review");
+    await decideCheckpoint(fx.db, pending?.id as string, {
+      status: "approved",
+      decidedBy: fx.userId,
+      response: { kind: "approval", outcome: "approved" },
+    });
+
+    expect(await executeRun(fx.makeDeps(IMPL_SCRIPT, REV_CLEAN_ON_2), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    const error = run?.error as { code: string; message: string } | null;
+    expect(error?.code).toBe("contract_violation");
+    expect(error?.message).toContain("exceeds the inline limit");
+  });
+
+  // walks a big-diff run to its decided review gate: analyze asks nothing,
+  // plan approved, implement stores the >64 KB patch, review reports one
+  // finding, gate decided "pass" — the NEXT leg (a fresh engine) publishes
+  const walkBigPatchToDecidedGate = async (fx: V2Fixture) => {
+    fx.workspace.diffOutput = BIG_DIFF;
+    const impl: Record<string, FakeStepBehavior> = {
+      ...IMPL_SCRIPT,
+      "analyze@1": {
+        kind: "succeed",
+        events: [{ type: "artifact", key: "questions", kind: "json", inline: { questions: [] } }],
+        output: "no questions",
+      },
+    };
+    const rev: Record<string, FakeStepBehavior> = {
+      review: {
+        kind: "succeed",
+        events: [
+          {
+            type: "artifact",
+            key: "review-report",
+            kind: "json",
+            inline: { findings: [FINDING_A] },
+          },
+        ],
+        output: "one issue",
+      },
+    };
+    for (const response of [
+      { kind: "approval", outcome: "approved" } as const,
+      {
+        kind: "review-gate",
+        outcome: "pass",
+        selectedFindings: [],
+        acceptedFindings: [FINDING_A],
+        acceptedFindingIds: ["f1"],
+      } as const,
+    ]) {
+      expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("waiting_approval");
+      const [pending] = await fx.db
+        .select()
+        .from(checkpoints)
+        .where(and(eq(checkpoints.runId, fx.runId), eq(checkpoints.status, "pending")));
+      await decideCheckpoint(fx.db, pending?.id as string, {
+        status: "approved",
+        decidedBy: fx.userId,
+        response: response as never,
+      });
+    }
+    return { impl, rev };
+  };
+
+  it("publishes a patch over the inline threshold by reading the evidence back", async () => {
+    const fx = await setupV2Fixture();
+    const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+
+    // the publish leg resumes with artifactValues["changes"] empty (the row
+    // is inline=null) — the evidence must come back from the store, not fail
+    // as phantom drift
+    expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("succeeded");
+    expect(fx.scm.pushes).toHaveLength(1);
+    const [patchRow] = await fx.db
+      .select()
+      .from(artifacts)
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "changes")));
+    expect(patchRow?.inline).toBeNull(); // proves the read-back path was the one exercised
+    expect(patchRow?.storageRef).not.toBeNull();
+  });
+
+  it("still fails a drifted workspace when the patch is over the inline threshold", async () => {
+    const fx = await setupV2Fixture();
+    const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+
+    fx.workspace.diffOutput = `${BIG_DIFF}+drifted after review\n`;
+    expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    expect((run?.error as { message: string } | null)?.message).toContain("changed");
+    expect(fx.scm.pushes).toHaveLength(0);
+  });
+
+  it("refuses to publish when big-patch evidence cannot be read back", async () => {
+    const fx = await setupV2Fixture();
+    const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+
+    // a lost artifacts volume (or a corrupted row) — the stored bytes ARE the
+    // approved evidence, so the push must fail, never proceed unverified
+    await fx.db
+      .update(artifacts)
+      .set({ storageRef: "mem://void/changes" })
+      .where(and(eq(artifacts.runId, fx.runId), eq(artifacts.artifactKey, "changes")));
+    expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
+    const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+    expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
+    expect((run?.error as { message: string } | null)?.message).toContain("not readable");
+    expect(fx.scm.pushes).toHaveLength(0);
   });
 
   it("fails instead of publishing drifted, empty, or atomically changed evidence", async () => {

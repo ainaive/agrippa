@@ -187,7 +187,7 @@ export const artifacts = pgTable("artifacts", {
   mime: text("mime"),
   size: integer("size"),
   storageRef: text("storage_ref"), // large artifacts on disk
-  inline: jsonb("inline"), // small artifacts (≤64 KB) inline
+  inline: jsonb("inline"), // small artifacts inline (≤64 KB; checkpoint-driving ones ≤2 MiB)
   createdAt: createdAtCol(),
 });
 

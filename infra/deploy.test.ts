@@ -97,9 +97,10 @@ case "$1" in
         case "$*" in
           *pg_dump*) printf 'FAKEDUMP'; exit "\${STUB_DUMP_RC:-0}" ;;
           *psql*)
-            # the worker readiness probe; STUB_PROBE_DELAY makes it slow
+            # the worker readiness probe (distinct consumers-ready containers);
+            # STUB_PROBE_DELAY makes it slow
             [ -n "\${STUB_PROBE_DELAY:-}" ] && /bin/sleep "$STUB_PROBE_DELAY"
-            echo "\${STUB_REGISTRATIONS:-1}"; exit 0 ;;
+            echo "\${STUB_READY_CONTAINERS:-1}"; exit 0 ;;
         esac
         exit 0 ;;
     esac
@@ -374,9 +375,9 @@ describe("infra/deploy.sh", () => {
     expect(r.stderr).toContain("rolling back");
   }, 20_000);
 
-  it("fails when a worker replica is not running, even with a fresh registration", async () => {
-    // the case that used to pass: api healthy, registration present, worker dead
-    const r = await run({ STUB_WORKERS_RUNNING: "0", STUB_REGISTRATIONS: "1" });
+  it("fails when a worker replica is not running, even with a fresh ready row", async () => {
+    // the case that used to pass: api healthy, ready row present, worker dead
+    const r = await run({ STUB_WORKERS_RUNNING: "0", STUB_READY_CONTAINERS: "1" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("worker never became ready");
   }, 20_000);
@@ -390,9 +391,37 @@ describe("infra/deploy.sh", () => {
     // Worth its own case rather than trusting the `running=0` one: relaxing
     // `-eq` to `-ge` is a plausible refactor, it keeps that case green, and it
     // would silently let an out-of-band-scaled stack pass verification.
-    const r = await run({ STUB_WORKERS_RUNNING: "3", STUB_REGISTRATIONS: "1" });
+    const r = await run({ STUB_WORKERS_RUNNING: "3", STUB_READY_CONTAINERS: "1" });
     expect(r.exitCode).not.toBe(0);
     expect(r.stderr).toContain("worker never became ready");
+  }, 20_000);
+
+  it("fails when fewer containers are consumers-ready than WORKER_REPLICAS", async () => {
+    // the issue #15 case: both replicas run, but one wedged inside consumer
+    // setup and never wrote its worker_heartbeats readiness row — the old
+    // global-registration check could not see it
+    writeFileSync(
+      path.join(appDir, "infra", "env", ".env"),
+      "AGRIPPA_PORT=127.0.0.1:3001\nWORKER_REPLICAS=2\n",
+    );
+    git(appDir, "commit", "-aqm", "two replicas");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    const r = await run({ STUB_WORKERS_RUNNING: "2", STUB_READY_CONTAINERS: "1" });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain("worker never became ready");
+  }, 20_000);
+
+  it("passes when every expected replica is consumers-ready", async () => {
+    // the positive control for the case above — proves the failure came from
+    // the row count, not from WORKER_REPLICAS=2 breaking something else
+    writeFileSync(
+      path.join(appDir, "infra", "env", ".env"),
+      "AGRIPPA_PORT=127.0.0.1:3001\nWORKER_REPLICAS=2\n",
+    );
+    git(appDir, "commit", "-aqm", "two replicas");
+    git(appDir, "branch", "-f", "deploy", "HEAD");
+    const r = await run({ STUB_WORKERS_RUNNING: "2", STUB_READY_CONTAINERS: "2" });
+    expect(r.exitCode).toBe(0);
   }, 20_000);
 
   it("aborts before building when the version does not reach compose", async () => {

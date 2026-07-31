@@ -284,25 +284,30 @@ api_ok() {
 }
 
 # The worker has no HTTP surface and no healthcheck, so verify THREE things:
-# every expected replica running, RestartCount steady, and a fresh registration.
-# All three are load-bearing; none is instrumentation.
+# every expected replica running, RestartCount steady, and one fresh
+# consumers-ready row per expected replica. All three are load-bearing; none
+# is instrumentation.
 #
-# A fresh executor_registrations row alone is NOT enough: the worker registers
-# (apps/worker/src/index.ts) before it starts its pg-boss consumers, so it can
-# register and then die during consumer setup and still look deployed. And
-# registrations are global per executor, so with WORKER_REPLICAS > 1 one healthy
-# replica would mask the rest — hence the replica count.
+# The rows come from worker_heartbeats: each container upserts its own row —
+# keyed by container id, so counting DISTINCT ids stops one healthy replica
+# from masking the rest — only AFTER boss.work() has returned for all of its
+# consumers (apps/worker/src/index.ts). A worker that registers its executors
+# and then wedges inside consumer setup never writes one, closing the
+# register-then-wedge gap (issue #15) that the old fresh-registration check
+# accepted.
 #
-# The replica count is not enough either, now that compose sets
-# `restart: unless-stopped` so the stack survives a host reboot: a crash-looping
-# worker reads as running between restarts, and it has already registered before
-# it dies. That is what the RestartCount comparison below is for. Deleting it
-# restores the masking exactly — infra/deploy.test.ts covers that, but this
-# comment is what a reader trusts first.
+# The replica count is still needed for its other half: readiness rows prove
+# the replicas that came up are consuming, not that ONLY the expected replicas
+# exist — an out-of-band `--scale worker=3` against WORKER_REPLICAS=1 would
+# pass the row count on extra fresh rows.
 #
-# Residual gap, accepted: a worker that stays up but wedges *after* registering
-# is not detected. Closing that needs a readiness signal written after
-# boss.work() returns, which is an apps/worker change.
+# Nor is the count enough on its own, now that compose sets
+# `restart: unless-stopped` so the stack survives a host reboot: a crash-
+# looping worker reads as running between restarts, and a loop that gets past
+# consumer setup before dying re-freshens its readiness row on every lap. That
+# is what the RestartCount comparison below is for. Deleting it restores the
+# masking exactly — infra/deploy.test.ts covers that, but this comment is what
+# a reader trusts first.
 # Summed RestartCount across the worker containers. Empty/again-unavailable
 # reads return 0 rather than failing: this is a tie-breaker on top of the two
 # checks below, and a docker hiccup should not by itself fail a deploy.
@@ -354,9 +359,12 @@ worker_ok() {
     docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" \
     exec -T -e PGCONNECT_TIMEOUT=2 -e PGOPTIONS="-c statement_timeout=${budget}s" \
     postgres psql -U agrippa -d agrippa -tAc \
-    "select count(*) from executor_registrations where registered_at > to_timestamp($since);" \
+    "select count(distinct container_id) from worker_heartbeats where consumers_ready_at > to_timestamp($since);" \
     2>/dev/null | tr -d '[:space:]')"
-  [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null
+  # Until the api has applied migration 0012 the table does not exist, the
+  # query errors, and $n is empty — correctly not-ready; the caller's
+  # HEALTH_TIMEOUT loop absorbs that window.
+  [ -n "$n" ] && [ "$n" -ge "$expected" ] 2>/dev/null
 }
 
 # HEALTH_TIMEOUT is a wall-clock bound, so this tracks an absolute deadline

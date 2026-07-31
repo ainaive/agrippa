@@ -84,14 +84,27 @@ export type StoredArtifact = {
 };
 
 export interface ArtifactStore {
-  /** Persist artifact content (inline value or a workspace-relative file path). */
+  /**
+   * Persist artifact content (inline value or a workspace-relative file path).
+   * `opts.inlineLimitBytes` overrides the store's inline threshold — the
+   * engine passes INTERACTION_ARTIFACT_MAX_BYTES for checkpoint-driving
+   * artifacts, which must inline whole (resume re-reads them from the DB row).
+   */
   store(
     runId: string,
     key: string,
     kind: ArtifactKind,
     source: { inline?: unknown; path?: string },
     workspaceDir: string,
+    opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact>;
+  /**
+   * Read previously stored content back by its storageRef; null when missing
+   * or unreadable. The engine needs this for patch-evidence comparison at
+   * git.push — a patch over the inline threshold only exists here, and the
+   * stored bytes ARE the approved evidence.
+   */
+  read(storageRef: string): Promise<string | null>;
 }
 
 export type PullRequestSpec = {

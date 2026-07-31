@@ -220,3 +220,18 @@ export const executorRegistrations = pgTable("executor_registrations", {
   executorId: text("executor_id").primaryKey(),
   registeredAt: tstz("registered_at").notNull().defaultNow(),
 });
+
+/**
+ * One row per worker container (hostname inside compose = container id) — the
+ * first slice of the per-worker heartbeat row deferred past M1. Registrations
+ * above are global per executor, so they cannot prove each replica came up;
+ * this table can. `consumersReadyAt` is written only after boss.work() has
+ * returned for every consumer, which is what deploy verification requires —
+ * a worker that registers and then wedges in consumer setup never writes it.
+ */
+export const workerHeartbeats = pgTable("worker_heartbeats", {
+  containerId: text("container_id").primaryKey(),
+  startedAt: tstz("started_at").notNull().defaultNow(),
+  consumersReadyAt: tstz("consumers_ready_at"),
+  heartbeatAt: tstz("heartbeat_at").notNull().defaultNow(),
+});
