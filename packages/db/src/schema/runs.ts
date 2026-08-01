@@ -23,6 +23,7 @@ import { users } from "./auth";
 import { orgs } from "./orgs";
 import { projects } from "./projects";
 import { fabri, taskTypes, templateVersions } from "./registry";
+import { runtimes } from "./runtimes";
 
 export const tasks = pgTable("tasks", {
   id: idCol(),
@@ -97,6 +98,10 @@ export const runs = pgTable(
     // is live. Owner is the worker's container id; NULL = unheld.
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: tstz("lease_expires_at"),
+    // Remote-runtime affinity pin (ADR-0017 Decision 3): set when routing
+    // sends the run's execution to a daemon; every subsequent step dispatches
+    // to the same runtime, which owns the workspace. NULL = central workers.
+    runtimeId: uuid("runtime_id").references(() => runtimes.id),
     queuedAt: tstz("queued_at").notNull().defaultNow(),
     startedAt: tstz("started_at"),
     finishedAt: tstz("finished_at"),

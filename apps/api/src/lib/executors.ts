@@ -1,5 +1,5 @@
-import { type Db, executorRegistrations, workerHeartbeats } from "@agrippa/db";
-import { gte, sql } from "drizzle-orm";
+import { type Db, executorRegistrations, runtimes, workerHeartbeats } from "@agrippa/db";
+import { and, eq, gte, sql } from "drizzle-orm";
 
 /** Advertisements older than this are a worker that no longer runs that config. */
 const LIVE_WINDOW_MINUTES = 15;
@@ -25,9 +25,13 @@ export type LiveWorkerExecutors = {
  * deployment-wide `executor_registrations` rows are unioned in as a fallback
  * until the table is dropped post-merge — during deploy skew an old worker
  * heartbeats without an advertisement, and its executors must not read as
- * vanished.
+ * vanished. With `orgId`, the org's live remote runtimes join both the union
+ * and the coverage sets — a daemon-only executor is submittable (ADR-0017).
  */
-export async function liveWorkerExecutors(db: Db): Promise<LiveWorkerExecutors> {
+export async function liveWorkerExecutors(
+  db: Db,
+  opts?: { orgId?: string },
+): Promise<LiveWorkerExecutors> {
   const workers = await db
     .select({ executors: workerHeartbeats.executors })
     .from(workerHeartbeats)
@@ -37,6 +41,19 @@ export async function liveWorkerExecutors(db: Db): Promise<LiveWorkerExecutors> 
     .from(executorRegistrations)
     .where(gte(executorRegistrations.registeredAt, liveWindow));
   const sets = workers.map((w) => (w.executors ?? []).map((e) => e.id));
+  if (opts?.orgId) {
+    const liveRuntimes = await db
+      .select({ executors: runtimes.executors })
+      .from(runtimes)
+      .where(
+        and(
+          eq(runtimes.orgId, opts.orgId),
+          eq(runtimes.status, "active"),
+          gte(runtimes.lastSeenAt, sql`now() - interval '60 seconds'`),
+        ),
+      );
+    sets.push(...liveRuntimes.map((r) => (r.executors ?? []).map((e) => e.id)));
+  }
   return {
     union: new Set([...sets.flat(), ...legacy.map((r) => r.executorId)]),
     sets,

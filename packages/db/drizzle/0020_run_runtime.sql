@@ -1,0 +1,2 @@
+ALTER TABLE "runs" ADD COLUMN "runtime_id" uuid;--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_runtime_id_runtimes_id_fk" FOREIGN KEY ("runtime_id") REFERENCES "public"."runtimes"("id") ON DELETE no action ON UPDATE no action;

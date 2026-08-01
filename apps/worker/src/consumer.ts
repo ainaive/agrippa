@@ -9,7 +9,9 @@ import {
   executeRun,
   finalizeRun,
   type RunControlHandle,
+  remoteEngineDeps,
   renewRunLeases,
+  routeRun,
   syncRunNotifications,
 } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
@@ -90,7 +92,23 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
     const { runId } = job.data;
     const meta = job as unknown as { retryCount?: number; retryLimit?: number };
     try {
-      const outcome = await executeRun(deps, runId, {
+      // Routing happens before engine construction (ADR-0017): a daemon-routed
+      // run gets per-run deps whose executors are RemoteExecutor proxies and
+      // whose workspace is the remote variant — the engine itself is unaware.
+      // Deterministic given (run row, registry), pin absolute, so a resume
+      // re-derives the identical decision.
+      let runDeps = deps;
+      const [runRow] = await db.select().from(runs).where(eq(runs.id, runId));
+      if (runRow && !isTerminalRunStatus(runRow.status)) {
+        const decision = await routeRun(db, runRow);
+        if (decision.kind === "remote") {
+          deps.logger.info(
+            `run ${runId}: routed to runtime '${decision.runtime.name}' (${decision.runtime.id})`,
+          );
+          runDeps = remoteEngineDeps(deps, runRow, decision.runtime);
+        }
+      }
+      const outcome = await executeRun(runDeps, runId, {
         onStarted: (handle) => active.set(runId, handle),
       });
       deps.logger.info(`run ${runId}: ${outcome}`);

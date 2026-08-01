@@ -59,7 +59,7 @@ const daemonAuth: MiddlewareHandler<DaemonEnv> = async (c, next) => {
     .select()
     .from(runtimes)
     .where(eq(runtimes.tokenPrefix, runtimeTokenPrefix(token)));
-  if (!row || row.status !== "active" || !runtimeTokenMatches(token, row.tokenHash)) {
+  if (row?.status !== "active" || !runtimeTokenMatches(token, row.tokenHash)) {
     throw new AppError("daemon_token_invalid", 401, "Invalid daemon token");
   }
   c.set("runtime", row);

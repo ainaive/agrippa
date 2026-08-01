@@ -129,7 +129,16 @@ export type ExecutorEvent =
   | { type: "subagent.started"; subagentId: string }
   | { type: "subagent.completed"; subagentId: string }
   | ({ type: "usage" } & UsageDelta)
-  | { type: "artifact"; key: string; kind: ArtifactKind; path?: string; inline?: unknown }
+  // `staged` is set only by the platform's remote transport (an adopted daemon
+  // upload, ADR-0017) — executors themselves emit `path` or `inline`
+  | {
+      type: "artifact";
+      key: string;
+      kind: ArtifactKind;
+      path?: string;
+      inline?: unknown;
+      staged?: string;
+    }
   | { type: "permission.request"; toolName: string; input: unknown; requestId: string }
   | { type: "step.completed"; output: string }
   | { type: "step.failed"; error: NormalizedError };

@@ -87,7 +87,11 @@ async function resolveRunPlan(
   // every agent slot resolves to a concrete faber + executor (per-slot
   // provider-filtered models, checked against the executors the deployment's
   // workers actually registered) and freezes onto the run
-  const live = await liveWorkerExecutors(db);
+  const [projectRow] = await db
+    .select({ orgId: projects.orgId })
+    .from(projects)
+    .where(eq(projects.id, projectId));
+  const live = await liveWorkerExecutors(db, { orgId: projectRow?.orgId });
   const agentResolution = await resolveAgentBindings(
     db,
     projectId,

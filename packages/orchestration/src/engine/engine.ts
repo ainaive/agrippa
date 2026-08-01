@@ -1647,7 +1647,7 @@ class RunEngine {
 
   private async storeArtifact(
     row: StepRow,
-    event: { key: string; kind: string; path?: string; inline?: unknown },
+    event: { key: string; kind: string; path?: string; inline?: unknown; staged?: string },
   ): Promise<void> {
     // a checkpoint-driving artifact must inline whole in Postgres (resume
     // re-reads it from the DB row), so it gets the larger allowance sized to
@@ -1657,7 +1657,7 @@ class RunEngine {
       this.run.id,
       event.key,
       event.kind as never,
-      { inline: event.inline, path: event.path },
+      { inline: event.inline, path: event.path, staged: event.staged },
       this.workspaceDir,
       interactionKind ? { inlineLimitBytes: INTERACTION_ARTIFACT_MAX_BYTES } : undefined,
     );

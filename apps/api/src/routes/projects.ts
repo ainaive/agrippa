@@ -633,7 +633,11 @@ export const projectRoutes = new Hono<AppEnv>()
     const compiled = upgradeCompiledTemplate(version.compiled);
     // the deployment default executor — same as the catalog route and submit
     const defaultExecutor = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
-    const live = await liveWorkerExecutors(db);
+    const [projectRow] = await db
+      .select({ orgId: projects.orgId })
+      .from(projects)
+      .where(eq(projects.id, projectId));
+    const live = await liveWorkerExecutors(db, { orgId: projectRow?.orgId });
     const result = await preflightSubmit(
       db,
       projectId,
