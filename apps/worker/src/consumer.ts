@@ -8,6 +8,8 @@ import {
   ExecutorUnavailableError,
   executeRun,
   finalizeRun,
+  type RunControlHandle,
+  renewRunLeases,
   syncRunNotifications,
 } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
@@ -25,9 +27,18 @@ export type RunConsumer = {
   scheduleApprovalExpiry(runId: string): Promise<void>;
   syncNotificationsBestEffort(runId: string): Promise<void>;
   markRunFailed(runId: string, err: unknown): Promise<void>;
+  /** Abort every in-flight engine for graceful shutdown (they exit `drained`). */
+  drainActive(): void;
+  /**
+   * Renew this worker's leases on every in-flight run; an engine whose lease
+   * could not be renewed is told to stop (`lostLease`). Call on a cadence of
+   * ~TTL/3 (30s for the default 90s TTL). No-op without a lease identity.
+   */
+  renewLeases(): Promise<void>;
 };
 
 export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): RunConsumer {
+  const active = new Map<string, RunControlHandle>();
   /**
    * Trigger-site delivery syncs are best-effort: the reconciliation sweeper is
    * the delivery guarantee, so a bookkeeping failure must never fail (or
@@ -79,9 +90,19 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
     const { runId } = job.data;
     const meta = job as unknown as { retryCount?: number; retryLimit?: number };
     try {
-      const outcome = await executeRun(deps, runId);
+      const outcome = await executeRun(deps, runId, {
+        onStarted: (handle) => active.set(runId, handle),
+      });
       deps.logger.info(`run ${runId}: ${outcome}`);
       if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);
+      if (outcome === "drained") {
+        // fast handoff: the engine released the lease without finalizing, so
+        // any worker can claim immediately; completing (not failing) the job
+        // means drains never burn the retryLimit budget. Singleton keys make
+        // the re-enqueue safe, and the lease sweeper backstops a lost send.
+        await queue.enqueueRun(runId);
+        return;
+      }
       // post-commit delivery sync (idempotent) — covers checkpoint.required
       // and every engine-side terminal event in one place
       await syncNotificationsBestEffort(runId);
@@ -95,9 +116,8 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
       // refreshes), decided `waiting_approval` runs via the stranded-
       // checkpoint sweep; a still-pending checkpoint re-enqueues on its
       // decision. The re-enqueue routes to the correct set queue. A `running`
-      // run (crash-recovery pickup) must rethrow: nothing re-enqueues an
-      // unclaimed running run today — the execution lease is ADR-0009 future
-      // work, landing with the daemon slices.
+      // run (crash-recovery pickup) still rethrows: the lease sweeper
+      // re-enqueues it once the dead owner's lease expires.
       if (
         (typeof err === "object" &&
           err !== null &&
@@ -121,10 +141,37 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
         await markRunFailed(runId, err);
       }
       throw err; // let pg-boss retry — the engine resumes step-granularly
+    } finally {
+      active.delete(runId);
     }
   }
 
-  return { handleRunJob, scheduleApprovalExpiry, syncNotificationsBestEffort, markRunFailed };
+  function drainActive(): void {
+    for (const handle of active.values()) handle.drain();
+  }
+
+  async function renewLeases(): Promise<void> {
+    const owner = deps.lease?.owner;
+    if (!owner || active.size === 0) return;
+    const held = [...active.keys()];
+    const renewed = new Set(await renewRunLeases(db, owner, held, deps.lease?.ttlMs));
+    for (const runId of held) {
+      if (renewed.has(runId)) continue;
+      // expired and swept (or the run left `running`) — another owner may
+      // already be executing, so this engine must stop without re-enqueueing
+      deps.logger.warn(`run ${runId}: lease lost — stopping local execution`);
+      active.get(runId)?.lostLease();
+    }
+  }
+
+  return {
+    handleRunJob,
+    scheduleApprovalExpiry,
+    syncNotificationsBestEffort,
+    markRunFailed,
+    drainActive,
+    renewLeases,
+  };
 }
 
 export type RunFetchLoop = {

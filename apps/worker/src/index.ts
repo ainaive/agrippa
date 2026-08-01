@@ -30,6 +30,7 @@ import {
   InProcessEventBus,
   RedisEventBus,
   sweepNotificationDeliveries,
+  sweepRunLeases,
 } from "@agrippa/orchestration";
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
@@ -150,6 +151,8 @@ const deps: EngineDeps = {
     warn: (msg, extra) => console.warn(`[worker] ${msg}`, extra ?? ""),
     error: (msg, extra) => console.error(`[worker] ${msg}`, extra ?? ""),
   },
+  // execution-lease identity: claims, renewals, and releases all key on it
+  lease: { owner: containerId },
 };
 
 const SLOTS = Number(process.env.WORKER_SLOTS ?? 2);
@@ -170,6 +173,14 @@ const fetchLoop = startRunFetchLoop({
   handler: consumer.handleRunJob,
   logger: deps.logger,
 });
+
+// Lease renewal on its own cadence (TTL/3): the 60s sweeper is too coarse for
+// a 90s TTL — one delayed tick would expire every lease this worker holds.
+const leaseRenewal = setInterval(() => {
+  consumer.renewLeases().catch((err) => {
+    deps.logger.warn("lease renewal failed", { err: String(err) });
+  });
+}, 30_000);
 
 await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayload>[]) => {
   for (const job of jobs) {
@@ -256,6 +267,16 @@ setInterval(async () => {
       .where(and(eq(runs.status, "queued"), lt(runs.queuedAt, sql`now() - interval '30 seconds'`)));
     for (const run of stragglers) await queue.enqueueRun(run.id);
 
+    // execution-lease sweep (ADR-0017 Decision 4): expire dead leases (each
+    // gets one run.lease_expired event, CAS-safe across replicas) and
+    // re-enqueue every leaseless running run — the recovery path crashed
+    // `running` runs never had. Singleton keys dedupe repeat enqueues.
+    const { expired, orphaned } = await sweepRunLeases(db);
+    for (const { id, previousOwner } of expired) {
+      deps.logger.warn(`run ${id}: lease expired (owner ${previousOwner ?? "unknown"})`);
+    }
+    for (const runId of orphaned) await queue.enqueueRun(runId);
+
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
@@ -277,10 +298,15 @@ console.log(
 
 process.on("SIGTERM", async () => {
   deps.logger.info("draining…");
-  // stop fetching first so no new run lands mid-shutdown; in-flight engines
-  // are still killed by the exit below — the drain-abort (resume on a healthy
-  // worker without burning retries) arrives with the execution lease.
-  await fetchLoop.stop({ awaitInFlight: false });
+  clearInterval(leaseRenewal);
+  // 1. stop fetching (no new runs land mid-shutdown); 2. abort in-flight
+  // engines — each exits `drained`, releases its lease, and re-enqueues so a
+  // healthy worker resumes step-granularly without burning retries; 3. wait
+  // for the jobs to settle, bounded so a wedged step cannot outlive the
+  // compose stop_grace_period (60s).
+  const settled = fetchLoop.stop();
+  consumer.drainActive();
+  await Promise.race([settled, Bun.sleep(15_000)]);
   await queue.stop();
   process.exit(0);
 });

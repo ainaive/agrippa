@@ -1,6 +1,6 @@
 import { type CheckpointStoredResponse, canTransitionRun, type RunStatus } from "@agrippa/core";
 import { checkpoints, type Db, type DbOrTx, runEvents, runs } from "@agrippa/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 
 /**
  * Run-lifecycle module (docs/design/04, ADR-0007): the one place that mutates
@@ -98,6 +98,124 @@ export async function findStrandedCheckpointRuns(db: DbOrTx): Promise<string[]> 
   return rows.map((r) => r.id);
 }
 
+/** Default execution-lease TTL: survives two missed 30s renewals. */
+export const RUN_LEASE_TTL_MS = 90_000;
+
+/**
+ * Claim a run for execution: one CAS that both moves it to `running` and takes
+ * the execution lease (ADR-0017 Decision 4). Claimable states:
+ *
+ * - `queued` / `waiting_approval` — the normal pickups; any prior lease residue
+ *   is irrelevant (the previous owner released or finalized).
+ * - `running` with a NULL or expired lease — crash/drain recovery. A live
+ *   lease blocks the claim even for the same owner: two deliveries on one
+ *   worker (legacy-queue skew) must not both enter the run, and a same-
+ *   container crash recovers via the sweeper after expiry instead.
+ *
+ * This deliberately does not trust the caller's stale status read — the
+ * predicate re-checks everything in the UPDATE, replacing the old
+ * `transitionRun(status → "running")` claim whose self-transition tolerance
+ * let a second at-least-once delivery re-enter a running run.
+ */
+export async function claimRunLease(
+  db: DbOrTx,
+  runId: string,
+  owner: string,
+  ttlMs: number = RUN_LEASE_TTL_MS,
+): Promise<boolean> {
+  const ttl = sql`${Math.round(ttlMs / 1000)} * interval '1 second'`;
+  const updated = await db
+    .update(runs)
+    .set({
+      status: "running",
+      leaseOwner: owner,
+      leaseExpiresAt: sql`now() + ${ttl}`,
+    })
+    .where(
+      and(
+        eq(runs.id, runId),
+        sql`(${runs.status} in ('queued', 'waiting_approval')
+             or (${runs.status} = 'running'
+                 and (${runs.leaseOwner} is null or ${runs.leaseExpiresAt} < now())))`,
+      ),
+    )
+    .returning({ id: runs.id });
+  return updated.length > 0;
+}
+
+/** Release the lease iff this owner still holds it (pause, drain, terminal). */
+export async function releaseRunLease(db: DbOrTx, runId: string, owner: string): Promise<void> {
+  await db
+    .update(runs)
+    .set({ leaseOwner: null, leaseExpiresAt: null })
+    .where(and(eq(runs.id, runId), eq(runs.leaseOwner, owner)));
+}
+
+/**
+ * Renew this owner's leases on the given runs; returns the ids actually
+ * renewed. A missing id means the lease was lost (expired and swept, or the
+ * run left `running`) — the caller must stop executing that run.
+ */
+export async function renewRunLeases(
+  db: DbOrTx,
+  owner: string,
+  runIds: readonly string[],
+  ttlMs: number = RUN_LEASE_TTL_MS,
+): Promise<string[]> {
+  if (runIds.length === 0) return [];
+  const ttl = sql`${Math.round(ttlMs / 1000)} * interval '1 second'`;
+  const rows = await db
+    .update(runs)
+    .set({ leaseExpiresAt: sql`now() + ${ttl}` })
+    .where(
+      and(inArray(runs.id, [...runIds]), eq(runs.leaseOwner, owner), eq(runs.status, "running")),
+    )
+    .returning({ id: runs.id });
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Expire dead leases and surface recoverable runs. Runs on every replica's
+ * sweeper concurrently: the SELECT takes row locks with SKIP LOCKED and the
+ * clear-then-event pair commits atomically, so each expiry is observed (and
+ * its timeline event written) exactly once. Returns:
+ *
+ * - `expired` — leases cleared just now (a `run.lease_expired` event each);
+ * - `orphaned` — every `running` run with no lease, INCLUDING the just-expired
+ *   ones: the caller re-enqueues these (singleton keys dedupe), which is what
+ *   finally gives crashed `running` runs a recovery path.
+ */
+export async function sweepRunLeases(
+  db: Db,
+): Promise<{ expired: Array<{ id: string; previousOwner: string | null }>; orphaned: string[] }> {
+  const expired = await db.transaction(async (tx) => {
+    const rows = (await tx.execute(sql`
+      select id, lease_owner from runs
+      where status = 'running' and lease_expires_at is not null and lease_expires_at < now()
+      for update skip locked
+    `)) as unknown as Array<{ id: string; lease_owner: string | null }>;
+    const cleared: Array<{ id: string; previousOwner: string | null }> = [];
+    for (const row of rows) {
+      await tx
+        .update(runs)
+        .set({ leaseOwner: null, leaseExpiresAt: null })
+        .where(eq(runs.id, row.id));
+      await appendRunEvent(tx, {
+        runId: row.id,
+        type: "run.lease_expired",
+        payload: { previousOwner: row.lease_owner },
+      });
+      cleared.push({ id: row.id, previousOwner: row.lease_owner });
+    }
+    return cleared;
+  });
+  const orphanedRows = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(eq(runs.status, "running"), isNull(runs.leaseOwner)));
+  return { expired, orphaned: orphanedRows.map((r) => r.id) };
+}
+
 export type FinalizeRunInput = {
   runId: string;
   from: RunStatus;
@@ -131,7 +249,16 @@ export async function finalizeRun(db: Db, input: FinalizeRunInput): Promise<Fina
     if (requireNotCancelled) conds.push(eq(runs.cancelRequested, false));
     const updated = await tx
       .update(runs)
-      .set({ status: to, finishedAt: new Date(), error: error ?? null, usageTotals })
+      .set({
+        status: to,
+        finishedAt: new Date(),
+        error: error ?? null,
+        usageTotals,
+        // a terminal run holds no lease — releasing here covers every
+        // finalization path (engine, worker retry-exhaustion, API cancel)
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      })
       .where(and(...conds))
       .returning({ id: runs.id });
     if (updated.length === 0) {

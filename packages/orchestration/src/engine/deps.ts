@@ -158,6 +158,14 @@ export type EngineDeps = {
   /** Required for templates using git.branch / git.push / pr.open steps. */
   scm?: ScmService;
   logger: Logger;
+  /**
+   * Execution-lease identity (ADR-0017 Decision 4). Workers pass their
+   * container id so renewal and release can target every run they hold.
+   * Absent (tests, ad-hoc callers), each engine claims under a random
+   * per-instance owner — leases still serialize execution, only cross-process
+   * renewal is unavailable.
+   */
+  lease?: { owner: string; ttlMs?: number };
 };
 
 export type RunOutcome =
@@ -166,4 +174,19 @@ export type RunOutcome =
   | "cancelled"
   | "timed_out"
   | "waiting_approval"
+  /** Deliberately released mid-run (drain / lost lease): nothing finalized, resume elsewhere. */
+  | "drained"
   | "already_terminal";
+
+/**
+ * Handle to a live engine, surfaced through executeRun's `onStarted` callback
+ * once the run claim succeeds. Both triggers abort in-flight executor work
+ * WITHOUT finalizing the run — the in-flight step is recorded like a crash so
+ * the next owner resumes step-granularly with the executor session id.
+ */
+export type RunControlHandle = {
+  /** Graceful shutdown: stop this run here; it re-enqueues immediately. */
+  drain(): void;
+  /** Lease renewal failed: another owner may exist; stop without re-enqueue. */
+  lostLease(): void;
+};

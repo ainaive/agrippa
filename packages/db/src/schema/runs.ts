@@ -5,6 +5,7 @@ import {
   type RunStatus,
   type StepStatus,
 } from "@agrippa/core";
+import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
   bigserial,
@@ -89,6 +90,13 @@ export const runs = pgTable(
       .notNull()
       .default({}),
     workBranch: text("work_branch"), // created by the git.branch system action
+    // Execution lease (ADR-0017 Decision 4, resolving ADR-0009's future work):
+    // claiming a run takes the lease by CAS, the owning worker renews it, the
+    // sweeper expires dead leases and re-enqueues. A second at-least-once
+    // delivery of a `running` run can no longer re-enter it while the lease
+    // is live. Owner is the worker's container id; NULL = unheld.
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: tstz("lease_expires_at"),
     queuedAt: tstz("queued_at").notNull().defaultNow(),
     startedAt: tstz("started_at"),
     finishedAt: tstz("finished_at"),
@@ -99,6 +107,8 @@ export const runs = pgTable(
   (t) => [
     uniqueIndex("runs_task_number_uq").on(t.taskId, t.number),
     index("runs_project_idx").on(t.projectId, t.status),
+    // the expiry sweep scans only running runs
+    index("runs_lease_sweep_idx").on(t.leaseExpiresAt).where(sql`${t.status} = 'running'`),
   ],
 );
 

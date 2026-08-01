@@ -28,7 +28,7 @@ import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
 import { InProcessEventBus } from "./bus";
-import { type EngineDeps, ProviderCredentialError } from "./deps";
+import { type EngineDeps, ProviderCredentialError, type RunControlHandle } from "./deps";
 import { ExecutorUnavailableError, executeRun } from "./engine";
 import {
   FakeResourceMaterializer,
@@ -39,9 +39,13 @@ import {
 } from "./fakes";
 import {
   appendRunEvent,
+  claimRunLease,
   decideCheckpoint,
   finalizeRun,
   findStrandedCheckpointRuns,
+  releaseRunLease,
+  renewRunLeases,
+  sweepRunLeases,
   transitionRun,
 } from "./run-lifecycle";
 
@@ -2190,5 +2194,169 @@ describe.skipIf(!dbUp)("orchestration engine (agrippa/v2 slots, checkpoints, loo
       .orderBy(asc(runSteps.attempt));
     expect(pushRows.map((r) => r.status)).toEqual(["failed", "succeeded"]);
     expect(fx.scm.pushes).toHaveLength(1);
+  });
+});
+
+describe.skipIf(!dbUp)("execution lease (ADR-0017 Decision 4)", () => {
+  const waitFor = async (probe: () => Promise<boolean>, timeoutMs = 5_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await probe()) return;
+      await Bun.sleep(25);
+    }
+    throw new Error("waitFor: condition not reached");
+  };
+
+  it("claim CAS: queued claims, a live lease blocks re-entry (even same owner), expiry reopens", async () => {
+    const { db, runId } = await setupFixture();
+    expect(await claimRunLease(db, runId, "w1")).toBe(true);
+    const [claimed] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(claimed?.status).toBe("running");
+    expect(claimed?.leaseOwner).toBe("w1");
+
+    // a live lease blocks every re-entry — including the same owner, so two
+    // deliveries landing on one worker (legacy-queue skew) can't both enter
+    expect(await claimRunLease(db, runId, "w2")).toBe(false);
+    expect(await claimRunLease(db, runId, "w1")).toBe(false);
+
+    await db
+      .update(runs)
+      .set({ leaseExpiresAt: sql`now() - interval '1 second'` })
+      .where(eq(runs.id, runId));
+    expect(await claimRunLease(db, runId, "w2")).toBe(true);
+    const [taken] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(taken?.leaseOwner).toBe("w2");
+  });
+
+  it("renewal extends only the owner's live leases; release clears", async () => {
+    const { db, runId } = await setupFixture();
+    await claimRunLease(db, runId, "w1");
+    expect(await renewRunLeases(db, "w2", [runId])).toEqual([]);
+    expect(await renewRunLeases(db, "w1", [runId])).toEqual([runId]);
+
+    await releaseRunLease(db, runId, "w2"); // not the owner — no effect
+    expect((await db.select().from(runs).where(eq(runs.id, runId)))[0]?.leaseOwner).toBe("w1");
+    await releaseRunLease(db, runId, "w1");
+    const [released] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(released?.leaseOwner).toBeNull();
+    expect(released?.leaseExpiresAt).toBeNull();
+    // a renewal after losing the lease reports the loss
+    expect(await renewRunLeases(db, "w1", [runId])).toEqual([]);
+  });
+
+  it("a second delivery of a running run bounces on a live lease and takes over after expiry", async () => {
+    const fx = await setupFixture();
+    const { db, runId } = fx;
+    // simulate a run mid-flight under a (possibly dead) owner
+    expect(await claimRunLease(db, runId, "w-dead")).toBe(true);
+
+    // the exact double-delivery the old self-transition tolerance let through
+    expect(await executeRun(fx.makeDeps(HAPPY_SCRIPT), runId)).toBe("already_terminal");
+    const [untouched] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(untouched?.status).toBe("running");
+    expect(untouched?.leaseOwner).toBe("w-dead");
+
+    // owner dies: lease expires → the next delivery claims and executes
+    await db
+      .update(runs)
+      .set({ leaseExpiresAt: sql`now() - interval '1 second'` })
+      .where(eq(runs.id, runId));
+    expect(await executeRun(fx.makeDeps(HAPPY_SCRIPT), runId)).toBe("waiting_approval");
+  });
+
+  it("sweep expires dead leases exactly once, with one timeline event each, and reports orphans", async () => {
+    const { db, runId } = await setupFixture();
+    await claimRunLease(db, runId, "w-dead");
+    await db
+      .update(runs)
+      .set({ leaseExpiresAt: sql`now() - interval '1 second'` })
+      .where(eq(runs.id, runId));
+
+    // concurrent sweeps (every replica runs the sweeper): exactly one observes
+    const [a, b] = await Promise.all([sweepRunLeases(db), sweepRunLeases(db)]);
+    const expired = [...(a?.expired ?? []), ...(b?.expired ?? [])];
+    expect(expired).toEqual([{ id: runId, previousOwner: "w-dead" }]);
+    expect([...(a?.orphaned ?? []), ...(b?.orphaned ?? [])]).toContain(runId);
+
+    const events = await db
+      .select()
+      .from(runEvents)
+      .where(and(eq(runEvents.runId, runId), eq(runEvents.type, "run.lease_expired")));
+    expect(events).toHaveLength(1);
+    expect((events[0]?.payload as { previousOwner?: string } | undefined)?.previousOwner).toBe(
+      "w-dead",
+    );
+
+    // a later sweep finds nothing to expire but still reports the orphan
+    const again = await sweepRunLeases(db);
+    expect(again.expired).toEqual([]);
+    expect(again.orphaned).toContain(runId);
+  });
+
+  it("drain mid-step exits without finalizing, records a crash, and the run resumes to completion", async () => {
+    const fx = await setupFixture();
+    const { db, runId } = fx;
+    const hanging = fx.makeDeps({ ...HAPPY_SCRIPT, "reproduce-bug": { kind: "hang" } });
+
+    let handle: RunControlHandle | undefined;
+    const outcome = executeRun(hanging, runId, { onStarted: (h) => (handle = h) });
+    await waitFor(async () => {
+      const rows = await db
+        .select()
+        .from(runSteps)
+        .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "reproduce-bug")));
+      return rows.some((r) => r.status === "running");
+    });
+    handle?.drain();
+    expect(await outcome).toBe("drained");
+
+    // nothing finalized: still running, lease released, the in-flight step is
+    // a recorded crash so the next owner gets the recovery attempt
+    const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(run?.status).toBe("running");
+    expect(run?.leaseOwner).toBeNull();
+    const [step] = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "reproduce-bug")));
+    expect(step?.status).toBe("failed");
+    expect((step?.error as { code?: string })?.code).toBe("crashed");
+
+    // a healthy pickup resumes step-granularly and completes the leg
+    expect(await executeRun(fx.makeDeps(HAPPY_SCRIPT), runId)).toBe("waiting_approval");
+    const attempts = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "reproduce-bug")))
+      .orderBy(asc(runSteps.attempt));
+    expect(attempts.map((r) => r.status)).toEqual(["failed", "succeeded"]);
+  });
+
+  it("lostLease stops execution without finalizing or re-claiming", async () => {
+    const fx = await setupFixture();
+    const { db, runId } = fx;
+    const hanging = fx.makeDeps({ ...HAPPY_SCRIPT, "reproduce-bug": { kind: "hang" } });
+
+    let handle: RunControlHandle | undefined;
+    const outcome = executeRun(hanging, runId, { onStarted: (h) => (handle = h) });
+    await waitFor(async () => {
+      const rows = await db
+        .select()
+        .from(runSteps)
+        .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "reproduce-bug")));
+      return rows.some((r) => r.status === "running");
+    });
+    // simulate the sweeper having already handed the run to another owner
+    await db
+      .update(runs)
+      .set({ leaseOwner: "w-other", leaseExpiresAt: sql`now() + interval '90 seconds'` })
+      .where(eq(runs.id, runId));
+    handle?.lostLease();
+    expect(await outcome).toBe("drained");
+
+    // the other owner's lease is untouched (release targets our owner only)
+    const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(run?.status).toBe("running");
+    expect(run?.leaseOwner).toBe("w-other");
   });
 });

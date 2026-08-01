@@ -37,6 +37,8 @@ Pure function in `@agrippa/core` (`transition(state, event) → state | error`);
 
 Legal transitions: `queued → running | cancelled`; `running → succeeded | failed | timed_out | waiting_approval | cancelled`; `waiting_approval → running | cancelled | failed(expired→per-template onTimeout)`. Terminal: `succeeded, failed, cancelled, timed_out`.
 
+**Execution lease** (ADR-0017 Decision 4, resolving ADR-0009's future work): the claim into `running` is one CAS that also takes a lease — `runs.lease_owner` (the worker's container id) + `lease_expires_at` (90 s TTL). Claimable states: `queued`/`waiting_approval`, or `running` with a NULL/**expired** lease. A live lease blocks re-entry even for the same owner, which closes the double-delivery hole the old claim's self-transition tolerance left open (a second at-least-once delivery of a `running` run could re-enter it). The owning worker renews all its leases every 30 s (`renewRunLeases`; a run missing from the renewal result gets its engine stopped via `lostLease` — no finalize, no re-enqueue). Releases: pause (`waiting_approval`), every finalization path (`finalizeRun` clears the columns), drain, and the engine's rethrow-for-retry path (a live engine handing the run to pg-boss releases so the retry claims immediately; only a dead worker leaves a lease behind). The 60 s sweeper expires dead leases exactly once across replicas (SKIP LOCKED + clear-and-event in one transaction, emitting `run.lease_expired`) and re-enqueues every leaseless `running` run — the recovery path crashed `running` runs never had.
+
 Step statuses mirror this at finer grain: `pending | running | waiting_approval | succeeded | failed | skipped | cancelled` (`skipped` = `when:` false or `requires:` unmet on an optional resource).
 
 ## Worker Lifecycle
@@ -49,7 +51,7 @@ Step statuses mirror this at finer grain: `pending | running | waiting_approval 
 
 (There is no `quota.rollup` job — project usage is computed on read from `token_usage`.)
 
-Graceful shutdown: stop fetching → abort in-flight runs via their `AbortController` → their jobs return failed with `resumable` marker → pg-boss retry (limit 2) picks them up on a healthy worker, where the engine **resumes** rather than restarts.
+Graceful shutdown (SIGTERM): stop the fetch loop → **drain** every in-flight engine (`drainActive` fires each run's abort signal with reason `drained`) → each engine records its in-flight step as a crash (`code: "crashed"`, so the recovery attempt and executor-session resume apply), releases its lease **without finalizing**, and returns outcome `drained` → the worker re-enqueues the run and *completes* the job (drains never burn the retryLimit budget) → a healthy worker claims immediately and the engine **resumes** rather than restarts. The wait is bounded to 15 s so a wedged step cannot outlive the compose `stop_grace_period` (60 s); anything cut off at the bound recovers through lease expiry like a crash.
 
 ## Engine Loop (per run)
 
