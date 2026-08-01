@@ -6,8 +6,6 @@ import {
   type NotificationDeliverPayload,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
-  QUEUE_RUN_EXECUTE,
-  runExecuteSubsetQueues,
 } from "@agrippa/core";
 import {
   awaitSchema,
@@ -16,6 +14,7 @@ import {
   notificationDeliveries,
   runs,
   runtimes,
+  workerHeartbeats,
 } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
@@ -49,6 +48,7 @@ import {
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitScmService } from "./deps/scm";
 import { GitWorkspaceManager } from "./deps/workspace";
+import { selectRunQueues } from "./run-queues";
 
 const db = createDb();
 // inside a compose container the hostname IS the container id — the identity
@@ -162,18 +162,18 @@ const SLOTS = Number(process.env.WORKER_SLOTS ?? 2);
 const consumer = createRunConsumer(db, deps, queue);
 
 /**
- * The queues this worker polls: executor-set queues covered by its own
- * executors (required-set ⊆ own-set), PLUS the sets covered by live remote
- * runtimes — the engine runs centrally even when the executor is remote, so
- * daemon-only sets need SOME worker fetching their jobs (routing decides
- * remote at claim time) — plus the legacy single queue as the deploy-skew
- * fallback. Recomputed on the sweeper tick because runtimes come and go.
+ * The queues this worker polls (see selectRunQueues for the selection rules):
+ * its own executor-set subsets, runtime-covered sets no live central worker
+ * can serve (the engine runs centrally even when the executor is remote, so
+ * daemon-only sets need SOME worker fetching their jobs — but sets a capable
+ * central worker covers are left to that worker, or an incapable fetcher
+ * would route central and decline in a steal loop), and the legacy queue.
+ * Recomputed on the sweeper tick because runtimes and workers come and go.
  */
 const knownQueues = new Set<string>();
 async function computeRunQueues(): Promise<string[]> {
-  const names = new Set<string>(runExecuteSubsetQueues(Object.keys(executors)));
   const liveRuntimes = await db
-    .select({ executors: runtimes.executors })
+    .select({ name: runtimes.name, executors: runtimes.executors })
     .from(runtimes)
     .where(
       and(
@@ -181,12 +181,19 @@ async function computeRunQueues(): Promise<string[]> {
         gte(runtimes.lastSeenAt, sql`now() - interval '15 minutes'`),
       ),
     );
-  for (const runtime of liveRuntimes) {
-    const ids = (runtime.executors ?? []).map((e) => e.id);
-    if (ids.length > 0) for (const name of runExecuteSubsetQueues(ids)) names.add(name);
-  }
-  names.add(QUEUE_RUN_EXECUTE);
-  const list = [...names];
+  const liveWorkers = await db
+    .select({ executors: workerHeartbeats.executors })
+    .from(workerHeartbeats)
+    .where(gte(workerHeartbeats.heartbeatAt, sql`now() - interval '15 minutes'`));
+  const list = selectRunQueues({
+    localExecutorIds: Object.keys(executors),
+    centralWorkerSets: liveWorkers.map((w) => (w.executors ?? []).map((e) => e.id)),
+    runtimeAds: liveRuntimes.map((r) => ({
+      name: r.name,
+      ids: (r.executors ?? []).map((e) => e.id),
+    })),
+    logger: { warn: (msg) => deps.logger.warn(msg) },
+  });
   // queues must exist before the first fetch (createQueue is idempotent)
   for (const name of list) {
     if (knownQueues.has(name)) continue;

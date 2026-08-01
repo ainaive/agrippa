@@ -39,6 +39,23 @@ export type RunConsumer = {
   renewLeases(): Promise<void>;
 };
 
+/**
+ * Whether the persisted routing pin no longer matches what this worker routed
+ * with. Called under the execution lease (onStarted fires after the claim
+ * CAS): routing itself runs pre-lease, so a concurrent delivery can pin the
+ * run in the routing→claim window — the lease winner must then yield to the
+ * persisted pin rather than execute against a divergent runtime (or none).
+ */
+export async function routingPinChanged(
+  db: Db,
+  runId: string,
+  expectedPin: string | null,
+): Promise<boolean> {
+  const [row] = await db.select({ runtimeId: runs.runtimeId }).from(runs).where(eq(runs.id, runId));
+  if (!row) return false; // run vanished — the engine fails it honestly
+  return (row.runtimeId ?? null) !== expectedPin;
+}
+
 export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): RunConsumer {
   const active = new Map<string, RunControlHandle>();
   /**
@@ -98,9 +115,15 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
       // Deterministic given (run row, registry), pin absolute, so a resume
       // re-derives the identical decision.
       let runDeps = deps;
+      // What the pin should read if our routing decision still holds. Under a
+      // central decision this is normally null — non-null only on the dead-pin
+      // path (pin set, runtime row gone), which must NOT trigger the drain
+      // below: the pin didn't move, the engine just fails it honestly.
+      let expectedPin: string | null = null;
       const [runRow] = await db.select().from(runs).where(eq(runs.id, runId));
       if (runRow && !isTerminalRunStatus(runRow.status)) {
         const decision = await routeRun(db, runRow);
+        expectedPin = decision.kind === "remote" ? decision.runtime.id : (runRow.runtimeId ?? null);
         if (decision.kind === "remote") {
           deps.logger.info(
             `run ${runId}: routed to runtime '${decision.runtime.name}' (${decision.runtime.id})`,
@@ -109,7 +132,23 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
         }
       }
       const outcome = await executeRun(runDeps, runId, {
-        onStarted: (handle) => active.set(runId, handle),
+        onStarted: (handle) => {
+          active.set(runId, handle);
+          // Routing ran BEFORE the execution lease; a concurrent delivery may
+          // have pinned the run differently in that window. onStarted fires
+          // after the claim CAS — i.e. under the lease — so re-check the
+          // persisted pin here and hand off via drain (nothing finalizes) if
+          // it moved: the re-enqueued delivery re-routes honoring the pin.
+          void routingPinChanged(db, runId, expectedPin)
+            .then((changed) => {
+              if (!changed) return;
+              deps.logger.warn(`run ${runId}: pin changed between routing and claim — draining`);
+              handle.drain();
+            })
+            .catch((err) => {
+              deps.logger.warn(`run ${runId}: pin verification failed`, { err: String(err) });
+            });
+        },
       });
       deps.logger.info(`run ${runId}: ${outcome}`);
       if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);

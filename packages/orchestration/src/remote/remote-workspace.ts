@@ -109,9 +109,18 @@ export class RemoteWorkspaceManager implements WorkspaceManager {
     const heads = await git(["ls-remote", credentialedUrl, `refs/heads/${ref}`]);
     let sha = heads.split("\t")[0]?.trim();
     if (!sha) {
-      // not a branch — a tag or other ref form the template pinned
-      const any = await git(["ls-remote", credentialedUrl, ref]);
-      sha = any.split("\t")[0]?.trim();
+      // Not a branch — a tag or other ref form the template pinned. The pin
+      // must be the COMMIT: for an annotated tag, plain ls-remote returns the
+      // tag-object sha, while the daemon checks out (and reports) the peeled
+      // commit and git.push needs a commit parent — so prefer the `^{}`
+      // (peeled) line when the ref points at a tag object.
+      const any = await git(["ls-remote", credentialedUrl, ref, `${ref}^{}`]);
+      const lines = any
+        .split("\n")
+        .map((line) => line.split("\t") as [string, string?])
+        .filter(([oid]) => oid?.trim());
+      const peeled = lines.find(([, refname]) => refname?.trim().endsWith("^{}"));
+      sha = (peeled ?? lines[0])?.[0]?.trim();
     }
     if (!sha) throw new Error(`cannot resolve ref '${ref}' on ${conn.url}`);
     return sha;

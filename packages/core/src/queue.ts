@@ -36,13 +36,17 @@ export function runExecuteQueueName(ids: Iterable<string>): string {
  * n ≤ 4 in practice.
  */
 export function runExecuteSubsetQueues(ownIds: readonly string[]): string[] {
+  return executorSubsets(ownIds).map((subset) => runExecuteQueueName(subset));
+}
+
+/** Every non-empty subset of an executor set, deduplicated and sorted. */
+export function executorSubsets(ownIds: readonly string[]): string[][] {
   const ids = [...new Set(ownIds)].sort();
-  const names: string[] = [];
+  const subsets: string[][] = [];
   for (let mask = 1; mask < 1 << ids.length; mask++) {
-    const subset = ids.filter((_, i) => mask & (1 << i));
-    names.push(runExecuteQueueName(subset));
+    subsets.push(ids.filter((_, i) => mask & (1 << i)));
   }
-  return names;
+  return subsets;
 }
 
 /**

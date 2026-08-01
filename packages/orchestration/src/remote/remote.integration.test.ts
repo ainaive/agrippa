@@ -333,6 +333,36 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     await db.delete(runtimes);
   });
 
+  it("a pin-CAS loser adopts the persisted winner instead of its local choice", async () => {
+    // Routing runs before the execution lease, so two deliveries can race:
+    // simulate the loser by handing routeRun a STALE run object (runtimeId
+    // null in memory) whose DB row a concurrent delivery already pinned.
+    const winner = await newRuntime([{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }], {
+      name: "winner",
+    });
+    const run = await newRun();
+    await db.update(runs).set({ runtimeId: winner }).where(eq(runs.id, run.id));
+
+    // a fresher candidate exists — the loser's local scoring would pick it
+    const fresher = await newRuntime(
+      [{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }],
+      { name: "fresher" },
+    );
+    const stale = { ...run, runtimeId: null }; // what the loser read pre-race
+    const decision = await routeRun(db, stale as typeof runs.$inferSelect);
+    expect(decision.kind === "remote" && decision.runtime.id === winner).toBe(true);
+    expect(decision.kind === "remote" && decision.runtime.id === fresher).toBe(false);
+    // and the persisted pin was not overwritten
+    const [after] = await db
+      .select({ runtimeId: runs.runtimeId })
+      .from(runs)
+      .where(eq(runs.id, run.id));
+    expect(after?.runtimeId).toBe(winner);
+
+    await db.update(runs).set({ runtimeId: null });
+    await db.delete(runtimes);
+  });
+
   it("remote guard: project credentials fail typed, platform-authed MCP reports missing", async () => {
     const runtimeId = await newRuntime([
       { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] },
@@ -629,6 +659,25 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     expect(spec?.repoUrl).toBe(origin);
     expect(spec?.ref).toBe("main");
     expect(spec?.baseSha).toBe(tipSha);
+
+    // annotated tag: ls-remote's first line is the TAG OBJECT — the pin must
+    // be the peeled commit (the daemon checks out and reports the commit, and
+    // git.push needs a commit parent), or publication always rejects
+    sh(["-C", work, "tag", "-a", "v1", "-m", "release"]);
+    sh(["push", "origin", "v1"], work);
+    const tagObjectSha = sh(["rev-parse", "v1"], work).trim();
+    const peeledSha = sh(["rev-parse", "v1^{commit}"], work).trim();
+    expect(tagObjectSha).not.toBe(peeledSha); // annotated → a real tag object
+
+    const tagged = await newRun({ runtimeId });
+    await manager.checkout(tagged.id, {
+      repo: { repoConnectionId: conn?.id as string },
+      ref: "v1",
+      access: "readWrite",
+      projectId,
+    });
+    const taggedSpec = await manager.workspaceSpec(tagged.id);
+    expect(taggedSpec?.baseSha).toBe(peeledSha);
   });
 });
 

@@ -11,6 +11,7 @@ import {
   projects,
   runEvents,
   runs,
+  runtimes,
   seed,
   tasks,
   taskTypes,
@@ -34,7 +35,12 @@ import {
   type TemplateDoc,
 } from "@agrippa/orchestration";
 import { eq, sql } from "drizzle-orm";
-import { createRunConsumer, type RunFetchLoop, startRunFetchLoop } from "./consumer";
+import {
+  createRunConsumer,
+  type RunFetchLoop,
+  routingPinChanged,
+  startRunFetchLoop,
+} from "./consumer";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../templates");
@@ -305,5 +311,35 @@ describe.skipIf(!dbUp)("heterogeneous fleet routing (Phase A verify)", () => {
     // steps split across A and B but never duplicate
     expect(fakeOnA.requests.length + fakeOnB.requests.length).toBe(5);
     expect(claudeOnB.requests.length).toBe(claudeBefore);
+  });
+
+  it("routingPinChanged flags only a MOVED pin (routing races the lease)", async () => {
+    const runId = await provisionRun("fake", 3);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    const [runtime] = await db
+      .insert(runtimes)
+      .values({
+        orgId: project?.orgId as string,
+        name: "pin-race",
+        tokenHash: "h",
+        tokenPrefix: `agrd_${Bun.randomUUIDv7().slice(-7)}`,
+        executors: [],
+        createdBy: userId,
+      })
+      .returning({ id: runtimes.id });
+    const runtimeId = runtime?.id as string;
+
+    // routed central (expected null), pin still null → proceed
+    expect(await routingPinChanged(db, runId, null)).toBe(false);
+    // a concurrent delivery pinned the run in the routing→claim window → drain
+    await db.update(runs).set({ runtimeId }).where(eq(runs.id, runId));
+    expect(await routingPinChanged(db, runId, null)).toBe(true);
+    // routed remote to that runtime (expected = pin) → proceed; the dead-pin
+    // path is the same shape (routeRun returns central WITH the stale pin as
+    // expectedPin), so neither may drain-loop
+    expect(await routingPinChanged(db, runId, runtimeId)).toBe(false);
+
+    await db.update(runs).set({ runtimeId: null }).where(eq(runs.id, runId));
+    await db.delete(runtimes).where(eq(runtimes.id, runtimeId));
   });
 });

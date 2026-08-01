@@ -118,6 +118,18 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     expect(audits[0]?.actorUserId).toBeNull();
   });
 
+  it("register rejects queue-unsafe executor ids", async () => {
+    // advertised ids become pg-boss queue name segments on every worker —
+    // an unconstrained id would crash queue creation fleet-wide
+    for (const id of ["evil+name", "has space", "Dot.ted", "UPPER"]) {
+      const res = await daemonRequest("/register", {
+        hostname: "mba.local",
+        executors: [{ id }],
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
   it("heartbeat bumps lastSeenAt and is not audited", async () => {
     const [before] = await db.select().from(runtimes).where(eq(runtimes.id, runtimeId));
     await Bun.sleep(10);

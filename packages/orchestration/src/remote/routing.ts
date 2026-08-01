@@ -199,11 +199,27 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
   const chosen = eligible[0];
   if (!chosen) return { kind: "central" };
 
-  // persist the affinity pin before the first dispatch; the lease serializes
-  // execution, so no CAS is needed beyond "still unpinned"
-  await db
+  // Persist the affinity pin before the first dispatch. The CAS ("still
+  // unpinned") can lose to a concurrent delivery of the same job — routing
+  // runs before the execution lease is taken — and the loser must ADOPT the
+  // persisted winner rather than proceed with its local choice: the pin is
+  // absolute, and executing against a different runtime than the one on the
+  // run row would strand the workspace on resume.
+  const pinned = await db
     .update(runs)
     .set({ runtimeId: chosen.id })
-    .where(and(eq(runs.id, run.id), sql`${runs.runtimeId} is null`));
+    .where(and(eq(runs.id, run.id), sql`${runs.runtimeId} is null`))
+    .returning({ id: runs.id });
+  if (pinned.length === 0) {
+    const [current] = await db
+      .select({ runtimeId: runs.runtimeId })
+      .from(runs)
+      .where(eq(runs.id, run.id));
+    if (current?.runtimeId) {
+      const [winner] = await db.select().from(runtimes).where(eq(runtimes.id, current.runtimeId));
+      if (winner) return { kind: "remote", runtime: winner };
+    }
+    return { kind: "central" }; // winner's pin row vanished — dead-pin semantics
+  }
   return { kind: "remote", runtime: chosen };
 }

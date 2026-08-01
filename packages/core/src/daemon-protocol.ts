@@ -29,8 +29,16 @@ export type DaemonProtocolHints = {
   keepaliveSec: number;
 };
 
+/**
+ * Executor ids a daemon may advertise. Advertised ids become pg-boss queue
+ * name segments on every worker (`run.execute.<ids joined by '.'>`), so the
+ * charset must stay inside pg-boss's `[\w.\-/]` with `.` excluded (it is the
+ * joiner) — an unconstrained id would crash queue creation fleet-wide.
+ */
+export const EXECUTOR_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
 export const daemonExecutorAdSchema = z.object({
-  id: z.string().min(1).max(100),
+  id: z.string().regex(EXECUTOR_ID_PATTERN, "executor id must match [a-z0-9][a-z0-9_-]{0,63}"),
   envAuthProviders: z.array(z.string().min(1).max(100)).max(20).optional(),
 });
 
