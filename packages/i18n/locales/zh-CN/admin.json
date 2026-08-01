@@ -87,6 +87,21 @@
     "status": {
       "live": "在线",
       "stale": "失联"
+    },
+    "runtimes": {
+      "title": "远程运行时",
+      "hint": "团队成员机器上的守护进程，用它们自己的登录凭证执行智能体工作——配额、审批、审计与 git 发布仍留在平台侧。",
+      "namePlaceholder": "运行时名称，如 lin-dev-laptop",
+      "create": "签发令牌",
+      "tokenOnce": "「{{name}}」的令牌——仅显示这一次，请立即保存。",
+      "copied": "令牌已复制",
+      "empty": "尚无远程运行时。",
+      "emptyHint": "签发令牌后，用它启动 agrippa-daemon 即可接入自带算力。",
+      "lastSeen": "最近上线 {{time}}",
+      "neverConnected": "从未连接",
+      "offline": "离线",
+      "revoked": "已撤销",
+      "revoke": "撤销令牌"
     }
   },
   "audit": {

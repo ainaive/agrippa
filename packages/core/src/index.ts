@@ -1,3 +1,4 @@
+export * from "./daemon-protocol";
 export * from "./domain";
 export * from "./errors";
 export * from "./executors";

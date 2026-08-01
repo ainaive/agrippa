@@ -9,6 +9,7 @@ import type { AppEnv } from "./context";
 import { requireSession } from "./middleware/auth";
 import { errorHandler } from "./middleware/error";
 import { catalogRoutes } from "./routes/catalog";
+import { daemonRoutes } from "./routes/daemon";
 import { executionRoutes } from "./routes/execution";
 import { fleetRoutes } from "./routes/fleet";
 import { governanceRoutes } from "./routes/governance";
@@ -17,6 +18,7 @@ import { meRoutes } from "./routes/me";
 import { notificationRoutes } from "./routes/notifications";
 import { projectRoutes } from "./routes/projects";
 import { registryRoutes } from "./routes/registry";
+import { runtimeRoutes } from "./routes/runtimes";
 import { templateRoutes, templateValidateRoute } from "./routes/templates";
 
 export function createApp(deps: {
@@ -69,6 +71,9 @@ export function createApp(deps: {
   // Public invite-accept flow (unauthenticated, gated by the invite token).
   // Registered before the better-auth wildcard so it isn't swallowed by it.
   app.route("/api/auth/accept-invite", acceptInviteRoutes);
+  // daemon surface: bearer runtime-token auth, no session — mounted outside
+  // the v1 session gate exactly like accept-invite (ADR-0017 Decision 3)
+  app.route("/api/daemon", daemonRoutes);
 
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
@@ -85,6 +90,7 @@ export function createApp(deps: {
   v1.route("/", executionRoutes);
   v1.route("/", governanceRoutes);
   v1.route("/", fleetRoutes);
+  v1.route("/", runtimeRoutes);
   app.route("/api/v1", v1);
 
   // production: serve the built SPA from the same origin (no CORS, ADR-0001)

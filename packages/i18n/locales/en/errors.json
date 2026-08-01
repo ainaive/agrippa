@@ -1,5 +1,6 @@
 {
   "unauthorized": "Authentication required",
+  "daemon_token_invalid": "Invalid or revoked daemon token",
   "forbidden": "Insufficient permissions",
   "not_found": "Resource not found",
   "validation_failed": "Validation failed",

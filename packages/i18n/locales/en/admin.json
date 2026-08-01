@@ -87,6 +87,21 @@
     "status": {
       "live": "Live",
       "stale": "Stale"
+    },
+    "runtimes": {
+      "title": "Remote runtimes",
+      "hint": "Daemons on team machines that execute agent work with their own logins — quotas, approvals, audit, and git publication stay on the platform.",
+      "namePlaceholder": "Runtime name, e.g. lin-dev-laptop",
+      "create": "Issue token",
+      "tokenOnce": "Token for “{{name}}” — shown only once, store it now.",
+      "copied": "Token copied",
+      "empty": "No remote runtimes yet.",
+      "emptyHint": "Issue a token and run the agrippa-daemon binary with it to bring your own compute.",
+      "lastSeen": "Last seen {{time}}",
+      "neverConnected": "Never connected",
+      "offline": "Offline",
+      "revoked": "Revoked",
+      "revoke": "Revoke token"
     }
   },
   "audit": {
