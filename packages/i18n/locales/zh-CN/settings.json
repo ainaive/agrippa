@@ -4,7 +4,8 @@
     "members": "成员",
     "resources": "资源",
     "repos": "代码仓库",
-    "quota": "配额"
+    "quota": "配额",
+    "notifications": "通知"
   },
   "general": {
     "name": "项目名称",
@@ -80,5 +81,61 @@
     "hardStop": "超限后强制停止",
     "save": "保存配额",
     "saved": "配额已保存"
+  },
+  "notifications": {
+    "endpointsTitle": "通知端点",
+    "endpointsHint": "当执行等待审批或结束时，发送卡片或签名 Webhook。",
+    "addTitle": "添加端点",
+    "kind": "类型",
+    "kinds": {
+      "generic": "通用 Webhook",
+      "feishu": "飞书机器人",
+      "dingtalk": "钉钉机器人"
+    },
+    "name": "名称",
+    "url": "Webhook 地址",
+    "urlHint": {
+      "generic": "任意 https 端点；请求会带 X-Agrippa-Signature 签名。",
+      "feishu": "飞书自定义机器人 Webhook（open.feishu.cn）。",
+      "dingtalk": "钉钉机器人 Webhook（oapi.dingtalk.com）。"
+    },
+    "secret": "签名密钥",
+    "secretHint": {
+      "generic": "必填——接收方用它校验 X-Agrippa-Signature。",
+      "feishu": "可选——机器人的签名校验密钥。",
+      "dingtalk": "可选——机器人的加签密钥。"
+    },
+    "locale": "语言",
+    "events": "事件",
+    "eventsHint": "全部不勾选则发送所有事件。",
+    "eventTypes": {
+      "checkpoint_required": "等待审批",
+      "checkpoint_expired": "检查点超时",
+      "run_succeeded": "执行成功",
+      "run_failed": "执行失败",
+      "run_cancelled": "执行取消",
+      "run_timed_out": "执行超时",
+      "notification_test": "测试"
+    },
+    "add": "添加端点",
+    "added": "端点已添加",
+    "removed": "端点已删除",
+    "removeConfirm": "删除端点「{{name}}」？",
+    "removeHint": "其投递历史将一并删除。",
+    "test": "发送测试",
+    "testQueued": "测试通知已入队",
+    "empty": "还没有通知端点",
+    "deliveriesTitle": "最近投递",
+    "deliveriesEmpty": "还没有投递记录",
+    "delivery": {
+      "event": "事件",
+      "endpoint": "端点",
+      "run": "执行",
+      "status": "状态",
+      "attempts": "尝试",
+      "error": "错误"
+    },
+    "retry": "重试",
+    "retried": "投递已重新入队"
   }
 }

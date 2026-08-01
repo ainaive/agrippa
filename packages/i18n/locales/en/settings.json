@@ -4,7 +4,8 @@
     "members": "Members",
     "resources": "Resources",
     "repos": "Repositories",
-    "quota": "Quota"
+    "quota": "Quota",
+    "notifications": "Notifications"
   },
   "general": {
     "name": "Project name",
@@ -80,5 +81,61 @@
     "hardStop": "Hard stop when exhausted",
     "save": "Save quota",
     "saved": "Quota saved"
+  },
+  "notifications": {
+    "endpointsTitle": "Notification endpoints",
+    "endpointsHint": "Send a card or signed webhook when a run needs approval or finishes.",
+    "addTitle": "Add endpoint",
+    "kind": "Type",
+    "kinds": {
+      "generic": "Generic webhook",
+      "feishu": "Feishu bot",
+      "dingtalk": "DingTalk bot"
+    },
+    "name": "Name",
+    "url": "Webhook URL",
+    "urlHint": {
+      "generic": "Any https endpoint; requests are signed with X-Agrippa-Signature.",
+      "feishu": "Feishu custom-bot webhook (open.feishu.cn).",
+      "dingtalk": "DingTalk robot webhook (oapi.dingtalk.com)."
+    },
+    "secret": "Signing secret",
+    "secretHint": {
+      "generic": "Required — receivers verify X-Agrippa-Signature with it.",
+      "feishu": "Optional — the bot's signature verification key.",
+      "dingtalk": "Optional — the robot's signing secret."
+    },
+    "locale": "Language",
+    "events": "Events",
+    "eventsHint": "Leave all unchecked to send every event.",
+    "eventTypes": {
+      "checkpoint_required": "Approval needed",
+      "checkpoint_expired": "Checkpoint expired",
+      "run_succeeded": "Run succeeded",
+      "run_failed": "Run failed",
+      "run_cancelled": "Run cancelled",
+      "run_timed_out": "Run timed out",
+      "notification_test": "Test"
+    },
+    "add": "Add endpoint",
+    "added": "Endpoint added",
+    "removed": "Endpoint removed",
+    "removeConfirm": "Remove endpoint \"{{name}}\"?",
+    "removeHint": "Its delivery history is removed with it.",
+    "test": "Send test",
+    "testQueued": "Test notification queued",
+    "empty": "No notification endpoints yet",
+    "deliveriesTitle": "Recent deliveries",
+    "deliveriesEmpty": "No deliveries yet",
+    "delivery": {
+      "event": "Event",
+      "endpoint": "Endpoint",
+      "run": "Run",
+      "status": "Status",
+      "attempts": "Attempts",
+      "error": "Error"
+    },
+    "retry": "Retry",
+    "retried": "Delivery re-queued"
   }
 }
