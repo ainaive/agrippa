@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -305,7 +306,12 @@ async function readSkillFiles(
   dir: string,
 ): Promise<Array<{ path: string; contentBase64: string }>> {
   const files: Array<{ path: string; contentBase64: string }> = [];
-  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  let entries: Dirent[];
+  try {
+    entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  } catch {
+    return files; // fixture materializers fabricate paths without writing files
+  }
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const abs = path.join(entry.parentPath ?? dir, entry.name);

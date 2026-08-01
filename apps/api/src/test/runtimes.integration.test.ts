@@ -274,8 +274,15 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
 
     // two concurrent claims: each takes a DIFFERENT dispatch, oldest first
     const [a, b] = await Promise.all([daemonClaim(), daemonClaim()]);
-    const ra = await jsonOf<{ dispatch: { id: string } | null }>(a);
+    const ra = await jsonOf<{
+      dispatch: { id: string; payload: { request: { stepId?: string } } } | null;
+    }>(a);
     const rb = await jsonOf<{ dispatch: { id: string } | null }>(b);
+    // the payload must arrive as an OBJECT: drizzle stores jsonb as a
+    // JSON-encoded string with this driver, and the claim route's raw-SQL
+    // read must parse that extra layer or the daemon receives a string
+    expect(typeof ra.dispatch?.payload).toBe("object");
+    expect(ra.dispatch?.payload.request.stepId).toMatch(/^step-/);
     const takenIds = [ra.dispatch?.id, rb.dispatch?.id];
     expect(new Set(takenIds).size).toBe(2);
     expect(takenIds).toContain(first);

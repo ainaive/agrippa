@@ -148,10 +148,16 @@ export const daemonRoutes = new Hono<DaemonEnv>()
           for update skip locked
         )
         returning id, run_id, payload
-      `)) as unknown as Array<{ id: string; run_id: string; payload: DispatchPayload }>;
+      `)) as unknown as Array<{ id: string; run_id: string; payload: DispatchPayload | string }>;
       const row = rows[0];
       if (row) {
-        claimed = { id: row.id, runId: row.run_id, payload: row.payload };
+        // drizzle stores jsonb as a JSON-encoded string with this driver; a
+        // raw-SQL read gets that string back and must parse the extra layer
+        const payload =
+          typeof row.payload === "string"
+            ? (JSON.parse(row.payload) as DispatchPayload)
+            : row.payload;
+        claimed = { id: row.id, runId: row.run_id, payload };
         break;
       }
       if (Date.now() >= deadline) break;
