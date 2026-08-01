@@ -141,6 +141,8 @@ const adsOf = (executors: ExecutorAd[] | null | undefined): Map<string, Executor
  * Order:
  * 1. Affinity: a pinned runtime wins unconditionally (dead pin → the remote
  *    workspace manager's isIntact fails the resume `workspace_lost`).
+ * 1b. Sticky placement: a STARTED run with no pin executed centrally and
+ *    stays central — see the inline comment.
  * 2. Central-only STRICT (Decision 7): any resolved provider with a stored
  *    project credential (env- or project-policy), any project-policy provider
  *    at all, or any authorized MCP server with platform-held auth — platform
@@ -158,6 +160,16 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
     if (pinned) return { kind: "remote", runtime: pinned };
     return { kind: "central" }; // pin row deleted — engine will fail it honestly
   }
+
+  // Placement is sticky. `runtimeId === null` on a STARTED run does not mean
+  // "not yet routed" — remote execution always pins pre-claim, so a started
+  // unpinned run executed centrally. Re-placing it (central worker died, a
+  // covering daemon appeared) would skip the already-succeeded checkout while
+  // the daemon has no usable workspaceRef, and remote isIntact (runtime
+  // liveness) would happily let the remaining steps run in an empty scratch
+  // dir. Workspaces and executor sessions are host-class-local: a started run
+  // resumes where its class of host is, or fails honestly there.
+  if (run.startedAt) return { kind: "central" };
 
   const [project] = await db
     .select({ orgId: projects.orgId })

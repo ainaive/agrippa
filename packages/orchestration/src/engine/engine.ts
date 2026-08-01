@@ -188,7 +188,20 @@ function jsonValue(value: unknown): unknown {
 export async function executeRun(
   deps: EngineDeps,
   runId: string,
-  control?: { onStarted?: (handle: RunControlHandle) => void },
+  control?: {
+    onStarted?: (handle: RunControlHandle) => void;
+    /**
+     * Awaited immediately after the claim CAS succeeds — under the lease,
+     * before ANY other initialization side effect (startedAt, events, the
+     * crash scan, workspace checks). Return false to release the claim as a
+     * drain (nothing finalizes; the caller re-enqueues). The consumer uses
+     * this to verify its pre-lease routing decision against the persisted
+     * pin: deps were constructed from that decision, and proceeding with
+     * wrong deps could finalize a resume `workspace_lost` or dispatch a step
+     * to the wrong host.
+     */
+    postClaim?: () => Promise<boolean>;
+  },
 ): Promise<RunOutcome> {
   const { db } = deps;
 
@@ -274,7 +287,7 @@ export async function executeRun(
     },
     catalog,
   );
-  return await engine.execute(control?.onStarted);
+  return await engine.execute(control);
 }
 
 class RunEngine {
@@ -371,10 +384,13 @@ class RunEngine {
     return entries;
   }
 
-  async execute(onStarted?: (handle: RunControlHandle) => void): Promise<RunOutcome> {
+  async execute(control?: {
+    onStarted?: (handle: RunControlHandle) => void;
+    postClaim?: () => Promise<boolean>;
+  }): Promise<RunOutcome> {
     try {
-      await this.initialize();
-      onStarted?.({
+      await this.initialize(control?.postClaim);
+      control?.onStarted?.({
         drain: () => this.triggerAbort("drained"),
         lostLease: () => this.triggerAbort("lease_lost"),
       });
@@ -399,7 +415,7 @@ class RunEngine {
 
   // ── Setup ────────────────────────────────────────────────────────────────────
 
-  private async initialize(): Promise<void> {
+  private async initialize(postClaim?: () => Promise<boolean>): Promise<void> {
     const { run, db } = this;
 
     const [maxSeq] = await db
@@ -425,6 +441,17 @@ class RunEngine {
       // lease — either way this worker must not proceed and duplicate side
       // effects; the owner (or the lease sweeper) drives it
       throw new RunClaimLost();
+    }
+    // The caller's routing decision was made BEFORE the lease existed and the
+    // deps were built from it. Now that the claim holds — and round-3's
+    // lease-aware pin CAS guarantees the pin can no longer move — this is the
+    // one moment a stale decision is provably detectable, and it must be
+    // caught before ANY side effect below (startedAt, events, the crash scan,
+    // workspace checks): proceeding with wrong deps could finalize a resume
+    // `workspace_lost` or dispatch a step to the wrong host. A false answer
+    // drains: lease released, nothing finalized, caller re-enqueues.
+    if (postClaim && !(await postClaim())) {
+      throw new RunDrained("drained");
     }
     this.run.status = "running";
     if (run.startedAt === null) {

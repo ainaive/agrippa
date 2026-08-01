@@ -2446,6 +2446,29 @@ describe.skipIf(!dbUp)("execution lease (ADR-0017 Decision 4)", () => {
     expect(again.orphaned).toContain(runId);
   });
 
+  it("a false postClaim gate drains under the lease before ANY side effect", async () => {
+    const fx = await setupFixture();
+    const { db, runId } = fx;
+
+    // the gate answers false (the consumer's pin verification failing) —
+    // the engine must release the claim as a drain with NO trace: no
+    // startedAt, no run.started event, no step rows, nothing finalized
+    const outcome = await executeRun(fx.makeDeps(HAPPY_SCRIPT), runId, {
+      postClaim: async () => false,
+    });
+    expect(outcome).toBe("drained");
+    const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(run?.leaseOwner).toBeNull();
+    expect(run?.startedAt).toBeNull();
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.filter((e) => e.type === "run.started")).toHaveLength(0);
+
+    // a passing gate proceeds normally
+    expect(
+      await executeRun(fx.makeDeps(HAPPY_SCRIPT), runId, { postClaim: async () => true }),
+    ).toBe("waiting_approval");
+  });
+
   it("drain mid-step exits without finalizing, records a crash, and the run resumes to completion", async () => {
     const fx = await setupFixture();
     const { db, runId } = fx;

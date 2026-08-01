@@ -54,7 +54,9 @@ export const EXECUTOR_CATALOG = {
 export type ExecutorId = keyof typeof EXECUTOR_CATALOG;
 
 export function isExecutorId(id: string): id is ExecutorId {
-  return id in EXECUTOR_CATALOG;
+  // hasOwn, not `in`: the prototype chain would admit "constructor" etc. —
+  // ids that pass every downstream charset check but have no catalog entry
+  return Object.hasOwn(EXECUTOR_CATALOG, id);
 }
 
 /**

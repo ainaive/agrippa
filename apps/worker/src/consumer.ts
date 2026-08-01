@@ -57,32 +57,31 @@ export async function routingPinChanged(
 }
 
 /**
- * The post-claim leg of the routing/lease handshake, FAIL-CLOSED: a moved pin
- * — or an inability to check — drains the engine (nothing finalizes, no retry
- * budget burned; the re-enqueued delivery re-routes honoring the pin).
- * Draining on a transient DB error is safe; proceeding on one is not. It
- * cannot be awaited (onStarted is a synchronous engine callback), but the
- * lease-aware pin CAS in routeRun guarantees no pin can move AFTER the claim
- * commits, so this single read deterministically covers every pre-claim
- * interleaving — the async gap risks at most a few early events before the
- * drain lands, which resume treats as an ordinary recorded crash.
+ * The post-claim leg of the routing/lease handshake, FAIL-CLOSED: returns
+ * true only when the persisted pin still matches what routing decided.
+ * Wired as the engine's awaited `postClaim` gate, so a false answer drains
+ * BEFORE any initialization side effect (nothing finalizes, no retry budget
+ * burned; the re-enqueued delivery re-routes honoring the pin). A moved pin
+ * or an inability to check both answer false — draining on a transient DB
+ * error is safe, proceeding with possibly-wrong deps is not. The lease-aware
+ * pin CAS in routeRun guarantees no pin can move AFTER the claim commits, so
+ * this single read deterministically covers every pre-claim interleaving.
  */
-export async function verifyPinAfterClaim(
+export async function pinVerifiedAfterClaim(
   db: Db,
   runId: string,
   expectedPin: string | null,
-  handle: Pick<RunControlHandle, "drain">,
   logger: EngineDeps["logger"],
-): Promise<void> {
+): Promise<boolean> {
   try {
-    if (!(await routingPinChanged(db, runId, expectedPin))) return;
+    if (!(await routingPinChanged(db, runId, expectedPin))) return true;
     logger.warn(`run ${runId}: pin changed between routing and claim — draining`);
   } catch (err) {
     logger.warn(`run ${runId}: pin verification failed — draining fail-closed`, {
       err: String(err),
     });
   }
-  handle.drain();
+  return false;
 }
 
 export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): RunConsumer {
@@ -161,14 +160,12 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
         }
       }
       const outcome = await executeRun(runDeps, runId, {
-        onStarted: (handle) => {
-          active.set(runId, handle);
-          // Routing ran BEFORE the execution lease; a concurrent delivery may
-          // have pinned the run differently in that window. onStarted fires
-          // after the claim CAS — i.e. under the lease — so re-check the
-          // persisted pin here, fail-closed (see verifyPinAfterClaim).
-          void verifyPinAfterClaim(db, runId, expectedPin, handle, deps.logger);
-        },
+        onStarted: (handle) => active.set(runId, handle),
+        // Routing ran BEFORE the execution lease; a concurrent delivery may
+        // have pinned the run differently in that window. The engine awaits
+        // this under the lease, before any initialization side effect —
+        // fail-closed (see pinVerifiedAfterClaim).
+        postClaim: () => pinVerifiedAfterClaim(db, runId, expectedPin, deps.logger),
       });
       deps.logger.info(`run ${runId}: ${outcome}`);
       if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);

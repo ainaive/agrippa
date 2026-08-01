@@ -56,11 +56,11 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
     const names = selectRunQueues({
       localExecutorIds: ["fake"],
       centralWorkerSets: [],
-      runtimeAds: [{ name: "rotator", ids: ["codex-cli", "rot-1", "rot-2"] }],
+      runtimeAds: [{ name: "rotator", ids: ["codex-cli", "rot-1", "rot-2", "constructor"] }],
       logger,
     });
     expect(names).toContain(runExecuteQueueName(["codex-cli"]));
-    expect(names.some((n) => n.includes("rot-"))).toBe(false);
+    expect(names.some((n) => n.includes("rot-") || n.includes("constructor"))).toBe(false);
     expect(warnings.some((w) => w.includes("unknown or queue-unsafe"))).toBe(true);
   });
 

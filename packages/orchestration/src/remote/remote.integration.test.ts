@@ -385,6 +385,23 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     await db.delete(runtimes);
   });
 
+  it("a started, unpinned run stays central — placement is sticky", async () => {
+    // A run that executed centrally (startedAt set, never pinned — remote
+    // execution always pins pre-claim), paused at approval, and lost its
+    // worker must NOT migrate to a newly available daemon: its checkout step
+    // already succeeded on a central host, and the daemon would run the
+    // remaining steps in an empty scratch dir.
+    await newRuntime([{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }]);
+    const run = await newRun({ startedAt: new Date(), status: "waiting_approval" });
+    expect((await routeRun(db, run)).kind).toBe("central");
+    const [after] = await db
+      .select({ runtimeId: runs.runtimeId })
+      .from(runs)
+      .where(eq(runs.id, run.id));
+    expect(after?.runtimeId).toBeNull();
+    await db.delete(runtimes);
+  });
+
   it("refuses to pin a run whose lease another worker holds", async () => {
     // A duplicate delivery routing while the owner executes must not poison
     // the pin: its own claim will fail RunClaimLost, so the pin write rejects

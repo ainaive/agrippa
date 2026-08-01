@@ -123,7 +123,16 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     // unconstrained id would crash queue creation fleet-wide, and each FRESH
     // pattern-valid id would mint persistent queues (rotation), so ids must
     // also be catalog members
-    for (const id of ["evil+name", "has space", "Dot.ted", "UPPER", "not-a-real-executor"]) {
+    // "constructor" is the prototype-chain trap: all-lowercase, passes the
+    // charset regex, and `in EXECUTOR_CATALOG` would have admitted it
+    for (const id of [
+      "evil+name",
+      "has space",
+      "Dot.ted",
+      "UPPER",
+      "not-a-real-executor",
+      "constructor",
+    ]) {
       const res = await daemonRequest("/register", {
         hostname: "mba.local",
         executors: [{ id }],

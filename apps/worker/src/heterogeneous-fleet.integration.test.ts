@@ -37,10 +37,10 @@ import {
 import { eq, sql } from "drizzle-orm";
 import {
   createRunConsumer,
+  pinVerifiedAfterClaim,
   type RunFetchLoop,
   routingPinChanged,
   startRunFetchLoop,
-  verifyPinAfterClaim,
 } from "./consumer";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
@@ -340,21 +340,17 @@ describe.skipIf(!dbUp)("heterogeneous fleet routing (Phase A verify)", () => {
     // expectedPin), so neither may drain-loop
     expect(await routingPinChanged(db, runId, runtimeId)).toBe(false);
 
-    // the onStarted wrapper: drains on mismatch, not on match — and FAILS
-    // CLOSED when the check itself errors (proceeding unverified is the bug)
-    let drains = 0;
-    const handle = { drain: () => void drains++ };
-    await verifyPinAfterClaim(db, runId, runtimeId, handle, silentLogger);
-    expect(drains).toBe(0);
-    await verifyPinAfterClaim(db, runId, null, handle, silentLogger);
-    expect(drains).toBe(1);
+    // the engine's awaited postClaim gate: proceeds on match, drains on
+    // mismatch — and FAILS CLOSED when the check itself errors (proceeding
+    // unverified with possibly-wrong deps is the bug)
+    expect(await pinVerifiedAfterClaim(db, runId, runtimeId, silentLogger)).toBe(true);
+    expect(await pinVerifiedAfterClaim(db, runId, null, silentLogger)).toBe(false);
     const brokenDb = {
       select: () => {
         throw new Error("connection reset");
       },
     } as unknown as typeof db;
-    await verifyPinAfterClaim(brokenDb, runId, runtimeId, handle, silentLogger);
-    expect(drains).toBe(2);
+    expect(await pinVerifiedAfterClaim(brokenDb, runId, runtimeId, silentLogger)).toBe(false);
 
     await db.update(runs).set({ runtimeId: null }).where(eq(runs.id, runId));
     await db.delete(runtimes).where(eq(runtimes.id, runtimeId));
