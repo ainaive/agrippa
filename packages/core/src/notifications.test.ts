@@ -53,9 +53,9 @@ describe("validateWebhookUrl", () => {
 });
 
 describe("maskWebhookUrl", () => {
-  it("hides the capability token but keeps origin and tail", () => {
+  it("hides the capability token but keeps origin and a long path's tail", () => {
     const masked = maskWebhookUrl("https://open.feishu.cn/open-apis/bot/v2/hook/0123456789abcdef");
-    expect(masked).toBe("https://open.feishu.cn/open-apis/…cdef");
+    expect(masked).toBe("https://open.feishu.cn/…cdef");
     expect(masked).not.toContain("0123456789");
   });
 
@@ -65,10 +65,11 @@ describe("maskWebhookUrl", () => {
     expect(masked).toEndWith("?…");
   });
 
-  it("keeps short token-free paths as-is", () => {
-    expect(maskWebhookUrl("https://hooks.example.com/agrippa")).toBe(
-      "https://hooks.example.com/agrippa",
+  it("masks short paths entirely — a short path can be the whole token", () => {
+    expect(maskWebhookUrl("https://hooks.example.com/a1b2c3d4")).toBe(
+      "https://hooks.example.com/…",
     );
+    expect(maskWebhookUrl("https://hooks.example.com/agrippa")).toBe("https://hooks.example.com/…");
   });
 
   it("degrades to an ellipsis on unparseable input", () => {

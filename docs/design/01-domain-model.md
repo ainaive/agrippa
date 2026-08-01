@@ -99,7 +99,10 @@ notification_endpoints (id pk, project_id fk cascade,
            secret_ref fk secrets null,                         -- signing secret; required for 'generic' (API-enforced)
            events jsonb default '[]',                          -- NotifiableEventType[]; empty = all
            locale text default 'zh-CN',                        -- the channel's rendering locale (design/07)
-           enabled bool, created_by fk, created_at)
+           enabled bool,
+           activated_at tstz default now(),                    -- watermark: no event older than this is delivered;
+                                                               -- PATCH resets it on re-enable and url/events changes
+           created_by fk, created_at)
 
 notification_deliveries (id pk, endpoint_id fk cascade, project_id fk cascade,
            run_id fk null, event_id fk run_events null,        -- both null only for test sends

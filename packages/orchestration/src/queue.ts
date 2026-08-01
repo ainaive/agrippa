@@ -21,7 +21,18 @@ export async function createRunQueue(connectionString: string): Promise<BossQueu
   await boss.start();
   await boss.createQueue(QUEUE_RUN_EXECUTE);
   await boss.createQueue(QUEUE_APPROVAL_EXPIRE);
-  await boss.createQueue(QUEUE_NOTIFICATION_DELIVER);
+  // stately = a real unique index on the singleton key across created/retry/
+  // active. On the default 'standard' policy singletonKey enforces NOTHING
+  // (pg-boss's singleton indexes are partial on policy), so the sweeper's
+  // re-enqueues would mint duplicate concurrent deliveries. createQueue is
+  // ON CONFLICT DO NOTHING and updateQueue cannot change policy, so a queue
+  // left behind by an earlier revision converges by recreate — any dropped
+  // jobs are re-enqueued by the sweeper from the durable delivery rows.
+  const existing = await boss.getQueue(QUEUE_NOTIFICATION_DELIVER);
+  if (existing && existing.policy !== "stately") {
+    await boss.deleteQueue(QUEUE_NOTIFICATION_DELIVER);
+  }
+  await boss.createQueue(QUEUE_NOTIFICATION_DELIVER, { policy: "stately" });
 
   return {
     boss,

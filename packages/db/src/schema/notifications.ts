@@ -39,6 +39,12 @@ export const notificationEndpoints = pgTable(
     /** Rendering locale for this channel's audience (design/07: channels carry their own locale). */
     locale: text("locale").notNull().default("zh-CN"),
     enabled: boolean("enabled").notNull().default(true),
+    /**
+     * Watermark: only events created at/after this instant are delivered.
+     * Reset by PATCH on re-enable and on url/events changes, so a new or
+     * materially changed endpoint never replays history.
+     */
+    activatedAt: tstz("activated_at").notNull().defaultNow(),
     createdBy: uuid("created_by").references(() => users.id),
     createdAt: createdAtCol(),
   },

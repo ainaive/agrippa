@@ -18,7 +18,7 @@ import {
   tasks,
 } from "@agrippa/db";
 import { type NotificationCatalog, notificationMessages } from "@agrippa/i18n";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { assertPublicHost, type HostLookup } from "./net";
 
 /**
@@ -97,6 +97,33 @@ function openRunLabel(locale: string): string {
 
 function truncate(text: string, max = 500): string {
   return text.length > max ? text.slice(0, max) : text;
+}
+
+/** Cap on how much of a receiver's response is ever materialized. */
+const RESPONSE_READ_LIMIT = 16 * 1024;
+
+/**
+ * Read at most `limit` characters of the response body and cancel the rest —
+ * only the success-code JSON and a 500-char snippet are ever used, so a
+ * hostile receiver must not be able to buffer arbitrary bytes into the worker
+ * within the send timeout.
+ */
+async function readBounded(response: Response, limit = RESPONSE_READ_LIMIT): Promise<string> {
+  const body = response.body;
+  if (!body) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  try {
+    while (out.length < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      out += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return out.length > limit ? out.slice(0, limit) : out;
 }
 
 const genericFormatter: NotificationFormatter = {
@@ -288,11 +315,13 @@ export async function deliverNotification(
   const now = deps.now ?? (() => new Date());
   const baseUrl = deps.baseUrl ?? process.env.AGRIPPA_BASE_URL ?? "http://localhost:3000";
 
+  // pending-only: a delayed duplicate job must never resend a row already
+  // finalized (failed rows re-enter only through the retry endpoint's CAS)
   const [delivery] = await db
     .select()
     .from(notificationDeliveries)
     .where(eq(notificationDeliveries.id, deliveryId));
-  if (!delivery || delivery.status === "succeeded") return;
+  if (!delivery || delivery.status !== "pending") return;
 
   const [endpoint] = await db
     .select()
@@ -306,6 +335,26 @@ export async function deliverNotification(
       .where(eq(notificationDeliveries.id, deliveryId));
     return;
   }
+
+  // Claim this attempt by CAS before doing anything observable: the attempts
+  // counter is the version, and the recency window (longer than the 10s send
+  // timeout so it covers an in-flight post, shorter than pg-boss's 30s first
+  // retry and the sweeper's 60s stale threshold so legitimate retries pass)
+  // keeps a concurrent duplicate job from posting while this one is in
+  // flight. Losing the race is a quiet no-op — the owner records the outcome.
+  const claimed = await db
+    .update(notificationDeliveries)
+    .set({ attempts: delivery.attempts + 1, lastAttemptAt: now() })
+    .where(
+      and(
+        eq(notificationDeliveries.id, deliveryId),
+        eq(notificationDeliveries.status, "pending"),
+        eq(notificationDeliveries.attempts, delivery.attempts),
+        sql`(${notificationDeliveries.lastAttemptAt} IS NULL OR ${notificationDeliveries.lastAttemptAt} < now() - interval '20 seconds')`,
+      ),
+    )
+    .returning({ id: notificationDeliveries.id });
+  if (claimed.length === 0) return;
 
   const [project] = await db
     .select({ id: projects.id, name: projects.name })
@@ -353,6 +402,7 @@ export async function deliverNotification(
     locale: endpoint.locale,
   };
 
+  // attempts/lastAttemptAt were already written by the claim above
   const recordFailure = async (patch: {
     lastError: string;
     responseStatus?: number;
@@ -361,8 +411,6 @@ export async function deliverNotification(
     await db
       .update(notificationDeliveries)
       .set({
-        attempts: delivery.attempts + 1,
-        lastAttemptAt: now(),
         lastError: truncate(patch.lastError),
         responseStatus: patch.responseStatus ?? null,
         responseSnippet:
@@ -409,11 +457,20 @@ export async function deliverNotification(
       headers: request.headers,
       body: request.body,
       signal: AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+      // never follow redirects: the SSRF guard validated THIS host only, and a
+      // 307/308 would re-POST the signed body to an unvalidated destination
+      redirect: "manual",
     });
-    responseBody = await response.text();
+    responseBody = await readBounded(response);
   } catch (err) {
     await recordFailure({ lastError: String(err) });
     throw err;
+  }
+
+  if (response.status >= 300 && response.status < 400) {
+    const message = `receiver redirected (HTTP ${response.status}) — redirects are not followed`;
+    await recordFailure({ lastError: message, responseStatus: response.status });
+    throw new Error(message);
   }
 
   if (!formatter.isSuccess(response.status, responseBody)) {
@@ -430,8 +487,6 @@ export async function deliverNotification(
     .update(notificationDeliveries)
     .set({
       status: "succeeded",
-      attempts: delivery.attempts + 1,
-      lastAttemptAt: now(),
       lastError: null,
       responseStatus: response.status,
       responseSnippet: truncate(responseBody),

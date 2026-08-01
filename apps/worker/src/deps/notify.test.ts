@@ -285,6 +285,118 @@ describe.skipIf(!dbUp)("deliverNotification", () => {
     expect(row?.lastError).toContain("non-public address");
   });
 
+  it("refuses to follow redirects", async () => {
+    const deliveryId = await newDelivery(signedEndpointId);
+    let followUpFetched = 0;
+    const fetchImpl = (async () => {
+      followUpFetched++;
+      return new Response("", {
+        status: 307,
+        headers: { location: "http://169.254.169.254/latest/meta-data/" },
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      deliverNotification(db, deliveryId, { fetchImpl, lookup: publicLookup }),
+    ).rejects.toThrow("redirect");
+    expect(followUpFetched).toBe(1); // the redirect target was never requested
+
+    const [row] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, deliveryId));
+    expect(row?.status).toBe("pending");
+    expect(row?.responseStatus).toBe(307);
+    expect(row?.lastError).toContain("redirect");
+  });
+
+  it("never resends a row already finalized as failed", async () => {
+    const deliveryId = await newDelivery(signedEndpointId);
+    await db
+      .update(notificationDeliveries)
+      .set({ status: "failed", lastError: "exhausted" })
+      .where(eq(notificationDeliveries.id, deliveryId));
+    let fetched = false;
+    const fetchImpl = (async () => {
+      fetched = true;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    await deliverNotification(db, deliveryId, { fetchImpl, lookup: publicLookup });
+    expect(fetched).toBe(false);
+    const [row] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, deliveryId));
+    expect(row?.status).toBe("failed");
+  });
+
+  it("a concurrent duplicate job cannot post while an attempt is in flight", async () => {
+    const deliveryId = await newDelivery(signedEndpointId);
+    let fetchCount = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gatedFetch = (async () => {
+      fetchCount++;
+      await gate;
+      return new Response('{"ok":true}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const first = deliverNotification(db, deliveryId, {
+      fetchImpl: gatedFetch,
+      lookup: publicLookup,
+    });
+    // wait until the first call has claimed the attempt (attempts = 1)
+    for (let i = 0; i < 100; i++) {
+      const [row] = await db
+        .select({ attempts: notificationDeliveries.attempts })
+        .from(notificationDeliveries)
+        .where(eq(notificationDeliveries.id, deliveryId));
+      if (row?.attempts === 1) break;
+      await Bun.sleep(10);
+    }
+
+    // the duplicate loses the claim CAS (recent lastAttemptAt) and posts nothing
+    await deliverNotification(db, deliveryId, { fetchImpl: gatedFetch, lookup: publicLookup });
+    expect(fetchCount).toBe(1);
+
+    release();
+    await first;
+    const [row] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, deliveryId));
+    expect(row?.status).toBe("succeeded");
+    expect(row?.attempts).toBe(1);
+  });
+
+  it("reads only a bounded prefix of the receiver's response", async () => {
+    const deliveryId = await newDelivery(signedEndpointId);
+    let pulls = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        if (pulls > 1_000) controller.close();
+        else controller.enqueue(new TextEncoder().encode("x".repeat(1024)));
+      },
+    });
+    const fetchImpl = (async () =>
+      new Response(endless, { status: 503 })) as unknown as typeof fetch;
+
+    await expect(
+      deliverNotification(db, deliveryId, { fetchImpl, lookup: publicLookup }),
+    ).rejects.toThrow("HTTP 503");
+
+    expect(pulls).toBeLessThan(50); // ~16 KiB read, the rest cancelled
+    const [row] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, deliveryId));
+    expect(row?.responseSnippet?.length).toBe(500);
+  });
+
   it("fails a delivery whose endpoint was disabled, and no-ops a finished one", async () => {
     await db
       .update(notificationEndpoints)

@@ -124,6 +124,11 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
     allEventsEndpointId = all?.id as string;
     filteredEndpointId = filtered?.id as string;
 
+    // the checkpoint.required event above predates these endpoints; backdate
+    // their activation watermark so this suite's pre-existing flow still
+    // exercises delivery (the watermark itself is tested below)
+    await db.update(notificationEndpoints).set({ activatedAt: sql`now() - interval '1 hour'` });
+
     enqueued.length = 0;
     const created = await syncRunNotifications(db, fakeQueue, runId);
     // checkpoint.required matches only the unfiltered endpoint; the disabled
@@ -208,6 +213,40 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
     expect(exhausted?.lastError).toBe("delivery attempts exhausted");
   });
 
+  it("watermark: an endpoint added later never replays pre-activation events", async () => {
+    const [late] = await db
+      .insert(notificationEndpoints)
+      .values({
+        projectId,
+        kind: "generic",
+        name: "late",
+        url: "https://hooks.example.com/late",
+        locale: "en",
+      })
+      .returning();
+    const lateId = late?.id as string;
+
+    // neither sync nor sweep backfills history for the new endpoint
+    expect(await syncRunNotifications(db, fakeQueue, runId)).toEqual([]);
+    await sweepNotificationDeliveries(db, fakeQueue);
+    expect(
+      await db
+        .select()
+        .from(notificationDeliveries)
+        .where(eq(notificationDeliveries.endpointId, lateId)),
+    ).toEqual([]);
+
+    // an event after activation delivers to it (and the all-events endpoint)
+    await appendRunEvent(db, { runId, type: "run.timed_out", payload: {} });
+    const created = await syncRunNotifications(db, fakeQueue, runId);
+    expect(created.length).toBe(2);
+    const lateRows = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.endpointId, lateId));
+    expect(lateRows.length).toBe(1);
+  });
+
   // ── Routes ──────────────────────────────────────────────────────────────────
 
   const base = () => `/api/v1/projects/${projectId}/notifications`;
@@ -285,6 +324,35 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
       json: { url: "https://hooks.example.com/agrippa/relay/v2", secret: "rotated-secret-1" },
     });
     expect(withSecret.status).toBe(200);
+  });
+
+  it("PATCH resets the activation watermark on re-enable", async () => {
+    const list = await jsonOf<Array<{ id: string; name: string }>>(
+      await admin.request(`${base()}/endpoints`),
+    );
+    const target = list.find((e) => e.name === "ci relay") as { id: string };
+    const [before] = await db
+      .select({ activatedAt: notificationEndpoints.activatedAt })
+      .from(notificationEndpoints)
+      .where(eq(notificationEndpoints.id, target.id));
+
+    await admin.request(`${base()}/endpoints/${target.id}`, {
+      method: "PATCH",
+      json: { enabled: false },
+    });
+    await Bun.sleep(20);
+    await admin.request(`${base()}/endpoints/${target.id}`, {
+      method: "PATCH",
+      json: { enabled: true },
+    });
+
+    const [after] = await db
+      .select({ activatedAt: notificationEndpoints.activatedAt })
+      .from(notificationEndpoints)
+      .where(eq(notificationEndpoints.id, target.id));
+    expect((after?.activatedAt as Date | undefined)?.getTime() ?? 0).toBeGreaterThan(
+      (before?.activatedAt as Date | undefined)?.getTime() ?? Number.MAX_SAFE_INTEGER,
+    );
   });
 
   it("test-send creates and enqueues a delivery with no run", async () => {

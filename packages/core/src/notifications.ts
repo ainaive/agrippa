@@ -62,8 +62,10 @@ export function validateWebhookUrl(kind: NotificationEndpointKind, raw: string):
 }
 
 /**
- * Display form that keeps the origin and the path's tail while hiding the
- * capability token most webhook URLs embed. Query values are never shown.
+ * Display form that hides the path unconditionally — a short path can BE the
+ * capability token in full, so there is no "token-free" length exemption. The
+ * last 4 chars appear only when the path is long enough that they reveal a
+ * negligible fraction of it; query values are never shown.
  */
 export function maskWebhookUrl(raw: string): string {
   let url: URL;
@@ -74,7 +76,6 @@ export function maskWebhookUrl(raw: string): string {
   }
   const suffix = url.search === "" ? "" : "?…";
   const path = url.pathname;
-  if (path.length <= 12) return `${url.origin}${path}${suffix}`;
-  const head = path.split("/").slice(0, 2).join("/");
-  return `${url.origin}${head}/…${path.slice(-4)}${suffix}`;
+  const tail = path.length >= 16 ? path.slice(-4) : "";
+  return `${url.origin}/…${tail}${suffix}`;
 }

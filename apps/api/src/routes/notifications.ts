@@ -174,6 +174,12 @@ export const notificationRoutes = new Hono<AppEnv>()
               .where(eq(secrets.id, secretRef));
           }
         }
+        // reset the activation watermark on re-enable and on material changes
+        // (url, event filter) — a changed endpoint must not inherit history
+        const reactivated =
+          (patch.enabled === true && !current.enabled) ||
+          patch.url !== undefined ||
+          patch.events !== undefined;
         await tx
           .update(notificationEndpoints)
           .set({
@@ -183,6 +189,7 @@ export const notificationRoutes = new Hono<AppEnv>()
             locale: patch.locale ?? current.locale,
             enabled: patch.enabled ?? current.enabled,
             secretRef,
+            activatedAt: reactivated ? new Date() : current.activatedAt,
           })
           .where(eq(notificationEndpoints.id, current.id));
         await audit(

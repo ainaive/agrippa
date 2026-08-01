@@ -65,6 +65,7 @@ export async function syncRunNotifications(
     .select({
       id: notificationEndpoints.id,
       events: notificationEndpoints.events,
+      activatedAt: notificationEndpoints.activatedAt,
     })
     .from(notificationEndpoints)
     .where(
@@ -76,7 +77,7 @@ export async function syncRunNotifications(
   if (endpoints.length === 0) return [];
 
   const events = await db
-    .select({ id: runEvents.id, type: runEvents.type })
+    .select({ id: runEvents.id, type: runEvents.type, createdAt: runEvents.createdAt })
     .from(runEvents)
     .where(and(eq(runEvents.runId, runId), inArray(runEvents.type, [...NOTIFIABLE_EVENT_TYPES])));
   if (events.length === 0) return [];
@@ -84,6 +85,9 @@ export async function syncRunNotifications(
   const values: DeliveryValue[] = [];
   for (const endpoint of endpoints) {
     for (const event of events) {
+      // activation watermark: a new or materially changed endpoint never
+      // replays events from before it existed in its current form
+      if (event.createdAt < endpoint.activatedAt) continue;
       if (!matchesFilter(endpoint.events, event.type)) continue;
       values.push({
         endpointId: endpoint.id,
@@ -138,6 +142,8 @@ export async function sweepNotificationDeliveries(db: Db, queue: RunQueue): Prom
       and(
         inArray(runEvents.type, [...NOTIFIABLE_EVENT_TYPES]),
         sql`${runEvents.createdAt} > ${SWEEP_WINDOW}`,
+        // activation watermark (same rule as syncRunNotifications)
+        sql`${runEvents.createdAt} >= ${notificationEndpoints.activatedAt}`,
         notExists(
           db
             .select({ one: sql`1` })

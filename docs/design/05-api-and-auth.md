@@ -91,6 +91,8 @@ POST   /projects/:id/notifications/deliveries/:deliveryId/retry # CAS failed→p
    # url + hasSecret only. The signing secret is write-only (secrets kind webhook_secret); required for
    # kind generic, optional for feishu/dingtalk. Changing the URL of a SIGNED endpoint requires re-entering
    # the secret (the provider-credential rule; enforced in the route since unsigned endpoints are exempt).
+   # PATCH resets the activation watermark (activated_at) on re-enable and on url/events changes, so a
+   # changed endpoint never replays historical events.
    # Bad URL → 400 webhook_url_invalid (per-kind host pins: open.feishu.cn / oapi.dingtalk.com; query
    # allowed — DingTalk carries access_token there). DELETE removes endpoint + secret in one tx; deliveries
    # cascade. Audit actions: project.webhook.add|update|remove|test|retry.
