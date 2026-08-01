@@ -40,6 +40,7 @@ import {
   flattenPhases,
   resolveAgentBindings,
   SubmitError,
+  syncRunNotifications,
   upgradeCompiledTemplate,
   verifyRepoRefs,
 } from "@agrippa/orchestration";
@@ -715,6 +716,10 @@ export const executionRoutes = new Hono<AppEnv>()
           payload: { error: { code: "cancelled", message: "run cancelled" } },
           createdAt: result.createdAt.toISOString(),
         });
+        // this finalize happens in the API process, so the worker's
+        // post-executeRun sync never sees it — create the delivery rows here
+        // (the worker sweeper backstops a crash between commit and this line)
+        await syncRunNotifications(c.var.db, c.var.queue, run.id);
       } else {
         // lost: another path moved the run out of <queued|waiting_approval>
         // first (typically the worker just picked it up). The flag is set and

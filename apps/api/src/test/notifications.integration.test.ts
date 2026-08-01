@@ -1,6 +1,12 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
-import { notificationDeliveries, notificationEndpoints, repoConnections } from "@agrippa/db";
+import {
+  auditLogs,
+  notificationDeliveries,
+  notificationEndpoints,
+  repoConnections,
+  secrets,
+} from "@agrippa/db";
 import {
   appendRunEvent,
   InProcessEventBus,
@@ -18,6 +24,7 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
   let app: App;
   let db: Awaited<ReturnType<typeof freshTestDb>>;
   let admin: TestClient;
+  let viewer: TestClient;
   let projectId: string;
   let runId: string;
   let allEventsEndpointId: string;
@@ -36,6 +43,7 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
     db = await freshTestDb();
     app = createApp({ db, queue: fakeQueue, bus: new InProcessEventBus() });
     admin = await signUp(app, "Root", "root@example.com");
+    viewer = await signUp(app, "Vera", "vera@example.com");
 
     projectId = (
       await jsonOf<{ id: string }>(
@@ -67,6 +75,11 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
       }),
     );
     runId = submitted.runId;
+
+    await admin.request(`/api/v1/projects/${projectId}/members`, {
+      method: "POST",
+      json: { email: "vera@example.com", role: "viewer" },
+    });
   });
 
   it("creates nothing when no endpoints are configured", async () => {
@@ -193,5 +206,159 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
       .where(eq(notificationDeliveries.id, exhaustedId));
     expect(exhausted?.status).toBe("failed");
     expect(exhausted?.lastError).toBe("delivery attempts exhausted");
+  });
+
+  // ── Routes ──────────────────────────────────────────────────────────────────
+
+  const base = () => `/api/v1/projects/${projectId}/notifications`;
+
+  it("endpoint routes are admin-only", async () => {
+    expect((await viewer.request(`${base()}/endpoints`)).status).toBe(403);
+    expect(
+      (
+        await viewer.request(`${base()}/endpoints`, {
+          method: "POST",
+          json: {
+            kind: "generic",
+            name: "x",
+            url: "https://hooks.example.com/x",
+            secret: "12345678",
+          },
+        })
+      ).status,
+    ).toBe(403);
+  });
+
+  it("rejects a generic endpoint without a secret and a bad URL", async () => {
+    const noSecret = await admin.request(`${base()}/endpoints`, {
+      method: "POST",
+      json: { kind: "generic", name: "unsigned", url: "https://hooks.example.com/x" },
+    });
+    expect(noSecret.status).toBe(400);
+
+    const badUrl = await admin.request(`${base()}/endpoints`, {
+      method: "POST",
+      json: { kind: "feishu", name: "wrong host", url: "https://hooks.example.com/x" },
+    });
+    expect(badUrl.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(badUrl)).code).toBe("webhook_url_invalid");
+  });
+
+  it("creates a signed endpoint, masks the URL, and never echoes the secret", async () => {
+    const res = await admin.request(`${base()}/endpoints`, {
+      method: "POST",
+      json: {
+        kind: "generic",
+        name: "ci relay",
+        url: "https://hooks.example.com/agrippa/relay/0123456789abcdef",
+        secret: "super-secret-value",
+        events: ["checkpoint.required"],
+      },
+    });
+    expect(res.status).toBe(201);
+    const body = await jsonOf<Record<string, unknown>>(res);
+    expect(body.hasSecret).toBe(true);
+    expect(body.url).not.toContain("0123456789abcdef");
+    expect(JSON.stringify(body)).not.toContain("super-secret-value");
+
+    const [auditRow] = await db
+      .select()
+      .from(auditLogs)
+      .where(eq(auditLogs.action, "project.webhook.add"));
+    expect(auditRow).toBeDefined();
+  });
+
+  it("requires the secret again when the URL changes on a signed endpoint", async () => {
+    const list = await jsonOf<Array<{ id: string; name: string; hasSecret: boolean }>>(
+      await admin.request(`${base()}/endpoints`),
+    );
+    const signed = list.find((e) => e.name === "ci relay") as { id: string };
+    const urlOnly = await admin.request(`${base()}/endpoints/${signed.id}`, {
+      method: "PATCH",
+      json: { url: "https://evil.example.com/collector" },
+    });
+    expect(urlOnly.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(urlOnly)).code).toBe("webhook_secret_required");
+
+    const withSecret = await admin.request(`${base()}/endpoints/${signed.id}`, {
+      method: "PATCH",
+      json: { url: "https://hooks.example.com/agrippa/relay/v2", secret: "rotated-secret-1" },
+    });
+    expect(withSecret.status).toBe(200);
+  });
+
+  it("test-send creates and enqueues a delivery with no run", async () => {
+    const list = await jsonOf<Array<{ id: string; name: string }>>(
+      await admin.request(`${base()}/endpoints`),
+    );
+    const target = list.find((e) => e.name === "ci relay") as { id: string };
+    enqueued.length = 0;
+    const res = await admin.request(`${base()}/endpoints/${target.id}/test`, { method: "POST" });
+    expect(res.status).toBe(202);
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(res);
+    expect(enqueued).toContain(deliveryId);
+    const [row] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, deliveryId));
+    expect(row?.eventType).toBe("notification.test");
+    expect(row?.runId).toBeNull();
+    expect(row?.eventId).toBeNull();
+  });
+
+  it("lists deliveries with endpoint context and filters by status", async () => {
+    const rows = await jsonOf<Array<{ eventType: string; endpointName: string | null }>>(
+      await admin.request(`${base()}/deliveries?limit=100`),
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((r) => r.eventType === "notification.test")).toBe(true);
+    const failed = await jsonOf<Array<{ status: string }>>(
+      await admin.request(`${base()}/deliveries?status=failed`),
+    );
+    expect(failed.every((r) => r.status === "failed")).toBe(true);
+  });
+
+  it("retry is CAS: failed retries once, non-failed conflicts", async () => {
+    const [row] = await db
+      .select({ id: notificationDeliveries.id })
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.status, "failed"));
+    const failedId = row?.id as string;
+    enqueued.length = 0;
+    const ok = await admin.request(`${base()}/deliveries/${failedId}/retry`, { method: "POST" });
+    expect(ok.status).toBe(202);
+    expect(enqueued).toContain(failedId);
+    const [after] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, failedId));
+    expect(after?.status).toBe("pending");
+    expect(after?.attempts).toBe(0);
+
+    const again = await admin.request(`${base()}/deliveries/${failedId}/retry`, { method: "POST" });
+    expect(again.status).toBe(409);
+    expect((await jsonOf<{ code: string }>(again)).code).toBe("not_retryable");
+  });
+
+  it("deleting an endpoint removes its secret in the same transaction", async () => {
+    const list = await jsonOf<Array<{ id: string; name: string }>>(
+      await admin.request(`${base()}/endpoints`),
+    );
+    const target = list.find((e) => e.name === "ci relay") as { id: string };
+    const [before] = await db
+      .select({ secretRef: notificationEndpoints.secretRef })
+      .from(notificationEndpoints)
+      .where(eq(notificationEndpoints.id, target.id));
+    const secretRef = before?.secretRef as string;
+
+    const res = await admin.request(`${base()}/endpoints/${target.id}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    expect(await db.select().from(secrets).where(eq(secrets.id, secretRef))).toEqual([]);
+    expect(
+      await db
+        .select()
+        .from(notificationDeliveries)
+        .where(eq(notificationDeliveries.endpointId, target.id)),
+    ).toEqual([]); // deliveries cascade
   });
 });

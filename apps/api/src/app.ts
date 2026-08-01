@@ -13,6 +13,7 @@ import { executionRoutes } from "./routes/execution";
 import { governanceRoutes } from "./routes/governance";
 import { acceptInviteRoutes, invitationRoutes } from "./routes/invitations";
 import { meRoutes } from "./routes/me";
+import { notificationRoutes } from "./routes/notifications";
 import { projectRoutes } from "./routes/projects";
 import { registryRoutes } from "./routes/registry";
 import { templateRoutes, templateValidateRoute } from "./routes/templates";
@@ -78,6 +79,7 @@ export function createApp(deps: {
   v1.route("/templates", templateValidateRoute);
   v1.route("/templates", templateRoutes);
   v1.route("/projects", projectRoutes);
+  v1.route("/projects", notificationRoutes);
   v1.route("/invitations", invitationRoutes);
   v1.route("/", executionRoutes);
   v1.route("/", governanceRoutes);
