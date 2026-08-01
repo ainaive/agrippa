@@ -389,11 +389,7 @@ class RunEngine {
     postClaim?: () => Promise<boolean>;
   }): Promise<RunOutcome> {
     try {
-      await this.initialize(control?.postClaim);
-      control?.onStarted?.({
-        drain: () => this.triggerAbort("drained"),
-        lostLease: () => this.triggerAbort("lease_lost"),
-      });
+      await this.initialize(control);
       const outcome = await this.runFlow();
       return outcome;
     } catch (err) {
@@ -415,7 +411,10 @@ class RunEngine {
 
   // ── Setup ────────────────────────────────────────────────────────────────────
 
-  private async initialize(postClaim?: () => Promise<boolean>): Promise<void> {
+  private async initialize(control?: {
+    onStarted?: (handle: RunControlHandle) => void;
+    postClaim?: () => Promise<boolean>;
+  }): Promise<void> {
     const { run, db } = this;
 
     const [maxSeq] = await db
@@ -442,6 +441,16 @@ class RunEngine {
       // effects; the owner (or the lease sweeper) drives it
       throw new RunClaimLost();
     }
+    // Hand out the control handle the moment the claim exists: the caller's
+    // renewal loop keys on it, and the lease must stay renewable through the
+    // postClaim gate and the (potentially slow) reconstruction below — an
+    // unrenewable lease here would let the sweeper hand the run to another
+    // worker while this one blindly finishes initializing. This also lets
+    // SIGTERM's drain reach a run that is still initializing.
+    control?.onStarted?.({
+      drain: () => this.triggerAbort("drained"),
+      lostLease: () => this.triggerAbort("lease_lost"),
+    });
     // The caller's routing decision was made BEFORE the lease existed and the
     // deps were built from it. Now that the claim holds — and round-3's
     // lease-aware pin CAS guarantees the pin can no longer move — this is the
@@ -450,7 +459,7 @@ class RunEngine {
     // workspace checks): proceeding with wrong deps could finalize a resume
     // `workspace_lost` or dispatch a step to the wrong host. A false answer
     // drains: lease released, nothing finalized, caller re-enqueues.
-    if (postClaim && !(await postClaim())) {
+    if (control?.postClaim && !(await control.postClaim())) {
       throw new RunDrained("drained");
     }
     this.run.status = "running";

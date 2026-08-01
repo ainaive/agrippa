@@ -142,7 +142,9 @@ const adsOf = (executors: ExecutorAd[] | null | undefined): Map<string, Executor
  * 1. Affinity: a pinned runtime wins unconditionally (dead pin → the remote
  *    workspace manager's isIntact fails the resume `workspace_lost`).
  * 1b. Sticky placement: a STARTED run with no pin executed centrally and
- *    stays central — see the inline comment.
+ *    stays central — see the inline comment. The snapshot check here is the
+ *    fast path; the pin CAS's `started_at IS NULL` condition is the
+ *    enforcement (a stale snapshot must not be able to pin).
  * 2. Central-only STRICT (Decision 7): any resolved provider with a stored
  *    project credential (env- or project-policy), any project-policy provider
  *    at all, or any authorized MCP server with platform-held auth — platform
@@ -241,7 +243,7 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
   const chosen = eligible[0];
   if (!chosen) return { kind: "central" };
 
-  // Persist the affinity pin before the first dispatch. Two CAS conditions:
+  // Persist the affinity pin before the first dispatch. Three CAS conditions:
   //
   // - "still unpinned": routing runs before the execution lease, so a
   //   concurrent delivery of the same job can pin first — the loser must
@@ -255,6 +257,12 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
   //   side effects). Row-lock ordering makes this airtight: once a claim
   //   commits its lease, no later pin write can pass this WHERE, which is
   //   what lets the consumer's post-claim verify be a single read.
+  // - "never started": the snapshot check above screens the common case, but
+  //   only the DB can enforce sticky placement against a STALE snapshot — a
+  //   delivery that read startedAt=null before another worker executed a
+  //   whole central leg and released its lease would otherwise pin a
+  //   centrally-started run here, and the post-claim verify would bless the
+  //   poisoned pin because it IS the persisted one.
   const pinned = await db
     .update(runs)
     .set({ runtimeId: chosen.id })
@@ -263,6 +271,7 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
         eq(runs.id, run.id),
         sql`${runs.runtimeId} is null`,
         sql`(${runs.leaseExpiresAt} is null or ${runs.leaseExpiresAt} < now())`,
+        sql`${runs.startedAt} is null`,
       ),
     )
     .returning({ id: runs.id });

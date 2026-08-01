@@ -2450,13 +2450,22 @@ describe.skipIf(!dbUp)("execution lease (ADR-0017 Decision 4)", () => {
     const fx = await setupFixture();
     const { db, runId } = fx;
 
+    // The handle must register BEFORE the gate is awaited: the caller's
+    // renewal loop keys on it, and the lease has to stay renewable through a
+    // slow verification — otherwise a takeover window opens mid-initialize.
+    const order: string[] = [];
     // the gate answers false (the consumer's pin verification failing) —
     // the engine must release the claim as a drain with NO trace: no
     // startedAt, no run.started event, no step rows, nothing finalized
     const outcome = await executeRun(fx.makeDeps(HAPPY_SCRIPT), runId, {
-      postClaim: async () => false,
+      onStarted: () => order.push("handle"),
+      postClaim: async () => {
+        order.push("gate");
+        return false;
+      },
     });
     expect(outcome).toBe("drained");
+    expect(order).toEqual(["handle", "gate"]);
     const [run] = await db.select().from(runs).where(eq(runs.id, runId));
     expect(run?.leaseOwner).toBeNull();
     expect(run?.startedAt).toBeNull();
