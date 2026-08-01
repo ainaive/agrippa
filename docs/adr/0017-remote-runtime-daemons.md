@@ -1,6 +1,6 @@
 # ADR-0017: Remote Runtime Daemons — the Execution-Surface Split
 
-- Status: proposed · Date: 2026-08-01
+- Status: accepted · Date: 2026-08-01 (proposed and implemented the same day; revised pre-implementation after cross-ADR review)
 - Builds on ADR-0005 (the step seam is the split point); resolves the execution lease left as future work by ADR-0009; re-bases publication across the new boundary — **both** ADR-0011 (its addendum's publish-time drift guard) and ADR-0012 (snapshot reuse as the idempotency anchor) gain amendments at implementation time, see Decision 5; extends ADR-0013 with daemon-local auth and delivers the fleet-wide env-auth advertisement its Amendment 2 deferred as future work. Charted as Phase B of [docs/plan/m2-plan.md](../plan/m2-plan.md); motivation in [docs/plan/multica-analysis.md](../plan/multica-analysis.md).
 
 ## Context

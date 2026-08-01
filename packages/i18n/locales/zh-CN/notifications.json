@@ -23,6 +23,10 @@
     "title": "执行超时",
     "body": "{{projectName}} 中的执行 #{{runNumber}}「{{taskTitle}}」超出了时长限制。"
   },
+  "runtimeOffline": {
+    "title": "运行时离线",
+    "body": "正在执行 {{projectName}} 中任务 #{{runNumber}}「{{taskTitle}}」的远程运行时「{{runtimeName}}」已停止上报。"
+  },
   "test": {
     "title": "测试通知",
     "body": "这是 Agrippa 为项目 {{projectName}} 发送的测试通知。"

@@ -42,6 +42,12 @@ export const runtimes = pgTable(
       .references(() => users.id),
     createdAt: createdAtCol(),
     revokedAt: tstz("revoked_at"),
+    /**
+     * Offline-notification watermark: set when the fleet sweeper notifies
+     * that this runtime went silent; a later lastSeenAt re-arms it, so a
+     * runtime that recovers and dies again notifies exactly once per outage.
+     */
+    notifiedOfflineAt: tstz("notified_offline_at"),
   },
   (t) => [
     uniqueIndex("runtimes_token_prefix_uq").on(t.tokenPrefix),

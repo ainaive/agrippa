@@ -15,6 +15,9 @@ export const NOTIFIABLE_EVENT_TYPES = [
   "run.failed",
   "run.cancelled",
   "run.timed_out",
+  // appended to affected RUNNING runs when their pinned remote runtime goes
+  // silent (ADR-0017); the fleet sweeper writes it with offline dedupe
+  "runtime.offline",
 ] as const;
 export type NotifiableEventType = (typeof NOTIFIABLE_EVENT_TYPES)[number];
 

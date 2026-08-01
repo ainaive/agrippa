@@ -10,6 +10,7 @@ import {
   orchestrationTemplates,
   projects,
   providerCredentials,
+  runEvents,
   runSteps,
   runs,
   runtimes,
@@ -24,6 +25,7 @@ import type { StepExecutionRequest } from "@agrippa/executor-core";
 import { and, eq, sql } from "drizzle-orm";
 import { silentLogger } from "../engine/fakes";
 import { seedBuiltinTemplates } from "../seed-builtins";
+import { sweepOfflineRuntimes } from "./offline";
 import { RemoteExecutor } from "./remote-executor";
 import { routeRun } from "./routing";
 
@@ -442,5 +444,43 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
       .from(dispatches)
       .where(eq(dispatches.id, stale?.id as string));
     expect(staleAfter?.abortRequested).toBe(true);
+  });
+});
+
+describe.skipIf(!dbUp)("runtime-offline notifications (Track N deferral)", () => {
+  it("flags pinned running runs exactly once per outage", async () => {
+    const runtimeId = await newRuntime([{ id: "claude-agent-sdk" }], { seenSecondsAgo: 400 });
+    const run = await newRun({ runtimeId, status: "running" });
+    const bystander = await newRun({ runtimeId, status: "succeeded" });
+
+    const first = await sweepOfflineRuntimes(db);
+    expect(first).toEqual([run.id]);
+    const events = await db
+      .select()
+      .from(runEvents)
+      .where(and(eq(runEvents.runId, run.id), eq(runEvents.type, "runtime.offline")));
+    expect(events).toHaveLength(1);
+    expect((events[0]?.payload as { runtimeName?: string } | undefined)?.runtimeName).toBeDefined();
+    // terminal runs pinned to the same runtime are not flagged
+    const bystanderEvents = await db
+      .select()
+      .from(runEvents)
+      .where(and(eq(runEvents.runId, bystander.id), eq(runEvents.type, "runtime.offline")));
+    expect(bystanderEvents).toHaveLength(0);
+
+    // same outage, next sweep: the watermark suppresses a duplicate
+    expect(await sweepOfflineRuntimes(db)).toEqual([]);
+
+    // it recovered (seen after the notification) and died again → re-notify
+    await db
+      .update(runtimes)
+      .set({
+        lastSeenAt: sql`now() - interval '400 seconds'`,
+        notifiedOfflineAt: sql`now() - interval '500 seconds'`,
+      })
+      .where(eq(runtimes.id, runtimeId));
+    expect(await sweepOfflineRuntimes(db)).toEqual([run.id]);
+    // no cleanup: earlier transport tests left dispatches referencing other
+    // runtimes, and this is the file's final suite
   });
 });

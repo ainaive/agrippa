@@ -9,6 +9,7 @@ export * from "./engine/run-lifecycle";
 export * from "./expression";
 export * from "./notifications";
 export * from "./queue";
+export * from "./remote/offline";
 export * from "./remote/remote-deps";
 export * from "./remote/remote-executor";
 export * from "./remote/remote-workspace";

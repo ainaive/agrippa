@@ -31,6 +31,7 @@ import {
   InProcessEventBus,
   RedisEventBus,
   sweepNotificationDeliveries,
+  sweepOfflineRuntimes,
   sweepRunLeases,
 } from "@agrippa/orchestration";
 import { and, eq, lt, sql } from "drizzle-orm";
@@ -276,6 +277,13 @@ setInterval(async () => {
       deps.logger.warn(`run ${id}: lease expired (owner ${previousOwner ?? "unknown"})`);
     }
     for (const runId of orphaned) await queue.enqueueRun(runId);
+
+    // runtime-offline notifications (ADR-0017): a silent daemon flags its
+    // pinned running runs with a runtime.offline event; deliveries derive
+    // from the event, deduped per endpoint like every other notification
+    for (const runId of await sweepOfflineRuntimes(db)) {
+      await consumer.syncNotificationsBestEffort(runId);
+    }
 
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the
