@@ -21,7 +21,7 @@ BYO compute: a daemon on a user/team machine registers, reports which executors 
 - [ ] `/api/daemon/*` HTTP surface in `apps/api` (note: api must not import executors — the daemon executes; the api only brokers, consistent with `scripts/check-deps.ts`)
 - [ ] Daemon binary (Bun `--compile`) embedding the existing executor packages; detected-CLI capability reporting on register/heartbeat
 - [ ] Runtime registration + status in admin UI (extends Phase A's fleet page)
-- [ ] **Central publication preserved**: daemon uploads sha256'd patch/bundle evidence artifacts; server-side SCM (ADR-0011/0012) applies and pushes — no git credentials on the daemon
+- [ ] **Central publication preserved**: daemon uploads sha256'd patch evidence artifacts (patch only — agent commit history is intentionally not preserved, per ADR-0012); server-side SCM (ADR-0011/0012) applies and pushes — no platform git credentials on the daemon
 - Verify: FakeExecutor compliance suite green when driven through the daemon path; a live run executes on a laptop-hosted daemon while quota enforcement, audit rows, and `pr.open` all happen server-side
 
 ## Phase C — affinity + steering ☐
