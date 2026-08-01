@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
@@ -44,10 +44,6 @@ function makeReq(
 function makeCtx(signal?: AbortSignal): ExecutionContext {
   return {
     signal: signal ?? new AbortController().signal,
-    usage: { record: () => {} },
-    secrets: async () => {
-      throw new Error("unused");
-    },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   };
 }
@@ -317,5 +313,35 @@ describe("codex executor", () => {
     expect(seen.secret).toBeNull(); // platform master key never reaches the agent
     expect(seen.nodeOptions).toBeNull(); // no code injection via NODE_OPTIONS
     expect(seen.openai).toBe("sk-test-openai"); // provider auth passes through
+  });
+});
+
+describe("codex env-auth advertisement", () => {
+  const AUTH_ENV = ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_HOME"] as const;
+
+  it("detects an ordinary ChatGPT login via ~/.codex/auth.json", () => {
+    const saved = new Map(AUTH_ENV.map((k) => [k, process.env[k]]));
+    for (const k of AUTH_ENV) delete process.env[k];
+    try {
+      const home = mkdtempSync(path.join(tmpdir(), "codex-home-"));
+      workspaces.push(home);
+      const bare = mkdtempSync(path.join(tmpdir(), "codex-home-bare-"));
+      workspaces.push(bare);
+      mkdirSync(path.join(home, ".codex"), { recursive: true });
+      writeFileSync(path.join(home, ".codex", "auth.json"), "{}");
+
+      // a plain `codex login` (no env keys anywhere) must still advertise auth
+      const loggedIn = createCodexExecutor({ command: FAKE_CODEX, homeDir: home });
+      expect(loggedIn.envAuthProviders).toEqual(["openai"]);
+
+      const loggedOut = createCodexExecutor({ command: FAKE_CODEX, homeDir: bare });
+      expect(loggedOut.envAuthProviders).toEqual([]);
+    } finally {
+      for (const k of AUTH_ENV) {
+        const v = saved.get(k);
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 });

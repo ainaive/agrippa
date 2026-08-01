@@ -23,6 +23,10 @@
     "title": "Run timed out",
     "body": "Run #{{runNumber}} \"{{taskTitle}}\" in {{projectName}} exceeded its duration limit."
   },
+  "runtimeOffline": {
+    "title": "Runtime offline",
+    "body": "The remote runtime “{{runtimeName}}” executing run #{{runNumber}} “{{taskTitle}}” in {{projectName}} has stopped reporting."
+  },
   "test": {
     "title": "Test notification",
     "body": "This is a test notification from Agrippa for project {{projectName}}."

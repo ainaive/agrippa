@@ -49,7 +49,7 @@ import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
-import { liveExecutorIds } from "../lib/executors";
+import { liveWorkerExecutors } from "../lib/executors";
 import { assertQuotaHeadroom } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
@@ -87,13 +87,18 @@ async function resolveRunPlan(
   // every agent slot resolves to a concrete faber + executor (per-slot
   // provider-filtered models, checked against the executors the deployment's
   // workers actually registered) and freezes onto the run
+  const [projectRow] = await db
+    .select({ orgId: projects.orgId })
+    .from(projects)
+    .where(eq(projects.id, projectId));
+  const live = await liveWorkerExecutors(db, { orgId: projectRow?.orgId });
   const agentResolution = await resolveAgentBindings(
     db,
     projectId,
     compiled,
     { faberId: taskType.defaultFaberId, executorId: DEFAULT_EXECUTOR },
     overrides,
-    { registeredExecutors: await liveExecutorIds(db) },
+    { registeredExecutors: live.union, workerExecutorSets: live.sets },
   );
   return { resourceManifest, agentResolution };
 }

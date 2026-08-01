@@ -1,28 +1,28 @@
 # M2 Plan — Living Checklist
 
-> Theme: **distributed runtimes + automation** — *execution goes to where the code and credentials live; governance stays on the platform.* Motivated by the [Multica analysis](multica-analysis.md). Unlike M1's single branch, phases and tracks here are independently shippable: each gets its own `feat/*` branch + PR. Each lands only when the full verify gate (`bun run check` + `bun test` + `templates:validate` + `build`) is green **and** the phase's verify criterion passes. Status legend: ☐ todo · ◐ in progress · ☑ done
+> Theme: **distributed runtimes + automation** — *execution goes to where the code and credentials live; governance stays on the platform.* Motivated by the [Multica analysis](multica-analysis.md). Tracks T and N are independently shippable on their own `feat/*` branches; **Phases A and B ship together as one branch + PR** (`feat/m2-remote-runtimes` — A is B's prerequisite and they tell one story; decided 2026-08-01, superseding the per-phase-branch plan). Each lands only when the full verify gate (`bun run check` + `bun test` + `templates:validate` + `build`) is green **and** the phase's verify criterion passes. Status legend: ☐ todo · ◐ in progress · ☑ done
 
 Ordering: Track T and Track N are cheap and independent — they can land while the Phase B ADR is being designed. Phase A unblocks B; C builds on B.
 
-## Phase A — capability routing + fleet visibility ☐
+## Phase A — capability routing + fleet visibility ☑
 
 Small; removes the known routing wart and gives operators eyes on the fleet.
 
-- [ ] Route jobs by required executor using `executor_registrations` (`packages/db/src/schema/registry.ts:219`) — per-executor pg-boss queues or claim-time filtering, replacing today's bounce-until-capable-worker behavior ([03-executor-abstraction](../design/03-executor-abstraction.md) lists this as future work)
-- [ ] Admin UI: worker fleet health from `worker_heartbeats` + executor registrations (deferred since M1.6; [08-deployment](../design/08-deployment.md) notes it)
-- Verify: heterogeneous-fleet integration test — a codex-requiring run never lands on a codex-less worker; admin page shows live/stale workers and their executors
+- [x] Route jobs by required executor — **executor-set pg-boss queues** (`run.execute.<sorted ids>`; workers fetch only subsets of their own set via a manual fetch loop), replacing the bounce-until-capable-worker behavior; per-worker capability advertisements live on `worker_heartbeats` (`executor_registrations` is a deploy-skew dual-write until its post-merge drop), and submit gating adds a coverage check (a run's whole set must fit one worker)
+- [x] Admin UI: worker fleet health — **Admin → Workers** from `worker_heartbeats` advertisements (live/stale at 150 s on the database clock, executors + env-auth + version, 10 s polling)
+- Verify: ☑ heterogeneous-fleet integration test (`apps/worker/src/heterogeneous-fleet.integration.test.ts` — a claude-requiring run executes only on the worker registering it, zero `run.deferred` events); admin page shows live/stale workers and their executors
 
-## Phase B — remote runtime daemon (the headline) ☐
+## Phase B — remote runtime daemon (the headline) ☑
 
 BYO compute: a daemon on a user/team machine registers, reports which executors it has, and claims work over HTTP — while quotas, audit, and the git write-path stay server-side.
 
-- [ ] **ADR first**: daemon protocol + execution-surface split (register / heartbeat / long-poll claim / report events·usage·artifacts / complete·fail); resolves the ADR-0009 execution lease; defines the trust model (daemon reports, server enforces)
-- [ ] Daemon token scheme + per-run scoped tokens (also the groundwork for a future agent-facing CLI)
-- [ ] `/api/daemon/*` HTTP surface in `apps/api` (note: api must not import executors — the daemon executes; the api only brokers, consistent with `scripts/check-deps.ts`)
-- [ ] Daemon binary (Bun `--compile`) embedding the existing executor packages; detected-CLI capability reporting on register/heartbeat
-- [ ] Runtime registration + status in admin UI (extends Phase A's fleet page)
-- [ ] **Central publication preserved**: daemon uploads sha256'd patch/bundle evidence artifacts; server-side SCM (ADR-0011/0012) applies and pushes — no git credentials on the daemon
-- Verify: FakeExecutor compliance suite green when driven through the daemon path; a live run executes on a laptop-hosted daemon while quota enforcement, audit rows, and `pr.open` all happen server-side
+- [x] **ADR first**: [ADR-0017](../adr/0017-remote-runtime-daemons.md) (revised pre-implementation after cross-ADR review — amendment scope 0011+0012, strict secret routing, abort keepalive bound, lease/affinity carve-out); resolves the ADR-0009 execution lease (landed for central workers first, with real SIGTERM drain-abort)
+- [x] Daemon token scheme (`agrd_` prefix + hash + constant-time verify; the api-keys shape so Track T generalizes) — per-run scoped tokens deferred to the agent-facing-CLI track
+- [x] `/api/daemon/*` HTTP surface in `apps/api` (register / heartbeat / long-poll claim / event batches with abort piggyback / staged artifact upload hashed at receipt / complete·fail CAS)
+- [x] Daemon binary (`bun run build:daemon` → `dist/agrippa-daemon`) embedding the executor packages + shared `@agrippa/workspace` git core; detected-CLI capability reporting on register
+- [x] Runtime registration + status in admin UI (Remote runtimes section on the Workers page, one-time token display, revoke) + runtime-offline notifications (the Track N deferral)
+- [x] **Central publication preserved — and inverted**: the daemon uploads the sha256'd evidence patch; `git.push` now applies the *approved bytes* to a pristine server-side clone (ADR-0011/0012 amended) — platform git credentials never reach the daemon, which clones with its machine's own git auth
+- Verify: ☑ FakeExecutor compliance suite green through the remote transport (the suite runs twice, in-process and remote — the ADR acceptance gate); laptop smoke: issue a token in Admin → Workers, `bun run build:daemon`, run `./dist/agrippa-daemon --server <url> --token agrd_…` on a machine with a Claude login, submit a run needing an executor no central worker has — it dispatches to the daemon while quota rows, audit rows, and `pr.open` happen server-side *(live smoke on a deployed stack still outstanding, like Track N's)*
 
 ## Phase C — affinity + steering ☐
 
@@ -41,7 +41,7 @@ BYO compute: a daemon on a user/team machine registers, reports which executors 
 
 - [x] Outbound webhook on `waiting_approval` (+ new `checkpoint.expired` event) and terminal states; per-project endpoint config, secret-signed payloads, durable retryable delivery log
 - [x] Feishu/DingTalk card formatters (CN deployment; no email infrastructure)
-- [ ] Runtime-offline notifications — deferred to Phase A, which owns worker fleet health
+- [x] Runtime-offline notifications — landed with Phase B's fleet slice: a runtime silent past 5 min appends `runtime.offline` to its pinned running runs (once per outage via the `notified_offline_at` watermark), flowing through the standard delivery pipeline
 - Verify: an approval checkpoint posts a card with a deep link to the run within seconds; delivery failures are visible and retryable *(covered in tests; the live Feishu smoke on the deployed stack is still outstanding)*
 
 ## Craft checklist (adopt opportunistically, any branch)

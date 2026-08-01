@@ -17,6 +17,7 @@
     "@agrippa/orchestration": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "ioredis": "^5.11.1",
-    "pg-boss": "^12.26.1"
+    "pg-boss": "^12.26.1",
+    "@agrippa/workspace": "workspace:*"
   }
 }

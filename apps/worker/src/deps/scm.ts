@@ -1,11 +1,12 @@
-import type { Db } from "@agrippa/db";
+import { type Db, dispatches, runs } from "@agrippa/db";
 import type { PullRequestSpec, PushResult, PushSpec, ScmService } from "@agrippa/orchestration";
+import { applyApprovedPatch, platformGitDirFor, workspaceIntact } from "@agrippa/workspace";
+import { and, desc, eq } from "drizzle-orm";
 import {
   credentialedUrl,
   git,
   loadRepoConnection,
   platformBaseSha,
-  platformGit,
   stagePlatformSnapshot,
   workspaceDirFor,
 } from "./workspace";
@@ -70,75 +71,26 @@ export class GitScmService implements ScmService {
   constructor(private readonly db: Db) {}
 
   async createBranch(runId: string, name: string): Promise<void> {
-    // This is the last platform operation against agent-visible .git and runs
-    // before any agent step. The sidecar ref is the idempotency anchor used by
-    // the verified publisher later.
+    // Daemon-routed runs have no local checkout: the engine still records
+    // runs.work_branch, and the daemon materializes it (`checkout -B`) from
+    // the dispatch payload. Publication no longer needs a sidecar ref anchor
+    // (ADR-0017 Decision 5), so remotely there is nothing to do here.
+    if (!(await workspaceIntact(runId))) return;
+    // Central runs: the last platform operation against agent-visible .git,
+    // before any agent step — the agent is told to commit to this branch.
     await git(["checkout", "-B", name], workspaceDirFor(runId));
-    const baseSha = await platformBaseSha(runId);
-    if (!baseSha) throw new Error("trusted platform git base is missing");
-    await platformGit(runId, ["update-ref", `refs/heads/${name}`, baseSha]);
   }
 
   async push(runId: string, spec: PushSpec): Promise<PushResult> {
-    const snapshot = await stagePlatformSnapshot(runId);
-    if (spec.expectedPatch !== undefined && snapshot.patch !== spec.expectedPatch) {
-      return { status: "evidence_mismatch" };
-    }
-    if (snapshot.patch.length === 0) {
-      throw new Error("nothing to publish — the approved workspace snapshot is empty");
-    }
-
-    await platformGit(runId, ["check-ref-format", "--branch", spec.branch]);
-    const branchRef = `refs/heads/${spec.branch}`;
-    const existing = await platformGit(runId, ["rev-parse", "--verify", branchRef])
-      .then((out) => out.trim())
-      .catch(() => null);
-
-    let commitSha: string;
-    if (existing && existing !== snapshot.baseSha) {
-      const [tree, parent] = await Promise.all([
-        platformGit(runId, ["rev-parse", `${existing}^{tree}`]).then((out) => out.trim()),
-        platformGit(runId, ["rev-parse", `${existing}^`]).then((out) => out.trim()),
-      ]);
-      if (tree !== snapshot.treeSha || parent !== snapshot.baseSha) {
-        throw new Error("platform publish ref does not match the approved snapshot");
-      }
-      commitSha = existing;
-    } else {
-      // dates pinned to the base commit: with identity, tree, parent, and
-      // message all fixed, the snapshot commit SHA is fully deterministic —
-      // any retry or racer reproduces the identical commit, so the
-      // expected-old update-ref below is a true CAS between equals
-      const baseDate = (
-        await platformGit(runId, ["show", "-s", "--format=%cI", snapshot.baseSha])
-      ).trim();
-      commitSha = (
-        await platformGit(
-          runId,
-          [
-            "commit-tree",
-            snapshot.treeSha,
-            "-p",
-            snapshot.baseSha,
-            "-m",
-            "chore: publish approved Agrippa changes",
-          ],
-          {
-            GIT_AUTHOR_NAME: "Agrippa",
-            GIT_AUTHOR_EMAIL: "agrippa@agrippa.local",
-            GIT_AUTHOR_DATE: baseDate,
-            GIT_COMMITTER_NAME: "Agrippa",
-            GIT_COMMITTER_EMAIL: "agrippa@agrippa.local",
-            GIT_COMMITTER_DATE: baseDate,
-          },
-        )
-      ).trim();
-      await platformGit(runId, [
-        "update-ref",
-        branchRef,
-        commitSha,
-        existing ?? "0000000000000000000000000000000000000000",
-      ]);
+    // Publication inversion (ADR-0017 Decision 5, amending ADR-0011/0012):
+    // apply the APPROVED patch to a pristine clone of the pinned base and
+    // push the deterministic commit. The engine verified the evidence bytes
+    // (store-time sha256) and passes them as expectedPatch — no workspace
+    // state participates, so post-approval drift is structurally irrelevant
+    // and evidence_mismatch cannot occur at this layer anymore.
+    const patch = spec.expectedPatch ?? (await stagePlatformSnapshot(runId)).patch;
+    if (patch.length === 0) {
+      throw new Error("nothing to publish — the approved patch is empty");
     }
 
     const { connection, token } = await loadRepoConnection(this.db, spec.projectId, spec.repo);
@@ -146,8 +98,76 @@ export class GitScmService implements ScmService {
       connection.provider === "gitcode" && token
         ? await gitcodeCredentialedUrl(connection.url, token)
         : credentialedUrl(connection.url, token);
-    await platformGit(runId, ["push", pushUrl, `${branchRef}:${branchRef}`]);
+
+    // Base + object source: central runs read the platform sidecar (pristine
+    // by ADR-0012; refs/agrippa/base always resolves there); daemon runs use
+    // the SERVER-pinned base recorded at checkout (ls-remote, before any
+    // daemon involvement) — never the dispatch report. A daemon-chosen base
+    // could be any other reachable commit, and a benign patch applying
+    // cleanly on top would smuggle that commit's contents past the approval.
+    const sidecarBase = await platformBaseSha(runId);
+    let fetchSource: string;
+    let fetchRef: string;
+    let baseSha: string;
+    if (sidecarBase) {
+      fetchSource = platformGitDirFor(runId);
+      fetchRef = "refs/agrippa/base";
+      baseSha = sidecarBase;
+    } else {
+      const pinnedBase = await this.pinnedBaseSha(runId);
+      if (!pinnedBase) {
+        throw new Error("no trusted base for publication (no sidecar, no server-pinned base)");
+      }
+      // cross-check only: the daemon reported what it actually checked out;
+      // a mismatch means it never materialized the pinned base — fail loudly
+      // now instead of publishing a patch applied against something else
+      const reported = await this.dispatchBaseSha(runId);
+      if (reported && reported !== pinnedBase) {
+        throw new Error(
+          `daemon-reported base ${reported} does not match the server-pinned base ${pinnedBase}`,
+        );
+      }
+      fetchSource = pushUrl;
+      fetchRef = pinnedBase;
+      baseSha = pinnedBase;
+    }
+
+    const { commitSha } = await applyApprovedPatch({
+      fetchSource,
+      fetchRef,
+      baseSha,
+      branch: spec.branch,
+      patch,
+      pushUrl,
+    });
     return { status: "pushed", commitSha };
+  }
+
+  /** The base the SERVER pinned at checkout (runs.workspace_ref, remote runs). */
+  private async pinnedBaseSha(runId: string): Promise<string | null> {
+    const [run] = await this.db
+      .select({ workspaceRef: runs.workspaceRef })
+      .from(runs)
+      .where(eq(runs.id, runId));
+    if (!run?.workspaceRef) return null;
+    try {
+      const spec = JSON.parse(run.workspaceRef) as { baseSha?: string };
+      return spec.baseSha ?? null;
+    } catch {
+      return null; // central-format workspaceRef
+    }
+  }
+
+  /** The clone base the daemon reported when it completed a dispatch. */
+  private async dispatchBaseSha(runId: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({ result: dispatches.result })
+      .from(dispatches)
+      .where(and(eq(dispatches.runId, runId), eq(dispatches.status, "completed")))
+      .orderBy(desc(dispatches.finishedAt))
+      .limit(1);
+    const result = row?.result as { baseSha?: string } | null | undefined;
+    return result?.baseSha ?? null;
   }
 
   async openPullRequest(_runId: string, spec: PullRequestSpec): Promise<{ url: string }> {

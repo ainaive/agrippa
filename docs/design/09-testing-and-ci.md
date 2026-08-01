@@ -31,6 +31,8 @@ Runs against `docker-compose.dev.yml` Postgres. Scenarios, each asserting both `
 
 This suite doubles as the executor compliance spec (any future executor must pass it via an adapter harness).
 
+**Transport dimension (ADR-0017 acceptance gate)**: the compliance suite and the agrippa/v2 suite each run **twice** — in-process, and through `RemoteExecutor` + an in-process daemon loop (`packages/orchestration/src/remote/test-daemon-loop.ts`) that claims dispatches off the real tables, drives the *same* `FakeExecutor` instances the tests introspect, and writes events through the identical dedupe-insert path. This proves the transport semantics (event ordering, abort delivery, terminal synthesis) without HTTP — the daemon routes have their own API integration tests. Three host-crash simulations are skipped in remote mode by design: an executor throw on a daemon is a *reported* failure (the daemon survived to `fail()` the dispatch), and the remote analog of a host death — the daemon vanishing — is covered by the deadman test in `remote.integration.test.ts`. Lease semantics (claim CAS, renewal, expiry sweep, drain) have their own describe in the same file.
+
 ### API integration (Hono `app.request()` × real Postgres/Redis)
 
 Auth flows, RBAC allow/deny matrix per role × endpoint class, transactional task submission (run + job atomicity), SSE replay from `Last-Event-ID` (deduped, strictly increasing seq), a cross-project `repoConnectionId` refused at submit, grants gating submission, quota rejection at submit, audit rows on every mutation.

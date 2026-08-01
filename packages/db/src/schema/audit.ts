@@ -4,6 +4,7 @@ import { apiKeys } from "./api-keys";
 import { users } from "./auth";
 import { orgs } from "./orgs";
 import { projects } from "./projects";
+import { runtimes } from "./runtimes";
 
 export const auditLogs = pgTable(
   "audit_logs",
@@ -15,6 +16,8 @@ export const auditLogs = pgTable(
     projectId: uuid("project_id").references(() => projects.id),
     actorUserId: uuid("actor_user_id").references(() => users.id),
     actorApiKeyId: uuid("actor_api_key_id").references(() => apiKeys.id),
+    // daemon-authenticated requests (ADR-0017) have a runtime, not a user
+    actorRuntimeId: uuid("actor_runtime_id").references(() => runtimes.id),
     action: text("action").notNull(), // 'project.member.add', 'template.publish', ...
     resourceType: text("resource_type").notNull(),
     resourceId: uuid("resource_id"),

@@ -1,3 +1,4 @@
+export * from "./artifact-store";
 export * from "./compile";
 export * from "./engine/bus";
 export * from "./engine/deps";
@@ -8,6 +9,11 @@ export * from "./engine/run-lifecycle";
 export * from "./expression";
 export * from "./notifications";
 export * from "./queue";
+export * from "./remote/offline";
+export * from "./remote/remote-deps";
+export * from "./remote/remote-executor";
+export * from "./remote/remote-workspace";
+export * from "./remote/routing";
 export * from "./resolve";
 export * from "./seed-builtins";
 export * from "./template-schema";

@@ -1,0 +1,1 @@
+ALTER TABLE "runtimes" ADD COLUMN "notified_offline_at" timestamp with time zone;

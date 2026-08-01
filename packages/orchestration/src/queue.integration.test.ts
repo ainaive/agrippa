@@ -34,7 +34,9 @@ describe.skipIf(!dbUp)("notification queue dedupe (exclusive policy)", () => {
   };
 
   it("converges the queue to exclusive and keeps one live job per delivery", async () => {
-    queue = await createRunQueue(TEST_DATABASE_URL);
+    queue = await createRunQueue(TEST_DATABASE_URL, {
+      resolveRunExecutors: async () => ["fake"],
+    });
 
     const [queueRow] = (await db.execute(
       sql`select policy from pgboss.queue where name = ${QUEUE_NOTIFICATION_DELIVER}`,

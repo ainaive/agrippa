@@ -221,6 +221,13 @@ export const executorRegistrations = pgTable("executor_registrations", {
   registeredAt: tstz("registered_at").notNull().defaultNow(),
 });
 
+/** What one worker advertises for one executor it constructed at boot. */
+export type WorkerExecutorAd = {
+  id: string;
+  /** CLI logins this worker's env can authenticate (ADR-0013 amendment 2). */
+  envAuthProviders?: string[];
+};
+
 /**
  * One row per worker container (hostname inside compose = container id) — the
  * first slice of the per-worker heartbeat row deferred past M1. Registrations
@@ -228,10 +235,18 @@ export const executorRegistrations = pgTable("executor_registrations", {
  * this table can. `consumersReadyAt` is written only after boss.work() has
  * returned for every consumer, which is what deploy verification requires —
  * a worker that registers and then wedges in consumer setup never writes it.
+ *
+ * `executors` is the per-worker capability advertisement (M2 Phase A): the
+ * API's submit gating and the fleet page read it, and jobs are routed by
+ * executor-set queues that assume a run's set fits on one worker. An empty
+ * list means a pre-advertisement worker (deploy skew) — consumers treat the
+ * fleet as unknown then, not as empty.
  */
 export const workerHeartbeats = pgTable("worker_heartbeats", {
   containerId: text("container_id").primaryKey(),
   startedAt: tstz("started_at").notNull().defaultNow(),
   consumersReadyAt: tstz("consumers_ready_at"),
   heartbeatAt: tstz("heartbeat_at").notNull().defaultNow(),
+  executors: jsonb("executors").$type<WorkerExecutorAd[]>().notNull().default([]),
+  version: text("version"),
 });

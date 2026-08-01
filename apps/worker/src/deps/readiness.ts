@@ -1,5 +1,16 @@
-import { type Db, workerHeartbeats } from "@agrippa/db";
+import { type Db, type WorkerExecutorAd, workerHeartbeats } from "@agrippa/db";
 import { lt, sql } from "drizzle-orm";
+
+/**
+ * What this worker advertises alongside its liveness: the executors it
+ * actually constructed (with their env-auth providers) and its build version.
+ * Written at boot and refreshed on every heartbeat so the API's submit gating
+ * and the fleet page see per-worker capability, not just the union.
+ */
+export type WorkerAdvertisement = {
+  executors: WorkerExecutorAd[];
+  version: string | null;
+};
 
 /**
  * Per-container liveness rows (issue #15). Registrations are global per
@@ -29,13 +40,29 @@ export const WORKER_SCHEMA_WAIT_MS = 300_000;
  * container surrenders the previous boot's readiness, so a boot that wedges
  * anywhere in consumer setup cannot coast on a stale consumers_ready_at.
  */
-export async function markBootStarted(db: Db, containerId: string): Promise<void> {
+export async function markBootStarted(
+  db: Db,
+  containerId: string,
+  ad: WorkerAdvertisement,
+): Promise<void> {
   await db
     .insert(workerHeartbeats)
-    .values({ containerId, startedAt: DB_NOW, heartbeatAt: DB_NOW })
+    .values({
+      containerId,
+      startedAt: DB_NOW,
+      heartbeatAt: DB_NOW,
+      executors: ad.executors,
+      version: ad.version,
+    })
     .onConflictDoUpdate({
       target: workerHeartbeats.containerId,
-      set: { startedAt: DB_NOW, consumersReadyAt: null, heartbeatAt: DB_NOW },
+      set: {
+        startedAt: DB_NOW,
+        consumersReadyAt: null,
+        heartbeatAt: DB_NOW,
+        executors: ad.executors,
+        version: ad.version,
+      },
     });
 }
 
@@ -59,13 +86,27 @@ export async function markConsumersReady(db: Db, containerId: string): Promise<v
     .where(lt(workerHeartbeats.heartbeatAt, sql`now() - interval '7 days'`));
 }
 
-/** Sweeper-interval liveness bump; never touches consumersReadyAt. */
-export async function touchWorkerHeartbeat(db: Db, containerId: string): Promise<void> {
+/**
+ * Sweeper-interval liveness bump; never touches consumersReadyAt. Re-writes
+ * the advertisement so a row pruned or reset between beats converges back to
+ * the worker's actual capability set.
+ */
+export async function touchWorkerHeartbeat(
+  db: Db,
+  containerId: string,
+  ad: WorkerAdvertisement,
+): Promise<void> {
   await db
     .insert(workerHeartbeats)
-    .values({ containerId, startedAt: DB_NOW, heartbeatAt: DB_NOW })
+    .values({
+      containerId,
+      startedAt: DB_NOW,
+      heartbeatAt: DB_NOW,
+      executors: ad.executors,
+      version: ad.version,
+    })
     .onConflictDoUpdate({
       target: workerHeartbeats.containerId,
-      set: { heartbeatAt: DB_NOW },
+      set: { heartbeatAt: DB_NOW, executors: ad.executors, version: ad.version },
     });
 }

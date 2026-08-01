@@ -36,11 +36,16 @@ export interface WorkspaceManager {
 
 /**
  * Deterministic provider-credential misconfiguration (e.g. a base URL whose
- * host resolves to private address space). The engine converts this into a
- * run failure instead of letting pg-boss retry a config that cannot work.
+ * host resolves to private address space) — or, with an explicit code, any
+ * credential condition that must fail the run rather than retry (a project
+ * credential resolving for a daemon-routed run, ADR-0017 Decision 7). The
+ * engine converts this into a run failure with the carried code.
  */
 export class ProviderCredentialError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code: string = "base_url_invalid",
+  ) {
     super(message);
     this.name = "ProviderCredentialError";
   }
@@ -104,7 +109,7 @@ export interface ArtifactStore {
     runId: string,
     key: string,
     kind: ArtifactKind,
-    source: { inline?: unknown; path?: string },
+    source: { inline?: unknown; path?: string; staged?: string },
     workspaceDir: string,
     opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact>;
@@ -158,6 +163,14 @@ export type EngineDeps = {
   /** Required for templates using git.branch / git.push / pr.open steps. */
   scm?: ScmService;
   logger: Logger;
+  /**
+   * Execution-lease identity (ADR-0017 Decision 4). Workers pass their
+   * container id so renewal and release can target every run they hold.
+   * Absent (tests, ad-hoc callers), each engine claims under a random
+   * per-instance owner — leases still serialize execution, only cross-process
+   * renewal is unavailable.
+   */
+  lease?: { owner: string; ttlMs?: number };
 };
 
 export type RunOutcome =
@@ -166,4 +179,19 @@ export type RunOutcome =
   | "cancelled"
   | "timed_out"
   | "waiting_approval"
+  /** Deliberately released mid-run (drain / lost lease): nothing finalized, resume elsewhere. */
+  | "drained"
   | "already_terminal";
+
+/**
+ * Handle to a live engine, surfaced through executeRun's `onStarted` callback
+ * once the run claim succeeds. Both triggers abort in-flight executor work
+ * WITHOUT finalizing the run — the in-flight step is recorded like a crash so
+ * the next owner resumes step-granularly with the executor session id.
+ */
+export type RunControlHandle = {
+  /** Graceful shutdown: stop this run here; it re-enqueues immediately. */
+  drain(): void;
+  /** Lease renewal failed: another owner may exist; stop without re-enqueue. */
+  lostLease(): void;
+};

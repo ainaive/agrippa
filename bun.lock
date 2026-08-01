@@ -36,6 +36,17 @@
         "yaml": "^2.9.0",
       },
     },
+    "apps/daemon": {
+      "name": "@agrippa/daemon",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agrippa/core": "workspace:*",
+        "@agrippa/executor-claude": "workspace:*",
+        "@agrippa/executor-codex": "workspace:*",
+        "@agrippa/executor-core": "workspace:*",
+        "@agrippa/workspace": "workspace:*",
+      },
+    },
     "apps/web": {
       "name": "@agrippa/web",
       "version": "0.0.0",
@@ -84,6 +95,7 @@
         "@agrippa/executor-core": "workspace:*",
         "@agrippa/i18n": "workspace:*",
         "@agrippa/orchestration": "workspace:*",
+        "@agrippa/workspace": "workspace:*",
         "drizzle-orm": "^0.45.2",
         "ioredis": "^5.11.1",
         "pg-boss": "^12.26.1",
@@ -146,11 +158,20 @@
         "@agrippa/core": "workspace:*",
         "@agrippa/db": "workspace:*",
         "@agrippa/executor-core": "workspace:*",
+        "@agrippa/workspace": "workspace:*",
         "drizzle-orm": "^0.45.2",
         "ioredis": "^5.11.1",
         "pg-boss": "^12.26.1",
         "yaml": "^2.9.0",
         "zod": "^4.4.3",
+      },
+    },
+    "packages/workspace": {
+      "name": "@agrippa/workspace",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agrippa/core": "workspace:*",
+        "@agrippa/executor-core": "workspace:*",
       },
     },
   },
@@ -160,6 +181,8 @@
     "@agrippa/api-client": ["@agrippa/api-client@workspace:packages/api-client"],
 
     "@agrippa/core": ["@agrippa/core@workspace:packages/core"],
+
+    "@agrippa/daemon": ["@agrippa/daemon@workspace:apps/daemon"],
 
     "@agrippa/db": ["@agrippa/db@workspace:packages/db"],
 
@@ -176,6 +199,8 @@
     "@agrippa/web": ["@agrippa/web@workspace:apps/web"],
 
     "@agrippa/worker": ["@agrippa/worker@workspace:apps/worker"],
+
+    "@agrippa/workspace": ["@agrippa/workspace@workspace:packages/workspace"],
 
     "@anthropic-ai/claude-agent-sdk": ["@anthropic-ai/claude-agent-sdk@0.3.212", "", { "optionalDependencies": { "@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.212", "@anthropic-ai/claude-agent-sdk-darwin-x64": "0.3.212", "@anthropic-ai/claude-agent-sdk-linux-arm64": "0.3.212", "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": "0.3.212", "@anthropic-ai/claude-agent-sdk-linux-x64": "0.3.212", "@anthropic-ai/claude-agent-sdk-linux-x64-musl": "0.3.212", "@anthropic-ai/claude-agent-sdk-win32-arm64": "0.3.212", "@anthropic-ai/claude-agent-sdk-win32-x64": "0.3.212" }, "peerDependencies": { "@anthropic-ai/sdk": ">=0.93.0", "@modelcontextprotocol/sdk": "^1.29.0", "zod": "^4.0.0" } }, "sha512-BSowuUv7+EoeBo36oZbSox8uyY3dqyMLFolAoMyKW3uqAfZLDV8MpvjDsv+WDE+OGCkuWK60JIqfhyPhctGTgg=="],
 

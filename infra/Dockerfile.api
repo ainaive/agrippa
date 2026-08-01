@@ -15,6 +15,11 @@ COPY --from=build /app /app
 ENV NODE_ENV=production
 ENV AGRIPPA_WEB_DIST=/app/apps/web/dist
 ENV AGRIPPA_TEMPLATES_DIR=/app/templates
+# Must match Dockerfile.worker: the api STAGES daemon artifact uploads here
+# (ADR-0017) and the worker ADOPTS them from the same shared volume — without
+# this the store defaults to container-local /tmp and uploads vanish across
+# the container boundary.
+ENV ARTIFACT_STORAGE_ROOT=/work/artifacts
 
 # Run as the non-root `bun` user, and own the shared artifact store so a freshly
 # created `artifacts` volume is bun-owned whichever service initializes it first

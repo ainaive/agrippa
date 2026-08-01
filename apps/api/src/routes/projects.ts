@@ -40,7 +40,7 @@ import { and, count, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
-import { liveExecutorIds } from "../lib/executors";
+import { liveWorkerExecutors } from "../lib/executors";
 import { projectUsage } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { requireProjectRole } from "../middleware/rbac";
@@ -633,12 +633,17 @@ export const projectRoutes = new Hono<AppEnv>()
     const compiled = upgradeCompiledTemplate(version.compiled);
     // the deployment default executor — same as the catalog route and submit
     const defaultExecutor = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
+    const [projectRow] = await db
+      .select({ orgId: projects.orgId })
+      .from(projects)
+      .where(eq(projects.id, projectId));
+    const live = await liveWorkerExecutors(db, { orgId: projectRow?.orgId });
     const result = await preflightSubmit(
       db,
       projectId,
       compiled,
       { faberId: taskType.defaultFaberId, executorId: defaultExecutor },
-      { registeredExecutors: await liveExecutorIds(db) },
+      { registeredExecutors: live.union, workerExecutorSets: live.sets },
     );
     return c.json(result);
   })

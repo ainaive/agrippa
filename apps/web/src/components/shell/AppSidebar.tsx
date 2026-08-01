@@ -7,6 +7,7 @@ import {
   HammerIcon,
   PlugIcon,
   ScrollTextIcon,
+  ServerIcon,
   UserPlusIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -162,6 +163,7 @@ const adminNav = [
   { key: "models", icon: CpuIcon, to: "/admin/models" },
   { key: "skills", icon: WrenchIcon, to: "/admin/skills" },
   { key: "mcp", icon: PlugIcon, to: "/admin/mcp-servers" },
+  { key: "workers", icon: ServerIcon, to: "/admin/workers" },
   { key: "members", icon: UserPlusIcon, to: "/admin/members" },
   { key: "audit", icon: ScrollTextIcon, to: "/admin/audit" },
 ];

@@ -9,8 +9,6 @@ import { buildQueryArgs, createClaudeExecutor } from "./executor";
 function makeCtx(signal?: AbortSignal): ExecutionContext {
   return {
     signal: signal ?? new AbortController().signal,
-    usage: { record: () => {} },
-    secrets: async () => "",
     logger: { info: () => {}, warn: () => {}, error: () => {} },
   };
 }

@@ -11,6 +11,7 @@ import {
   scenarios,
   taskTypes,
   templateVersions,
+  workerHeartbeats,
 } from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import {
@@ -360,6 +361,44 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
     expect(run?.executorId).toBe("fake"); // primary slot denormalization
     // model resolution is slot-keyed now
     expect(Object.keys(run?.modelResolution ?? {}).sort()).toEqual(["implementer", "reviewer"]);
+  });
+
+  it("rejects a run no single worker covers (executor-set routing gate)", async () => {
+    // Jobs route to ONE worker's executor-set queue, so union availability is
+    // not enough. Legacy registrations (seeded above) still carry 'fake' in
+    // the union — the per-slot check passes — but neither advertising worker
+    // has it, so the set {fake} fits no worker and the run could never be
+    // claimed.
+    await db.insert(workerHeartbeats).values([
+      { containerId: "w-cov-1", executors: [{ id: "claude-agent-sdk" }] },
+      { containerId: "w-cov-2", executors: [{ id: "codex-cli" }] },
+    ]);
+    const uncovered = await member.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId,
+        title: "Uncoverable",
+        params: { requirement: "Add dark mode", repo: { repoConnectionId } },
+      },
+    });
+    expect(uncovered.status).toBe(400);
+    expect((await jsonOf<{ code: string }>(uncovered)).code).toBe("executor_unavailable");
+
+    // a worker that advertises the whole set makes the same submit pass
+    await db
+      .insert(workerHeartbeats)
+      .values({ containerId: "w-cov-3", executors: [{ id: "fake" }] });
+    const covered = await member.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId,
+        title: "Coverable",
+        params: { requirement: "Add dark mode", repo: { repoConnectionId } },
+      },
+    });
+    expect(covered.status).toBe(202);
+
+    await db.delete(workerHeartbeats); // leave fleet state clean for later tests
   });
 
   it("pauses at the input checkpoint and enforces respond kind + RBAC + answers", async () => {

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
   ARTIFACT_DIR,
@@ -23,6 +23,8 @@ const KILL_GRACE_MS = 5_000;
 export type CodexExecutorOptions = {
   /** Command prefix for the CLI (tests point this at a fixture script). */
   command?: string[];
+  /** Home directory probed for ~/.codex/auth.json (tests override). */
+  homeDir?: string;
 };
 
 /**
@@ -159,8 +161,15 @@ function* collectStepArtifacts(
  */
 export function createCodexExecutor(options: CodexExecutorOptions = {}): Executor {
   const command = options.command ?? ["codex"];
+  // An ordinary `codex login` (ChatGPT auth) writes ~/.codex/auth.json with
+  // no env var at all — the primary auth story on daemon machines — so the
+  // advertisement must probe the auth file, not just env keys/CODEX_HOME.
+  const codexHome = process.env.CODEX_HOME ?? path.join(options.homeDir ?? homedir(), ".codex");
   const envAuth = Boolean(
-    process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || process.env.CODEX_HOME,
+    process.env.OPENAI_API_KEY ||
+      process.env.CODEX_API_KEY ||
+      process.env.CODEX_HOME ||
+      existsSync(path.join(codexHome, "auth.json")),
   );
   return {
     id: "codex-cli",

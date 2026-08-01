@@ -17,7 +17,8 @@
     "templates:seed": "bun scripts/seed-templates.ts",
     "templates:validate": "bun scripts/validate-templates.ts",
     "build": "bun --filter '@agrippa/web' build",
-    "dev": "bun --filter '*' dev"
+    "dev": "bun --filter '*' dev",
+    "build:daemon": "bun scripts/build-daemon.ts"
   },
   "devDependencies": {
     "@agrippa/db": "workspace:*",

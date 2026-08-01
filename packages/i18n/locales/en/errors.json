@@ -1,5 +1,10 @@
 {
   "unauthorized": "Authentication required",
+  "daemon_token_invalid": "Invalid or revoked daemon token",
+  "dispatch_not_live": "Dispatch is not claimed or already terminated",
+  "dispatch_batch_too_large": "Event batch exceeds the size bound",
+  "artifact_too_large": "Artifact exceeds the size limit",
+  "provider_credential_unroutable": "This provider's project credential cannot be used on a remote runtime",
   "forbidden": "Insufficient permissions",
   "not_found": "Resource not found",
   "validation_failed": "Validation failed",

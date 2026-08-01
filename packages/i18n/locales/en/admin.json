@@ -77,6 +77,33 @@
     "authed": "auth configured",
     "noAuth": "no auth"
   },
+  "workers": {
+    "title": "Workers",
+    "hint": "Every worker container's liveness and the executors it registered — jobs are routed by executor set, so a run only lands where its whole set fits.",
+    "empty": "No workers have reported yet.",
+    "emptyHint": "A worker writes its heartbeat row at boot and refreshes it every minute.",
+    "lastBeat": "Last heartbeat {{time}}",
+    "notReady": "consumers not ready",
+    "status": {
+      "live": "Live",
+      "stale": "Stale"
+    },
+    "runtimes": {
+      "title": "Remote runtimes",
+      "hint": "Daemons on team machines that execute agent work with their own logins — quotas, approvals, audit, and git publication stay on the platform.",
+      "namePlaceholder": "Runtime name, e.g. lin-dev-laptop",
+      "create": "Issue token",
+      "tokenOnce": "Token for “{{name}}” — shown only once, store it now.",
+      "copied": "Token copied",
+      "empty": "No remote runtimes yet.",
+      "emptyHint": "Issue a token and run the agrippa-daemon binary with it to bring your own compute.",
+      "lastSeen": "Last seen {{time}}",
+      "neverConnected": "Never connected",
+      "offline": "Offline",
+      "revoked": "Revoked",
+      "revoke": "Revoke token"
+    }
+  },
   "audit": {
     "title": "Audit log",
     "hint": "Every mutation in the system — who did what, where, and when.",

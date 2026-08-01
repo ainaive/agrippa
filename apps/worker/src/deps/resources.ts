@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
   type Db,
@@ -13,28 +13,17 @@ import {
 import { type ResolvedMcpServer, type ResolvedSkill, realContained } from "@agrippa/executor-core";
 import type { ResourceMaterializer } from "@agrippa/orchestration";
 import { pickActiveSkillVersion, skillRefRange, skillSlugOfRef } from "@agrippa/orchestration";
+import { resetAgentProjectConfig } from "@agrippa/workspace";
 import { and, eq } from "drizzle-orm";
 import { assertPublicHost } from "./net";
 
 const TEMPLATES_DIR =
   process.env.AGRIPPA_TEMPLATES_DIR ?? path.resolve(import.meta.dirname, "../../../../templates");
 
-/**
- * Remove project configuration created by a prior agent invocation. `rm` on a
- * symlink removes the link itself; it never traverses into the target.
- */
-export async function resetAgentProjectConfig(workspaceDir: string): Promise<void> {
-  for (const relative of [".claude", ".mcp.json"]) {
-    const target = path.join(workspaceDir, relative);
-    try {
-      await lstat(target);
-    } catch {
-      continue;
-    }
-    await rm(target, { recursive: true, force: true });
-  }
-  await mkdir(path.join(workspaceDir, ".claude", "skills"), { recursive: true });
-}
+// resetAgentProjectConfig moved to @agrippa/workspace (shared with the daemon
+// runner — the per-invocation config-isolation contract must not fork between
+// hosts); re-exported for existing callers.
+export { resetAgentProjectConfig } from "@agrippa/workspace";
 
 /** Registry-backed resolution: skills materialize onto disk, MCP configs decrypt secrets. */
 export class DbResourceMaterializer implements ResourceMaterializer {

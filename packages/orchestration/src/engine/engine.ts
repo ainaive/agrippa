@@ -57,8 +57,20 @@ import {
   type TemplatePhaseV2,
   type TemplateStepV2,
 } from "../template-schema";
-import { type EngineDeps, ProviderCredentialError, type RunOutcome } from "./deps";
-import { appendRunEvent, finalizeRun, transitionRun } from "./run-lifecycle";
+import {
+  type EngineDeps,
+  ProviderCredentialError,
+  type RunControlHandle,
+  type RunOutcome,
+} from "./deps";
+import {
+  appendRunEvent,
+  claimRunLease,
+  finalizeRun,
+  RUN_LEASE_TTL_MS,
+  releaseRunLease,
+  transitionRun,
+} from "./run-lifecycle";
 
 type RunRow = typeof runs.$inferSelect;
 type StepRow = typeof runSteps.$inferSelect;
@@ -67,7 +79,7 @@ type AgentStep = TemplateStepV2 & { kind: "agent" };
 type SystemStep = TemplateStepV2 & { kind: "system" };
 type CheckpointStep = TemplateStepV2 & { kind: "checkpoint" };
 
-type AbortReason = "cancelled" | "timed_out" | "usage_limit_exceeded";
+type AbortReason = "cancelled" | "timed_out" | "usage_limit_exceeded" | "drained" | "lease_lost";
 
 /** A run's per-slot execution binding, resolved once at pickup. */
 type SlotBinding = {
@@ -97,6 +109,20 @@ class RunClaimLost extends Error {
   constructor() {
     super("run is owned by another worker");
     this.name = "RunClaimLost";
+  }
+}
+
+/**
+ * Raised when this engine must stop WITHOUT finalizing: a graceful drain
+ * (SIGTERM) or a lost lease. The in-flight step row is recorded like a crash
+ * (`code: "crashed"`) so the next owner's resume grants the recovery attempt
+ * and reuses the executor session — a drain is deliberately indistinguishable
+ * from a crash to the next owner, just faster and typed.
+ */
+class RunDrained extends Error {
+  constructor(readonly reason: "drained" | "lease_lost") {
+    super(`run released mid-execution (${reason})`);
+    this.name = "RunDrained";
   }
 }
 
@@ -159,7 +185,24 @@ function jsonValue(value: unknown): unknown {
  * succeeded/skipped steps are skipped and the usage meter re-initializes
  * from persisted token_usage totals (docs/design/04-execution-runtime.md).
  */
-export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOutcome> {
+export async function executeRun(
+  deps: EngineDeps,
+  runId: string,
+  control?: {
+    onStarted?: (handle: RunControlHandle) => void;
+    /**
+     * Awaited immediately after the claim CAS succeeds — under the lease,
+     * before ANY other initialization side effect (startedAt, events, the
+     * crash scan, workspace checks). Return false to release the claim as a
+     * drain (nothing finalizes; the caller re-enqueues). The consumer uses
+     * this to verify its pre-lease routing decision against the persisted
+     * pin: deps were constructed from that decision, and proceeding with
+     * wrong deps could finalize a resume `workspace_lost` or dispatch a step
+     * to the wrong host.
+     */
+    postClaim?: () => Promise<boolean>;
+  },
+): Promise<RunOutcome> {
   const { db } = deps;
 
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
@@ -207,9 +250,10 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
   // Same decline path as an unregistered executor: throw before any status
   // transition so the worker defers and an authed worker picks the run up.
   // ONLY in the pre-claim states the worker actually declines — a crashed
-  // `running` run has no re-enqueue path (execution lease, ADR-0009 future
-  // work), so it proceeds and the per-step gate in providerAuthFor fails it
-  // actionably instead of this throw burning pg-boss retries into `internal`.
+  // `running` run proceeds and the per-step gate in providerAuthFor fails it
+  // actionably instead of this throw burning pg-boss retries into `internal`
+  // (and if retries do exhaust, the lease sweeper re-enqueues it after
+  // expiry rather than stranding it).
   if (run.status === "queued" || run.status === "waiting_approval") {
     for (const [slot, binding] of Object.entries(bindings)) {
       const envAuth = binding.executor.envAuthProviders;
@@ -243,7 +287,7 @@ export async function executeRun(deps: EngineDeps, runId: string): Promise<RunOu
     },
     catalog,
   );
-  return await engine.execute();
+  return await engine.execute(control);
 }
 
 class RunEngine {
@@ -272,6 +316,9 @@ class RunEngine {
   private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
   // scrubs known secret values from event payloads before persist/publish
   private readonly redactor: SecretRedactor = createSecretRedactor(collectEnvSecretValues());
+  /** Lease identity: the worker's container id, or a per-engine fallback. */
+  private readonly leaseOwner: string;
+  private readonly leaseTtlMs: number;
 
   constructor(
     private readonly deps: EngineDeps,
@@ -285,6 +332,8 @@ class RunEngine {
     },
     private readonly catalog: ProviderCatalog,
   ) {
+    this.leaseOwner = deps.lease?.owner ?? `engine-${Bun.randomUUIDv7()}`;
+    this.leaseTtlMs = deps.lease?.ttlMs ?? RUN_LEASE_TTL_MS;
     for (const entry of this.allResolutionEntries()) {
       this.modelIds.set(entry.providerModelId, entry.modelId);
     }
@@ -335,14 +384,24 @@ class RunEngine {
     return entries;
   }
 
-  async execute(): Promise<RunOutcome> {
+  async execute(control?: {
+    onStarted?: (handle: RunControlHandle) => void;
+    postClaim?: () => Promise<boolean>;
+  }): Promise<RunOutcome> {
     try {
-      await this.initialize();
+      await this.initialize(control);
       const outcome = await this.runFlow();
       return outcome;
     } catch (err) {
       // another worker owns the run — leave it entirely to them, finalize nothing
       if (err instanceof RunClaimLost) return "already_terminal";
+      if (err instanceof RunDrained) {
+        // nothing finalized: the run stays `running`, the in-flight step row
+        // is a recorded crash, and releasing the lease makes it immediately
+        // claimable (the worker re-enqueues; the sweeper is the backstop)
+        await releaseRunLease(this.db, this.run.id, this.leaseOwner);
+        return "drained";
+      }
       return await this.handleFailure(err);
     } finally {
       if (this.timeoutTimer) clearTimeout(this.timeoutTimer);
@@ -352,7 +411,10 @@ class RunEngine {
 
   // ── Setup ────────────────────────────────────────────────────────────────────
 
-  private async initialize(): Promise<void> {
+  private async initialize(control?: {
+    onStarted?: (handle: RunControlHandle) => void;
+    postClaim?: () => Promise<boolean>;
+  }): Promise<void> {
     const { run, db } = this;
 
     const [maxSeq] = await db
@@ -361,7 +423,11 @@ class RunEngine {
       .where(eq(runEvents.runId, run.id));
     const resuming = (maxSeq?.v ?? 0) > 0;
 
-    if (!(await this.transition(run.status, "running"))) {
+    // Claim = status CAS + execution lease in one UPDATE (ADR-0017 Decision 4).
+    // Claimable: queued/waiting_approval, or running with a NULL/expired lease
+    // (crash and drain recovery). A live lease blocks re-entry — the hole the
+    // old transitionRun(status → "running") self-transition left open.
+    if (!(await claimRunLease(db, run.id, this.leaseOwner, this.leaseTtlMs))) {
       // another worker/path advanced the run between our read and here
       const [current] = await db
         .select({ status: runs.status })
@@ -370,11 +436,33 @@ class RunEngine {
       if (current && current.status === "cancelled") {
         throw new RunFailure("cancelled", "run cancelled", "cancelled");
       }
-      // it's terminal (another worker finished it) or already `running` under
-      // another live worker — either way this worker must not proceed and
-      // duplicate side effects; the owner (or a later re-delivery) drives it
+      // it's terminal (another worker finished it) or `running` under a live
+      // lease — either way this worker must not proceed and duplicate side
+      // effects; the owner (or the lease sweeper) drives it
       throw new RunClaimLost();
     }
+    // Hand out the control handle the moment the claim exists: the caller's
+    // renewal loop keys on it, and the lease must stay renewable through the
+    // postClaim gate and the (potentially slow) reconstruction below — an
+    // unrenewable lease here would let the sweeper hand the run to another
+    // worker while this one blindly finishes initializing. This also lets
+    // SIGTERM's drain reach a run that is still initializing.
+    control?.onStarted?.({
+      drain: () => this.triggerAbort("drained"),
+      lostLease: () => this.triggerAbort("lease_lost"),
+    });
+    // The caller's routing decision was made BEFORE the lease existed and the
+    // deps were built from it. Now that the claim holds — and round-3's
+    // lease-aware pin CAS guarantees the pin can no longer move — this is the
+    // one moment a stale decision is provably detectable, and it must be
+    // caught before ANY side effect below (startedAt, events, the crash scan,
+    // workspace checks): proceeding with wrong deps could finalize a resume
+    // `workspace_lost` or dispatch a step to the wrong host. A false answer
+    // drains: lease released, nothing finalized, caller re-enqueues.
+    if (control?.postClaim && !(await control.postClaim())) {
+      throw new RunDrained("drained");
+    }
+    this.run.status = "running";
     if (run.startedAt === null) {
       await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, run.id));
       this.run.startedAt = new Date();
@@ -669,6 +757,8 @@ class RunEngine {
 
   private async pauseRun(): Promise<RunOutcome> {
     await this.transition("running", "waiting_approval");
+    // a parked run holds no lease — the next decision's pickup claims fresh
+    await releaseRunLease(this.db, this.run.id, this.leaseOwner);
     return "waiting_approval";
   }
 
@@ -1218,14 +1308,10 @@ class RunEngine {
   ): Promise<string> {
     const binding = this.bindingFor(step);
     const request = await this.buildRequest(step, row, attempt);
+    // narrowed to { signal, logger } by ADR-0017 Decision 2: usage flows only
+    // through usage events, secrets only through the resource materializer
     const ctx: ExecutionContext = {
       signal: this.abort.signal,
-      usage: {
-        record: () => {}, // engine records via usage events; executors may also call this
-      },
-      secrets: async () => {
-        throw new Error("secret resolution is handled by the resource materializer");
-      },
       logger: this.deps.logger,
     };
 
@@ -1471,10 +1557,11 @@ class RunEngine {
     try {
       cred = await this.deps.resources.providerCredential(this.refs.project.id, provider);
     } catch (err) {
-      // deterministic misconfiguration (base URL resolving to private address
-      // space) fails the run; anything else rethrows so pg-boss retries
+      // deterministic credential conditions (private-space base URL; a
+      // credential that cannot ship to a daemon-routed run) fail the run
+      // with their carried code; anything else rethrows so pg-boss retries
       if (err instanceof ProviderCredentialError) {
-        throw new RunFailure("base_url_invalid", err.message, "failed");
+        throw new RunFailure(err.code, err.message, "failed");
       }
       throw err;
     }
@@ -1593,7 +1680,7 @@ class RunEngine {
 
   private async storeArtifact(
     row: StepRow,
-    event: { key: string; kind: string; path?: string; inline?: unknown },
+    event: { key: string; kind: string; path?: string; inline?: unknown; staged?: string },
   ): Promise<void> {
     // a checkpoint-driving artifact must inline whole in Postgres (resume
     // re-reads it from the DB row), so it gets the larger allowance sized to
@@ -1603,7 +1690,7 @@ class RunEngine {
       this.run.id,
       event.key,
       event.kind as never,
-      { inline: event.inline, path: event.path },
+      { inline: event.inline, path: event.path, staged: event.staged },
       this.workspaceDir,
       interactionKind ? { inlineLimitBytes: INTERACTION_ARTIFACT_MAX_BYTES } : undefined,
     );
@@ -1766,11 +1853,19 @@ class RunEngine {
 
   private async failStepRow(row: StepRow, failure: StepFailed): Promise<void> {
     const status: StepStatus = this.abortReason === "cancelled" ? "cancelled" : "failed";
+    // a drain/lease-loss abort records the attempt as a crash, so the next
+    // owner's resume grants the recovery attempt and reuses the executor
+    // session (the same machinery a real worker death flows through)
+    const error =
+      this.abortReason === "drained" || this.abortReason === "lease_lost"
+        ? { code: "crashed", message: `worker released the run mid-step (${this.abortReason})` }
+        : failure.errorPayload;
     await this.db
       .update(runSteps)
-      .set({ status, error: failure.errorPayload, finishedAt: new Date() })
+      .set({ status, error, finishedAt: new Date() })
       .where(eq(runSteps.id, row.id));
     row.status = status;
+    row.error = error;
   }
 
   private async markSkipped(
@@ -1833,12 +1928,16 @@ class RunEngine {
     this.abort.abort(reason);
   }
 
-  private abortFailure(): RunFailure {
+  private abortFailure(): RunFailure | RunDrained {
     switch (this.abortReason) {
       case "cancelled":
         return new RunFailure("cancelled", "run cancelled", "cancelled");
       case "timed_out":
         return new RunFailure("timeout", "run duration limit exhausted", "timed_out");
+      case "drained":
+      case "lease_lost":
+        // never finalizes — execute() releases the lease and reports "drained"
+        return new RunDrained(this.abortReason);
       default:
         return new RunFailure("usage_limit_exceeded", "usage limit exhausted");
     }
@@ -1884,7 +1983,14 @@ class RunEngine {
     }
     // Unexpected errors (infra blips, crashes) rethrow: the run stays
     // 'running' and pg-boss retries the job, which resumes step-granularly.
-    // The worker marks the run failed only when retries exhaust.
+    // The worker marks the run failed only when retries exhaust. Release the
+    // lease first — this engine is alive and deliberately handing the run to
+    // the retry, which must be able to claim immediately; only a DEAD worker
+    // leaves a lease behind, and expiry exists for exactly that. Best-effort:
+    // if the release fails too (DB outage), the sweeper recovers after TTL.
+    try {
+      await releaseRunLease(this.db, this.run.id, this.leaseOwner);
+    } catch {}
     this.deps.logger.error("engine internal error — rethrowing for queue retry", {
       err: String(err),
     });
