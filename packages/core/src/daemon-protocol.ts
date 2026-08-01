@@ -42,3 +42,87 @@ export const daemonHeartbeatSchema = z.object({
   activeDispatchIds: z.array(z.uuid()).max(64).default([]),
 });
 export type DaemonHeartbeatBody = z.infer<typeof daemonHeartbeatSchema>;
+
+// ── Dispatch wire types ───────────────────────────────────────────────────────
+
+/** Bounds for one events POST; an empty batch is a legal keepalive. */
+export const DISPATCH_EVENT_BATCH_MAX_EVENTS = 100;
+export const DISPATCH_EVENT_BATCH_MAX_BYTES = 256 * 1024;
+/** Total skills content shipped inline per dispatch (skills are small text). */
+export const DISPATCH_SKILLS_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Symbolic path placeholder: the server builds the request with this token
+ * where daemon-local absolute paths belong (workspaceDir, writeRoot,
+ * skills[].localPath); the daemon rewrites it to its real workspace directory
+ * before invoking the executor.
+ */
+export const DISPATCH_WORKSPACE_PLACEHOLDER = "${workspaceDir}";
+
+export type DispatchWorkspaceSpec = {
+  /** Clone URL WITHOUT platform credentials — the daemon uses its machine's ambient git auth. */
+  repoUrl: string;
+  ref?: string;
+  access: "readOnly" | "readWrite";
+  /** Platform-created work branch the daemon checks out (git.branch ran centrally). */
+  workBranch?: string;
+};
+
+export type DispatchSkillContent = {
+  slug: string;
+  version: string;
+  files: Array<{ path: string; contentBase64: string }>;
+};
+
+/**
+ * What crosses the wire for one step execution: the serialized
+ * StepExecutionRequest (paths symbolic, no providerAuth — routing guarantees
+ * central execution for credentialed runs), the workspace spec, and inline
+ * skill content (the daemon cannot read the platform database).
+ */
+export type DispatchPayload = {
+  request: Record<string, unknown>;
+  workspace: DispatchWorkspaceSpec | null;
+  skills: DispatchSkillContent[];
+};
+
+export type ClaimedDispatch = {
+  id: string;
+  runId: string;
+  payload: DispatchPayload;
+};
+
+export type DaemonClaimResponse = {
+  dispatch: ClaimedDispatch | null;
+  /** Piggybacked abort flags for this runtime's other live dispatches. */
+  abortedDispatchIds: string[];
+};
+
+export const dispatchEventBatchSchema = z.object({
+  batch: z
+    .array(
+      z.object({
+        seq: z.number().int().min(1),
+        event: z.record(z.string(), z.unknown()),
+      }),
+    )
+    .max(DISPATCH_EVENT_BATCH_MAX_EVENTS),
+});
+export type DispatchEventBatch = z.infer<typeof dispatchEventBatchSchema>;
+
+export const dispatchCompleteSchema = z.object({
+  /** Clone-base sha the daemon's workspace checked out (repo runs only). */
+  baseSha: z.string().max(80).optional(),
+  /** The daemon's staged snapshot tree (informational; server never trusts it). */
+  treeSha: z.string().max(80).optional(),
+});
+export type DispatchCompleteBody = z.infer<typeof dispatchCompleteSchema>;
+
+export const dispatchFailSchema = z.object({
+  code: z.string().min(1).max(100),
+  message: z.string().max(2000),
+});
+export type DispatchFailBody = z.infer<typeof dispatchFailSchema>;
+
+/** Reserved artifact key carrying the evidence patch (workspace diff). */
+export const DISPATCH_EVIDENCE_KEY = ".workspace-diff";

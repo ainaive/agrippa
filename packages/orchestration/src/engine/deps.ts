@@ -104,7 +104,7 @@ export interface ArtifactStore {
     runId: string,
     key: string,
     kind: ArtifactKind,
-    source: { inline?: unknown; path?: string },
+    source: { inline?: unknown; path?: string; staged?: string },
     workspaceDir: string,
     opts?: { inlineLimitBytes?: number },
   ): Promise<StoredArtifact>;

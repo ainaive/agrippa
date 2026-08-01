@@ -1,12 +1,23 @@
 import {
   AppError,
   DAEMON_PROTOCOL_HINTS,
+  type DaemonClaimResponse,
+  DISPATCH_EVENT_BATCH_MAX_BYTES,
+  type DispatchPayload,
   daemonHeartbeatSchema,
   daemonRegisterSchema,
+  dispatchCompleteSchema,
+  dispatchEventBatchSchema,
+  dispatchFailSchema,
 } from "@agrippa/core";
-import { auditLogs, type Db, runtimes } from "@agrippa/db";
-import type { RunEventBus } from "@agrippa/orchestration";
-import { eq, sql } from "drizzle-orm";
+import { auditLogs, type Db, dispatchEvents, dispatches, runtimes } from "@agrippa/db";
+import {
+  ArtifactTooLargeError,
+  DiskArtifactStore,
+  isSafeArtifactKey,
+  type RunEventBus,
+} from "@agrippa/orchestration";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import {
@@ -93,10 +104,179 @@ export const daemonRoutes = new Hono<DaemonEnv>()
     return c.json({ runtimeId: c.var.runtime.id, hints: DAEMON_PROTOCOL_HINTS });
   })
   .post("/heartbeat", validate("json", daemonHeartbeatSchema), async (c) => {
+    const body = c.req.valid("json");
     await c.var.db
       .update(runtimes)
       .set({ lastSeenAt: sql`now()` })
       .where(eq(runtimes.id, c.var.runtime.id));
-    // dispatch contact-deadline bumps land here with the dispatch tables (B3)
+    if (body.activeDispatchIds.length > 0) {
+      await c.var.db
+        .update(dispatches)
+        .set({ lastContactAt: sql`now()` })
+        .where(
+          and(
+            inArray(dispatches.id, body.activeDispatchIds),
+            eq(dispatches.runtimeId, c.var.runtime.id),
+            eq(dispatches.status, "claimed"),
+          ),
+        );
+    }
+    return c.json({ ok: true });
+  })
+  /**
+   * Long-poll for work: atomically claim the oldest pending dispatch for this
+   * runtime (FOR UPDATE SKIP LOCKED — two claim calls can never both take
+   * one), waking on a 1s tick until the wait bound. The response always
+   * carries the abort piggyback, which is why an empty poll answers 200
+   * with a null dispatch rather than 204.
+   */
+  .get("/claim", async (c) => {
+    const requested = Number(c.req.query("wait") ?? DAEMON_PROTOCOL_HINTS.claimWaitSec);
+    const waitSec = Number.isFinite(requested)
+      ? Math.min(Math.max(requested, 0), DAEMON_PROTOCOL_HINTS.claimWaitSec)
+      : DAEMON_PROTOCOL_HINTS.claimWaitSec;
+    const deadline = Date.now() + waitSec * 1000;
+    let claimed: DaemonClaimResponse["dispatch"] = null;
+    for (;;) {
+      const rows = (await c.var.db.execute(sql`
+        update dispatches set status = 'claimed', claimed_at = now(), last_contact_at = now()
+        where id = (
+          select id from dispatches
+          where runtime_id = ${c.var.runtime.id} and status = 'pending'
+          order by created_at
+          limit 1
+          for update skip locked
+        )
+        returning id, run_id, payload
+      `)) as unknown as Array<{ id: string; run_id: string; payload: DispatchPayload }>;
+      const row = rows[0];
+      if (row) {
+        claimed = { id: row.id, runId: row.run_id, payload: row.payload };
+        break;
+      }
+      if (Date.now() >= deadline) break;
+      await Bun.sleep(1000);
+    }
+    const aborted = await c.var.db
+      .select({ id: dispatches.id })
+      .from(dispatches)
+      .where(
+        and(
+          eq(dispatches.runtimeId, c.var.runtime.id),
+          eq(dispatches.status, "claimed"),
+          eq(dispatches.abortRequested, true),
+        ),
+      );
+    const response: DaemonClaimResponse = {
+      dispatch: claimed,
+      abortedDispatchIds: aborted.map((r) => r.id),
+    };
+    return c.json(response);
+  })
+  .post(
+    "/dispatches/:id/events",
+    async (c, next) => {
+      // bound the batch BEFORE parsing: a daemon must chunk, not stream blobs
+      const length = Number(c.req.header("content-length") ?? 0);
+      if (length > DISPATCH_EVENT_BATCH_MAX_BYTES) {
+        throw new AppError("dispatch_batch_too_large", 413, "Event batch exceeds the size bound");
+      }
+      await next();
+    },
+    validate("json", dispatchEventBatchSchema),
+    async (c) => {
+      const dispatch = await ownedLiveDispatch(c.var.db, c.var.runtime.id, c.req.param("id"));
+      const { batch } = c.req.valid("json");
+      if (batch.length > 0) {
+        // at-least-once delivery: replays land on the (dispatch, seq) unique
+        // index and insert nothing — usage double-counting dies here
+        await c.var.db
+          .insert(dispatchEvents)
+          .values(batch.map((e) => ({ dispatchId: dispatch.id, seq: e.seq, event: e.event })))
+          .onConflictDoNothing();
+      }
+      await c.var.db
+        .update(dispatches)
+        .set({ lastContactAt: sql`now()` })
+        .where(eq(dispatches.id, dispatch.id));
+      // an empty batch is the keepalive — abort rides this response either way
+      return c.json({ abort: dispatch.abortRequested });
+    },
+  )
+  .post("/dispatches/:id/artifacts/:key", async (c) => {
+    const dispatch = await ownedLiveDispatch(c.var.db, c.var.runtime.id, c.req.param("id"));
+    if (!isSafeArtifactKey(c.req.param("key"))) {
+      throw AppError.validation({ key: "invalid artifact key" });
+    }
+    const body = c.req.raw.body;
+    if (!body) throw AppError.validation("artifact upload requires a request body");
+    // the server hashes at store time; any daemon-supplied digest is ignored
+    let staged: { staged: string; size: number; sha256: string };
+    try {
+      staged = await artifactStore.stageDispatchArtifact(dispatch.id, c.req.param("key"), body);
+    } catch (err) {
+      if (err instanceof ArtifactTooLargeError) {
+        throw new AppError("artifact_too_large", 413, err.message);
+      }
+      throw err;
+    }
+    await c.var.db
+      .update(dispatches)
+      .set({ lastContactAt: sql`now()` })
+      .where(eq(dispatches.id, dispatch.id));
+    return c.json(staged);
+  })
+  .post("/dispatches/:id/complete", validate("json", dispatchCompleteSchema), async (c) => {
+    const body = c.req.valid("json");
+    await terminateDispatch(c.var.db, c.var.runtime.id, c.req.param("id"), "completed", body);
+    return c.json({ ok: true });
+  })
+  .post("/dispatches/:id/fail", validate("json", dispatchFailSchema), async (c) => {
+    const body = c.req.valid("json");
+    await terminateDispatch(c.var.db, c.var.runtime.id, c.req.param("id"), "failed", body);
     return c.json({ ok: true });
   });
+
+const artifactStore = new DiskArtifactStore();
+
+/** A dispatch this runtime claimed and has not terminated; 404 otherwise. */
+async function ownedLiveDispatch(db: Db, runtimeId: string, dispatchId: string) {
+  const [row] = await db
+    .select()
+    .from(dispatches)
+    .where(and(eq(dispatches.id, dispatchId), eq(dispatches.runtimeId, runtimeId)));
+  if (!row) throw AppError.notFound("Dispatch");
+  if (row.status !== "claimed") {
+    throw new AppError("dispatch_not_live", 409, "Dispatch is not claimed by this runtime");
+  }
+  return row;
+}
+
+/** Terminal CAS claimed → completed|failed; a lost race is a 409. */
+async function terminateDispatch(
+  db: Db,
+  runtimeId: string,
+  dispatchId: string,
+  status: "completed" | "failed",
+  result: Record<string, unknown>,
+): Promise<void> {
+  const updated = await db
+    .update(dispatches)
+    .set({ status, result, finishedAt: sql`now()`, lastContactAt: sql`now()` })
+    .where(
+      and(
+        eq(dispatches.id, dispatchId),
+        eq(dispatches.runtimeId, runtimeId),
+        eq(dispatches.status, "claimed"),
+      ),
+    )
+    .returning({ id: dispatches.id });
+  if (updated.length === 0) {
+    const [row] = await db
+      .select({ id: dispatches.id })
+      .from(dispatches)
+      .where(and(eq(dispatches.id, dispatchId), eq(dispatches.runtimeId, runtimeId)));
+    if (!row) throw AppError.notFound("Dispatch");
+    throw new AppError("dispatch_not_live", 409, "Dispatch already terminated");
+  }
+}

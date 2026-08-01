@@ -1,6 +1,9 @@
 {
   "unauthorized": "需要登录",
   "daemon_token_invalid": "守护进程令牌无效或已撤销",
+  "dispatch_not_live": "调度任务未被认领或已结束",
+  "dispatch_batch_too_large": "事件批次超出大小限制",
+  "artifact_too_large": "产物超出大小限制",
   "forbidden": "权限不足",
   "not_found": "资源不存在",
   "validation_failed": "参数校验失败",

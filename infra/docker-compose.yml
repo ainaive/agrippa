@@ -35,12 +35,13 @@ services:
       # SSE comment-frame interval; empty keeps the 15s default
       AGRIPPA_SSE_KEEPALIVE_MS: ${AGRIPPA_SSE_KEEPALIVE_MS:-}
     volumes:
-      # the API serves artifact downloads; it only needs the shared artifact
-      # store (not run workspaces), and only reads it — mount read-only so a
-      # compromised API can't modify or delete worker-produced artifacts. Both
-      # images run as `bun` and chown this dir, so the volume is bun-owned
-      # whichever container initializes it.
-      - artifacts:/work/artifacts:ro
+      # the API serves artifact downloads AND receives daemon artifact uploads
+      # into the staging area (ADR-0017: /api/daemon/dispatches/:id/artifacts,
+      # a token-gated endpoint that hashes at store time) — so the mount is
+      # read-write since M2. The write surface is that endpoint alone; the SPA
+      # has no upload path. Both images run as `bun` and chown this dir, so
+      # the volume is bun-owned whichever container initializes it.
+      - artifacts:/work/artifacts
     depends_on:
       postgres:
         condition: service_healthy

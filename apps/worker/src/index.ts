@@ -22,6 +22,7 @@ import type { Executor } from "@agrippa/executor-core";
 import {
   appendRunEvent,
   createRunQueue,
+  DiskArtifactStore,
   dbRunExecutorResolver,
   decideCheckpoint,
   type EngineDeps,
@@ -35,7 +36,6 @@ import {
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { createRunConsumer, startRunFetchLoop } from "./consumer";
-import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
 import { deliverNotification } from "./deps/notify";
 import {

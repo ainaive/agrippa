@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DiskArtifactStore } from "./artifacts";
+import { DiskArtifactStore } from "./artifact-store";
 
 const store = new DiskArtifactStore();
 const dirs: string[] = [];
@@ -220,5 +220,40 @@ describe("DiskArtifactStore path containment", () => {
       if (prev === undefined) delete process.env.AGRIPPA_MAX_ARTIFACT_BYTES;
       else process.env.AGRIPPA_MAX_ARTIFACT_BYTES = prev;
     }
+  });
+});
+
+describe("staging key guard + staged adoption", () => {
+  it("rejects traversal-capable keys, admits flat tokens", async () => {
+    const { isSafeArtifactKey } = await import("./artifact-store");
+    expect(isSafeArtifactKey(".workspace-diff")).toBe(true);
+    expect(isSafeArtifactKey("report.md")).toBe(true);
+    expect(isSafeArtifactKey(".")).toBe(false);
+    expect(isSafeArtifactKey("..")).toBe(false);
+    expect(isSafeArtifactKey("a/b")).toBe(false);
+    expect(isSafeArtifactKey("")).toBe(false);
+  });
+
+  it("stages an upload with a server-side hash and adopts it as a run artifact", async () => {
+    const dispatchId = Bun.randomUUIDv7();
+    const content = "diff --git a/f b/f\n+staged\n";
+    const stream = new Response(content).body as ReadableStream<Uint8Array>;
+    const staged = await store.stageDispatchArtifact(dispatchId, ".workspace-diff", stream);
+    expect(staged.staged).toBe(`${dispatchId}/.workspace-diff`);
+    expect(staged.sha256).toBe(new Bun.CryptoHasher("sha256").update(content).digest("hex"));
+
+    expect(await store.readStaged(staged.staged)).toBe(content);
+    // a ref that isn't <dispatchId>/<key> shaped resolves to nothing
+    expect(await store.readStaged(`${dispatchId}/../escape`)).toBeNull();
+
+    const adopted = await store.store(
+      Bun.randomUUIDv7(),
+      "changes",
+      "patch",
+      { staged: staged.staged },
+      "/nonexistent-workspace",
+    );
+    expect(adopted.inline).toBe(content);
+    expect(adopted.sha256).toBe(staged.sha256);
   });
 });

@@ -1,3 +1,4 @@
+export * from "./artifact-store";
 export * from "./compile";
 export * from "./engine/bus";
 export * from "./engine/deps";

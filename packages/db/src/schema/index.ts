@@ -2,6 +2,7 @@ export * from "./_helpers";
 export * from "./api-keys";
 export * from "./audit";
 export * from "./auth";
+export * from "./dispatches";
 export * from "./invitations";
 export * from "./notifications";
 export * from "./orgs";
