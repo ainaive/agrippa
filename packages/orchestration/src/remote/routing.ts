@@ -98,13 +98,17 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
     if (authed.length > 0) return { kind: "central" };
   }
   // Deliberately coarse: a JSON scan of the pinned compiled template. A false
-  // positive can only force central routing — the safe direction — and the
-  // exclusion is lifted wholesale when the publication inversion lands.
+  // positive can only force central routing — the safe direction. git.push is
+  // excluded until the publication inversion lands; git.branch because the
+  // central SCM service creates the branch in a local checkout the daemon
+  // host doesn't have (the daemon checks out runs.work_branch instead once
+  // publishing runs route remotely).
   const [version] = await db
     .select({ compiled: templateVersions.compiled })
     .from(templateVersions)
     .where(eq(templateVersions.id, run.templateVersionId));
-  if (version && JSON.stringify(version.compiled).includes('"git.push"')) {
+  const compiledJson = version ? JSON.stringify(version.compiled) : "";
+  if (compiledJson.includes('"git.push"') || compiledJson.includes('"git.branch"')) {
     return { kind: "central" };
   }
 

@@ -143,25 +143,23 @@ export type ExecutorEvent =
   | { type: "step.completed"; output: string }
   | { type: "step.failed"; error: NormalizedError };
 
-export type SecretResolver = (ref: string) => Promise<string>;
-
 export type Logger = {
   info(message: string, extra?: Record<string, unknown>): void;
   warn(message: string, extra?: Record<string, unknown>): void;
   error(message: string, extra?: Record<string, unknown>): void;
 };
 
+/**
+ * ADR-0017 Decision 2 narrowed this to what executors actually consume:
+ * usage flows exclusively through `usage` EVENTS (contract rule 3) and secret
+ * resolution belongs to the resource materializer, so the former `usage` and
+ * `secrets` members — a no-op and an unconditional throw in practice — were
+ * removed rather than transported across the daemon wire.
+ */
 export type ExecutionContext = {
   /** Cancellation ∪ timeout ∪ usage-limit abort, composed by the engine. */
   signal: AbortSignal;
-  usage: UsageRecorder;
-  secrets: SecretResolver;
   logger: Logger;
-};
-
-/** The slice of UsageMeter executors see. */
-export type UsageRecorder = {
-  record(usage: UsageDelta): void;
 };
 
 export type ExecutorCapabilities = {

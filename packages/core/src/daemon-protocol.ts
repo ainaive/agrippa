@@ -23,7 +23,11 @@ export const DAEMON_PROTOCOL_HINTS = {
   keepaliveSec: 5,
 } as const;
 
-export type DaemonProtocolHints = typeof DAEMON_PROTOCOL_HINTS;
+export type DaemonProtocolHints = {
+  claimWaitSec: number;
+  heartbeatSec: number;
+  keepaliveSec: number;
+};
 
 export const daemonExecutorAdSchema = z.object({
   id: z.string().min(1).max(100),
@@ -81,6 +85,8 @@ export type DispatchSkillContent = {
  * skill content (the daemon cannot read the platform database).
  */
 export type DispatchPayload = {
+  /** Which of the daemon's executors runs this step. */
+  executorId: string;
   request: Record<string, unknown>;
   workspace: DispatchWorkspaceSpec | null;
   skills: DispatchSkillContent[];

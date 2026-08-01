@@ -94,6 +94,22 @@ Documented in `infra/env/.env.example`; the full set:
 
 Workers register the executors they can actually run, at boot and on a 60 s heartbeat, into `executor_registrations`; the API refuses to accept a submission for an executor no worker has. `claude-agent-sdk` and `fake` always register. `codex-cli` registers only if a Codex CLI new enough for `codex exec --ignore-user-config` / `--ignore-rules` is on the worker's `PATH` — the worker image installs one at `/opt/codex` and its build fails if that check doesn't pass.
 
+## Remote runtime daemons (bring your own compute)
+
+A daemon on a team member's machine can execute agent work with that machine's own CLI logins — quotas, checkpoints, audit, and git publication stay on the platform (see [design/03](../../design/03-executor-abstraction.md) and ADR-0017).
+
+1. **Issue a token** in **Admin → Workers → Remote runtimes**. It is shown exactly once — store it immediately.
+2. **Build the binary**: `bun run build:daemon` produces `dist/agrippa-daemon` (self-contained; the Claude Agent SDK is embedded, Codex is detected from the machine's `PATH`).
+3. **Run it** on the machine that has the CLI logins:
+
+```sh
+./agrippa-daemon --server https://your-agrippa.example.com --token agrd_…
+# or: AGRIPPA_SERVER_URL=… AGRIPPA_DAEMON_TOKEN=… ./agrippa-daemon
+# or persist both in ~/.agrippa/daemon.json ({"serverUrl": …, "token": …})
+```
+
+The daemon registers what it can execute, long-polls for work, and streams results back. Runs are routed to it only when no central worker covers the required executors, and **never** when the run touches platform-held secrets (a stored project provider credential or an authenticated MCP server) — those stay on central workers so a project's configured key always wins over the daemon's logins. Repositories are cloned with the **machine's own git credentials** (platform repo tokens never leave the server); workspaces live under `~/.agrippa/workspaces`. Revoking the token in the admin UI cuts the machine off immediately; a daemon that goes silent mid-step fails that step after a 2-minute deadman and the run's normal retry policy applies. What a daemon can and cannot do is bounded server-side: it reports events and uploads artifacts (hashed at receipt), but it cannot approve checkpoints, mint audit rows, push code, or spend another project's quota.
+
 This matters because **Requirement Delivery** binds its reviewer slot to `codex-cli`. Check after any deploy:
 
 ```sh

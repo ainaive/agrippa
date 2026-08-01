@@ -305,10 +305,6 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     const consume = (async () => {
       for await (const event of executor.executeStep(baseRequest(run.id, "step-a"), {
         signal: controller.signal,
-        usage: { record: () => {} },
-        secrets: async () => {
-          throw new Error("no");
-        },
         logger: silentLogger,
       })) {
         seen.push(event.type);
@@ -361,10 +357,6 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     const consume = (async () => {
       for await (const event of executor.executeStep(baseRequest(run.id, "step-b"), {
         signal: controller.signal,
-        usage: { record: () => {} },
-        secrets: async () => {
-          throw new Error("no");
-        },
         logger: silentLogger,
       })) {
         events.push(event.type);
@@ -425,10 +417,6 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
       const drained: string[] = [];
       for await (const event of executor.executeStep(baseRequest(run.id, "step-old"), {
         signal: controller.signal,
-        usage: { record: () => {} },
-        secrets: async () => {
-          throw new Error("no");
-        },
         logger: silentLogger,
       })) {
         drained.push(event.type); // deadman will end the stream

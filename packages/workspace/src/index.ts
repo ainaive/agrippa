@@ -13,7 +13,11 @@ import { buildSystemEnv } from "@agrippa/executor-core";
  * so this package never touches the database.
  */
 
-const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? path.join(tmpdir(), "agrippa-workspaces");
+// read lazily, not at module load: the daemon sets WORKSPACE_ROOT in its
+// entrypoint AFTER imports have evaluated (imports hoist), and tests point
+// it at per-suite temp dirs
+const workspaceRoot = (): string =>
+  process.env.WORKSPACE_ROOT ?? path.join(tmpdir(), "agrippa-workspaces");
 
 /**
  * Repo-supplied/runtime-only paths that never enter evidence or a published
@@ -126,12 +130,12 @@ export async function git(
 
 /** The run's agent-visible checkout directory. */
 export function workspaceDirFor(runId: string): string {
-  return path.join(WORKSPACE_ROOT, runId);
+  return path.join(workspaceRoot(), runId);
 }
 
 /** Platform-owned sidecar, outside the agent's writable workspace root. */
 export function platformDirFor(runId: string): string {
-  return path.join(WORKSPACE_ROOT, `${runId}.platform`);
+  return path.join(workspaceRoot(), `${runId}.platform`);
 }
 
 /** Trusted gitdir used for all evidence and publication operations. */
@@ -220,7 +224,8 @@ export type CheckoutSource = {
   cloneUrl: string;
   /** Credential-free URL restored as origin so the token never persists on disk. */
   displayUrl: string;
-  ref: string;
+  /** Absent = the remote's default branch (daemon dispatches may omit it). */
+  ref?: string;
   /** Env profile for the clone call — the one place ambient auth matters. */
   profile?: GitEnvProfile;
 };
@@ -239,8 +244,9 @@ export async function checkoutFromUrl(runId: string, source: CheckoutSource): Pr
   await rm(platformDir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
   const profile = source.profile ?? "platform";
+  const branchArgs = source.ref ? ["--branch", source.ref] : [];
   await git(
-    ["clone", "--depth", "50", "--branch", source.ref, source.cloneUrl, dir],
+    ["clone", "--depth", "50", ...branchArgs, source.cloneUrl, dir],
     undefined,
     {},
     profile,

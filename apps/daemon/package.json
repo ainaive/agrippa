@@ -1,0 +1,13 @@
+{
+  "name": "@agrippa/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agrippa/core": "workspace:*",
+    "@agrippa/executor-claude": "workspace:*",
+    "@agrippa/executor-codex": "workspace:*",
+    "@agrippa/executor-core": "workspace:*",
+    "@agrippa/workspace": "workspace:*"
+  }
+}

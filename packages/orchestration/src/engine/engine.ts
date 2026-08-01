@@ -1272,14 +1272,10 @@ class RunEngine {
   ): Promise<string> {
     const binding = this.bindingFor(step);
     const request = await this.buildRequest(step, row, attempt);
+    // narrowed to { signal, logger } by ADR-0017 Decision 2: usage flows only
+    // through usage events, secrets only through the resource materializer
     const ctx: ExecutionContext = {
       signal: this.abort.signal,
-      usage: {
-        record: () => {}, // engine records via usage events; executors may also call this
-      },
-      secrets: async () => {
-        throw new Error("secret resolution is handled by the resource materializer");
-      },
       logger: this.deps.logger,
     };
 

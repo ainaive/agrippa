@@ -36,6 +36,17 @@
         "yaml": "^2.9.0",
       },
     },
+    "apps/daemon": {
+      "name": "@agrippa/daemon",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agrippa/core": "workspace:*",
+        "@agrippa/executor-claude": "workspace:*",
+        "@agrippa/executor-codex": "workspace:*",
+        "@agrippa/executor-core": "workspace:*",
+        "@agrippa/workspace": "workspace:*",
+      },
+    },
     "apps/web": {
       "name": "@agrippa/web",
       "version": "0.0.0",
@@ -169,6 +180,8 @@
     "@agrippa/api-client": ["@agrippa/api-client@workspace:packages/api-client"],
 
     "@agrippa/core": ["@agrippa/core@workspace:packages/core"],
+
+    "@agrippa/daemon": ["@agrippa/daemon@workspace:apps/daemon"],
 
     "@agrippa/db": ["@agrippa/db@workspace:packages/db"],
 

@@ -27,6 +27,13 @@ const ALLOWED: Record<string, string[]> = {
     "@agrippa/workspace",
     "@agrippa/i18n",
   ],
+  "@agrippa/daemon": [
+    "@agrippa/core",
+    "@agrippa/executor-core",
+    "@agrippa/executor-claude",
+    "@agrippa/executor-codex",
+    "@agrippa/workspace",
+  ],
   "@agrippa/web": ["@agrippa/core", "@agrippa/api-client", "@agrippa/i18n"],
 };
 

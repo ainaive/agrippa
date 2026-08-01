@@ -279,6 +279,7 @@ export class RemoteExecutor implements Executor {
     };
 
     return {
+      executorId: this.id,
       request: wireRequest as unknown as Record<string, unknown>,
       workspace: await this.opts.workspaceSpec(),
       skills,
