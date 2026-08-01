@@ -220,9 +220,21 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     });
     expect((await routeRun(db, withMcp)).kind).toBe("central");
 
-    // template containing git.push → central until the publication inversion
+    // publishing templates route like any other since the ADR-0017 inversion
+    // (git.branch is a remote no-op; git.push applies the approved patch to a
+    // pristine server-side clone) — with a covering daemon live, this goes
+    // remote. Note: requirement-delivery binds a codex reviewer slot, so the
+    // daemon must advertise codex too.
+    const publisher = await newRuntime([
+      { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] },
+      { id: "codex-cli", envAuthProviders: ["anthropic", "openai"] },
+    ]);
     const publishing = await newRun({ templateVersionId: pushTemplateVersionId });
-    expect((await routeRun(db, publishing)).kind).toBe("central");
+    const publishDecision = await routeRun(db, publishing);
+    expect(publishDecision.kind === "remote" && publishDecision.runtime.id === publisher).toBe(
+      true,
+    );
+    await db.update(runs).set({ runtimeId: null });
 
     await db.update(runs).set({ runtimeId: null });
     await db.delete(runtimes);

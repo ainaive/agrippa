@@ -7,7 +7,6 @@ import {
   providerCredentials,
   runs,
   runtimes,
-  templateVersions,
   workerHeartbeats,
 } from "@agrippa/db";
 import { and, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
@@ -46,8 +45,7 @@ function resolvedProviders(run: RunRow): Set<string> {
  *    workspace manager's isIntact fails the resume `workspace_lost`).
  * 2. Central-only STRICT (Decision 7): any resolved provider with a stored
  *    project credential (env- or project-policy), any project-policy provider
- *    at all, any authorized MCP server with platform-held auth, or a template
- *    containing `git.push` (until the publication inversion lands) — platform
+ *    at all, or any authorized MCP server with platform-held auth — platform
  *    secrets never ship to daemons, and ADR-0013's "project credential wins"
  *    precedence must not silently invert.
  * 3. Prefer central when a live central worker covers the executor set (least
@@ -97,20 +95,11 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
       .limit(1);
     if (authed.length > 0) return { kind: "central" };
   }
-  // Deliberately coarse: a JSON scan of the pinned compiled template. A false
-  // positive can only force central routing — the safe direction. git.push is
-  // excluded until the publication inversion lands; git.branch because the
-  // central SCM service creates the branch in a local checkout the daemon
-  // host doesn't have (the daemon checks out runs.work_branch instead once
-  // publishing runs route remotely).
-  const [version] = await db
-    .select({ compiled: templateVersions.compiled })
-    .from(templateVersions)
-    .where(eq(templateVersions.id, run.templateVersionId));
-  const compiledJson = version ? JSON.stringify(version.compiled) : "";
-  if (compiledJson.includes('"git.push"') || compiledJson.includes('"git.branch"')) {
-    return { kind: "central" };
-  }
+  // Publishing templates (git.push/git.branch) route like any other since the
+  // ADR-0017 publication inversion: git.branch is a remote no-op (the daemon
+  // materializes runs.work_branch from the dispatch payload) and git.push
+  // applies the approved patch to a pristine server-side clone — the daemon
+  // never touches platform git credentials either way.
 
   // ── prefer central when it can serve ───────────────────────────────────────
   const centralWorkers = await db

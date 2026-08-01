@@ -1,4 +1,4 @@
-import { appendFile, cp, lstat, mkdir, rename, rm } from "node:fs/promises";
+import { appendFile, cp, lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildSystemEnv } from "@agrippa/executor-core";
@@ -281,4 +281,105 @@ export async function workspaceIntact(runId: string): Promise<boolean> {
 export async function removeWorkspace(runId: string): Promise<void> {
   await rm(workspaceDirFor(runId), { recursive: true, force: true });
   await rm(platformDirFor(runId), { recursive: true, force: true });
+}
+
+export type ApplyApprovedPatchSpec = {
+  /** Where the base commit's objects come from: a credentialed remote URL, or
+   *  the platform sidecar gitdir path for central runs (pristine by ADR-0012). */
+  fetchSource: string;
+  /** What to fetch from it: the base sha itself (remotes that allow OID want),
+   *  or a ref like refs/agrippa/base (the sidecar always has it). */
+  fetchRef: string;
+  baseSha: string;
+  branch: string;
+  /** The APPROVED patch bytes — sha256-verified upstream; applied verbatim. */
+  patch: string;
+  /** Credentialed URL the deterministic commit is pushed to. */
+  pushUrl: string;
+  message?: string;
+};
+
+export type ApplyApprovedPatchResult = { commitSha: string; treeSha: string };
+
+/**
+ * Publication inversion (ADR-0017 Decision 5, amending ADR-0011/0012): apply
+ * the approved patch to a PRISTINE clone of the pinned base and push the
+ * deterministic snapshot commit. No workspace state participates — the
+ * published tree derives from approved evidence alone. Idempotency is
+ * re-derived without the sidecar branch ref: identity, message, tree, parent,
+ * and both dates (pinned to the base commit) are fixed, so every retry
+ * reproduces the byte-identical commit SHA, and the push is a remote-ref CAS
+ * (--force-with-lease against the observed tip; an existing tip must BE that
+ * commit or the publish fails rather than clobbering someone's work).
+ */
+export async function applyApprovedPatch(
+  spec: ApplyApprovedPatchSpec,
+): Promise<ApplyApprovedPatchResult> {
+  if (spec.patch.length === 0) {
+    throw new Error("nothing to publish — the approved patch is empty");
+  }
+  const tmp = await mkdtemp(path.join(tmpdir(), "agrippa-publish-"));
+  try {
+    await git(["init", "--quiet", tmp]);
+    await git(["fetch", "--quiet", spec.fetchSource, spec.fetchRef], tmp);
+    // the base must be exactly the pinned commit, whatever we fetched by
+    await git(["cat-file", "-e", `${spec.baseSha}^{commit}`], tmp);
+
+    await git(["read-tree", spec.baseSha], tmp);
+    const patchFile = path.join(tmp, ".agrippa-approved.patch");
+    await Bun.write(patchFile, spec.patch);
+    await git(["apply", "--cached", "--binary", "--whitespace=nowarn", patchFile], tmp);
+    await rm(patchFile, { force: true });
+    const treeSha = (await git(["write-tree"], tmp)).trim();
+
+    const baseDate = (await git(["show", "-s", "--format=%cI", spec.baseSha], tmp)).trim();
+    const commitSha = (
+      await git(
+        [
+          "commit-tree",
+          treeSha,
+          "-p",
+          spec.baseSha,
+          "-m",
+          spec.message ?? "chore: publish approved Agrippa changes",
+        ],
+        tmp,
+        {
+          GIT_AUTHOR_NAME: "Agrippa",
+          GIT_AUTHOR_EMAIL: "agrippa@agrippa.local",
+          GIT_AUTHOR_DATE: baseDate,
+          GIT_COMMITTER_NAME: "Agrippa",
+          GIT_COMMITTER_EMAIL: "agrippa@agrippa.local",
+          GIT_COMMITTER_DATE: baseDate,
+        },
+      )
+    ).trim();
+
+    const branchRef = `refs/heads/${spec.branch}`;
+    const remoteTip = (await git(["ls-remote", spec.pushUrl, branchRef], tmp))
+      .split("\t")[0]
+      ?.trim();
+    if (remoteTip) {
+      if (remoteTip !== commitSha) {
+        throw new Error(
+          "publish branch tip does not match the approved snapshot commit — refusing to overwrite",
+        );
+      }
+      return { commitSha, treeSha }; // idempotent retry: already published
+    }
+    // creation CAS: the lease requires the branch to still be absent
+    await git(
+      [
+        "push",
+        "--quiet",
+        spec.pushUrl,
+        `${commitSha}:${branchRef}`,
+        `--force-with-lease=${branchRef}:`,
+      ],
+      tmp,
+    );
+    return { commitSha, treeSha };
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
 }

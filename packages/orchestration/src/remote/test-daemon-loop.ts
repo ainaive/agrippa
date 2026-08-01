@@ -1,6 +1,6 @@
 import type { DispatchPayload } from "@agrippa/core";
 import { type Db, dispatchEvents, dispatches } from "@agrippa/db";
-import type { Executor, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
+import type { Executor, StepExecutionRequest } from "@agrippa/executor-core";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 export type TestDaemonLoop = { stop(): Promise<void> };

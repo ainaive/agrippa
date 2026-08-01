@@ -25,7 +25,6 @@ const {
   git,
   platformBaseSha,
   platformDirFor,
-  platformGit,
   workspaceDirFor,
 } = await import("./workspace");
 const { GitScmService, gitcodeCredentialedUrl } = await import("./scm");
@@ -194,9 +193,9 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     });
     expect(first).toEqual(retried);
     // the snapshot commit is fully deterministic (identity, dates, tree,
-    // parent, message all pinned): even a racer that lost the local ref
-    // recreates the byte-identical commit, not a duplicate
-    await platformGit(runId, ["update-ref", "-d", `refs/heads/${branch}`]);
+    // parent, message all pinned) and publication holds NO local state at
+    // all since the ADR-0017 inversion — every retry rebuilds the identical
+    // commit in a pristine temp repo and finds the remote tip already there
     const recreated = await scm.push(runId, {
       projectId,
       repo: { repoConnectionId },
@@ -576,7 +575,12 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(show(`${branch}:legitimate.ts`).exitCode).toBe(0);
   });
 
-  it("refuses stale evidence before creating or pushing a snapshot commit", async () => {
+  it("publishes exactly the approved patch — post-approval workspace drift is irrelevant", async () => {
+    // ADR-0017 Decision 5 (amending ADR-0011): the approved patch IS the
+    // contract. It is applied to a pristine clone of the pinned base, so
+    // whatever happens in the workspace after approval cannot reach the
+    // published tree — the old refresh-and-compare drift guard is retired
+    // because there is nothing to compare anymore.
     const staleRunId = crypto.randomUUID();
     await workspace.checkout(staleRunId, {
       repo: { repoConnectionId },
@@ -585,22 +589,35 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     });
     const branch = "agrippa/run-7-badc0ffeeeee";
     await scm.createBranch(staleRunId, branch);
-    await Bun.write(path.join(workspaceDirFor(staleRunId), "drift.ts"), "changed\n");
+    const dir = workspaceDirFor(staleRunId);
+    await Bun.write(path.join(dir, "approved.ts"), "export const approved = true;\n");
+    const approved = await workspace.diff(staleRunId);
+
+    // the workspace drifts AFTER approval — none of this may publish
+    await Bun.write(path.join(dir, "drift.ts"), "sneaked in after review\n");
+    await Bun.write(path.join(dir, "approved.ts"), "export const approved = 'tampered';\n");
 
     const result = await scm.push(staleRunId, {
       projectId,
       repo: { repoConnectionId },
       branch,
-      expectedPatch: "",
+      expectedPatch: approved,
     });
-    expect(result).toEqual({ status: "evidence_mismatch" });
-    expect(
-      Bun.spawnSync(["git", "show", branch], {
-        cwd: sourceDir,
-        stdout: "ignore",
-        stderr: "pipe",
-      }).exitCode,
-    ).not.toBe(0);
+    expect(result.status).toBe("pushed");
+    const show = (spec: string) =>
+      Bun.spawnSync(["git", "show", spec], { cwd: sourceDir, stdout: "pipe", stderr: "pipe" });
+    expect(show(`${branch}:approved.ts`).stdout.toString()).toBe("export const approved = true;\n");
+    expect(show(`${branch}:drift.ts`).exitCode).not.toBe(0);
+
+    // and an empty approved patch is a refusal, not an empty publish
+    await expect(
+      scm.push(staleRunId, {
+        projectId,
+        repo: { repoConnectionId },
+        branch: "agrippa/run-8-000000000000",
+        expectedPatch: "",
+      }),
+    ).rejects.toThrow(/nothing to publish/);
   });
 
   it("reports a never-checked-out workspace as not intact", async () => {
