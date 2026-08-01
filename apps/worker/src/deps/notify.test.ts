@@ -397,6 +397,42 @@ describe.skipIf(!dbUp)("deliverNotification", () => {
     expect(row?.responseSnippet?.length).toBe(500);
   });
 
+  it("refuses rows minted before the endpoint's current configuration", async () => {
+    // isolated endpoint: the shared one gets disabled by a later test
+    const [endpoint] = await db
+      .insert(notificationEndpoints)
+      .values({
+        projectId,
+        kind: "generic",
+        name: "reconfigured",
+        url: "https://hooks.example.com/reconfigured",
+        locale: "en",
+      })
+      .returning();
+    const endpointId = endpoint?.id as string;
+    const deliveryId = await newDelivery(endpointId);
+    // simulate a PATCH landing after the row was minted but before delivery
+    await db
+      .update(notificationEndpoints)
+      .set({ activatedAt: sql`now() + interval '1 minute'` })
+      .where(eq(notificationEndpoints.id, endpointId));
+
+    let fetched = false;
+    const fetchImpl = (async () => {
+      fetched = true;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    await deliverNotification(db, deliveryId, { fetchImpl, lookup: publicLookup });
+    expect(fetched).toBe(false);
+    const [row] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, deliveryId));
+    expect(row?.status).toBe("failed");
+    expect(row?.lastError).toBe("superseded by endpoint reconfiguration");
+  });
+
   it("fails a delivery whose endpoint was disabled, and no-ops a finished one", async () => {
     await db
       .update(notificationEndpoints)

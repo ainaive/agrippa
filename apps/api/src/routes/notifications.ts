@@ -192,6 +192,21 @@ export const notificationRoutes = new Hono<AppEnv>()
             activatedAt: reactivated ? new Date() : current.activatedAt,
           })
           .where(eq(notificationEndpoints.id, current.id));
+        if (reactivated) {
+          // rows minted under the previous configuration must not fire under
+          // the new one (old events to a replacement URL, replays after a
+          // re-enable, types a narrowed filter no longer wants) — fail them
+          // visibly in the delivery log instead of deleting them
+          await tx
+            .update(notificationDeliveries)
+            .set({ status: "failed", lastError: "superseded by endpoint reconfiguration" })
+            .where(
+              and(
+                eq(notificationDeliveries.endpointId, current.id),
+                eq(notificationDeliveries.status, "pending"),
+              ),
+            );
+        }
         await audit(
           c,
           {
@@ -309,10 +324,12 @@ export const notificationRoutes = new Hono<AppEnv>()
       const deliveryId = c.req.param("deliveryId");
       // CAS failed → pending: only a finished failure is retryable, and two
       // concurrent retries produce one enqueue. Attempts reset so the manual
-      // retry gets the full budget instead of the sweeper's exhaustion cap.
+      // retry gets the full budget instead of the sweeper's exhaustion cap;
+      // lastAttemptAt reset so the worker's claim-recency window doesn't
+      // silently no-op a retry clicked within 20s of the last attempt.
       const updated = await c.var.db
         .update(notificationDeliveries)
-        .set({ status: "pending", attempts: 0, lastError: null })
+        .set({ status: "pending", attempts: 0, lastError: null, lastAttemptAt: null })
         .where(
           and(
             eq(notificationDeliveries.id, deliveryId),

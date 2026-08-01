@@ -127,7 +127,10 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
     // the checkpoint.required event above predates these endpoints; backdate
     // their activation watermark so this suite's pre-existing flow still
     // exercises delivery (the watermark itself is tested below)
-    await db.update(notificationEndpoints).set({ activatedAt: sql`now() - interval '1 hour'` });
+    await db
+      .update(notificationEndpoints)
+      .set({ activatedAt: sql`now() - interval '1 hour'` })
+      .where(eq(notificationEndpoints.projectId, projectId));
 
     enqueued.length = 0;
     const created = await syncRunNotifications(db, fakeQueue, runId);
@@ -355,6 +358,37 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
     );
   });
 
+  it("PATCH reconfiguration fails still-pending deliveries in the same transaction", async () => {
+    const created = await jsonOf<{ id: string }>(
+      await admin.request(`${base()}/endpoints`, {
+        method: "POST",
+        json: {
+          kind: "feishu",
+          name: "reconfig",
+          url: "https://open.feishu.cn/open-apis/bot/v2/hook/original",
+        },
+      }),
+    );
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await admin.request(`${base()}/endpoints/${created.id}/test`, { method: "POST" }),
+    );
+
+    // no worker runs in this suite, so the row is still pending when the
+    // endpoint's URL changes — it must not survive to fire at the new URL
+    const patched = await admin.request(`${base()}/endpoints/${created.id}`, {
+      method: "PATCH",
+      json: { url: "https://open.feishu.cn/open-apis/bot/v2/hook/replaced" },
+    });
+    expect(patched.status).toBe(200);
+
+    const [row] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, deliveryId));
+    expect(row?.status).toBe("failed");
+    expect(row?.lastError).toBe("superseded by endpoint reconfiguration");
+  });
+
   it("test-send creates and enqueues a delivery with no run", async () => {
     const list = await jsonOf<Array<{ id: string; name: string }>>(
       await admin.request(`${base()}/endpoints`),
@@ -406,6 +440,8 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
       .where(eq(notificationDeliveries.id, failedId));
     expect(after?.status).toBe("pending");
     expect(after?.attempts).toBe(0);
+    // an immediate retry must not be no-oped by the worker's claim-recency window
+    expect(after?.lastAttemptAt).toBeNull();
 
     const again = await admin.request(`${base()}/deliveries/${failedId}/retry`, { method: "POST" });
     expect(again.status).toBe(409);

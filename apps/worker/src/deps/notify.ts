@@ -321,7 +321,7 @@ export async function deliverNotification(
     .select()
     .from(notificationDeliveries)
     .where(eq(notificationDeliveries.id, deliveryId));
-  if (!delivery || delivery.status !== "pending") return;
+  if (delivery?.status !== "pending") return;
 
   const [endpoint] = await db
     .select()
@@ -333,6 +333,25 @@ export async function deliverNotification(
       .update(notificationDeliveries)
       .set({ status: "failed", lastError: "endpoint disabled" })
       .where(eq(notificationDeliveries.id, deliveryId));
+    return;
+  }
+
+  // Activation-watermark guard: a row minted before the endpoint's current
+  // configuration must not fire under it. The PATCH that resets the
+  // watermark also fails pending rows, but a row in flight at that instant
+  // slips past the transaction — delivery.createdAt is a conservative proxy
+  // for the event time (sync creates rows at/after their event), so no
+  // event join is needed here.
+  if (delivery.createdAt < endpoint.activatedAt) {
+    await db
+      .update(notificationDeliveries)
+      .set({ status: "failed", lastError: "superseded by endpoint reconfiguration" })
+      .where(
+        and(
+          eq(notificationDeliveries.id, deliveryId),
+          eq(notificationDeliveries.status, "pending"),
+        ),
+      );
     return;
   }
 
