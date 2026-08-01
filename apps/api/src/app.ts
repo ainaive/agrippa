@@ -10,6 +10,7 @@ import { requireSession } from "./middleware/auth";
 import { errorHandler } from "./middleware/error";
 import { catalogRoutes } from "./routes/catalog";
 import { executionRoutes } from "./routes/execution";
+import { fleetRoutes } from "./routes/fleet";
 import { governanceRoutes } from "./routes/governance";
 import { acceptInviteRoutes, invitationRoutes } from "./routes/invitations";
 import { meRoutes } from "./routes/me";
@@ -83,6 +84,7 @@ export function createApp(deps: {
   v1.route("/invitations", invitationRoutes);
   v1.route("/", executionRoutes);
   v1.route("/", governanceRoutes);
+  v1.route("/", fleetRoutes);
   app.route("/api/v1", v1);
 
   // production: serve the built SPA from the same origin (no CORS, ADR-0001)

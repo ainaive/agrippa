@@ -120,6 +120,13 @@ const adminAuditRoute = createRoute({
   staticData: { crumb: "nav.audit" },
 });
 
+const adminWorkersRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "/workers",
+  component: lazyRouteComponent(() => import("./pages/admin/WorkersPage"), "WorkersPage"),
+  staticData: { crumb: "nav.workers" },
+});
+
 const adminMembersRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "/members",
@@ -203,6 +210,7 @@ const routeTree = rootRoute.addChildren([
       adminMcpRoute,
       adminMembersRoute,
       adminAuditRoute,
+      adminWorkersRoute,
     ]),
     projectRoute.addChildren([
       dashboardRoute,
