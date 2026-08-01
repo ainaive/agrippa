@@ -6,6 +6,7 @@ export * from "./engine/fakes";
 export * from "./engine/redis-bus";
 export * from "./engine/run-lifecycle";
 export * from "./expression";
+export * from "./notifications";
 export * from "./queue";
 export * from "./resolve";
 export * from "./seed-builtins";

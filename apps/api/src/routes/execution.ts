@@ -40,6 +40,7 @@ import {
   flattenPhases,
   resolveAgentBindings,
   SubmitError,
+  syncRunNotifications,
   upgradeCompiledTemplate,
   verifyRepoRefs,
 } from "@agrippa/orchestration";
@@ -729,6 +730,16 @@ export const executionRoutes = new Hono<AppEnv>()
       resourceId: run.id,
       projectId: run.projectId,
     });
+    // this finalize happens in the API process, so the worker's
+    // post-executeRun sync never sees it — create the delivery rows here.
+    // Best-effort, and only after the audit row: the cancel is already
+    // committed, so bookkeeping must not 500 the response or displace the
+    // audit write (the worker sweeper is the delivery guarantee).
+    try {
+      await syncRunNotifications(c.var.db, c.var.queue, run.id);
+    } catch (err) {
+      console.warn(`[api] notification sync failed for run ${run.id}:`, String(err));
+    }
     return c.json({ cancelRequested: true });
   })
 

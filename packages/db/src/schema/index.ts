@@ -3,6 +3,7 @@ export * from "./api-keys";
 export * from "./audit";
 export * from "./auth";
 export * from "./invitations";
+export * from "./notifications";
 export * from "./orgs";
 export * from "./projects";
 export * from "./registry";

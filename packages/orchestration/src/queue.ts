@@ -1,6 +1,7 @@
 import {
   type ApprovalExpirePayload,
   QUEUE_APPROVAL_EXPIRE,
+  QUEUE_NOTIFICATION_DELIVER,
   QUEUE_RUN_EXECUTE,
   type RunQueue,
 } from "@agrippa/core";
@@ -20,6 +21,20 @@ export async function createRunQueue(connectionString: string): Promise<BossQueu
   await boss.start();
   await boss.createQueue(QUEUE_RUN_EXECUTE);
   await boss.createQueue(QUEUE_APPROVAL_EXPIRE);
+  // exclusive = ONE unique index on (name, singleton_key) across the whole
+  // created/retry/active range, so a sweeper re-enqueue cannot mint a fresh
+  // job while the original waits out its retry backoff. Neither of the
+  // tempting alternatives does this: 'standard' has no singleton index at
+  // all, and 'stately' keys its index BY STATE (one created + one retry can
+  // coexist). createQueue is ON CONFLICT DO NOTHING and updateQueue cannot
+  // change policy, so a queue left behind by an earlier revision converges
+  // by recreate — any dropped jobs are re-enqueued by the sweeper from the
+  // durable delivery rows.
+  const existing = await boss.getQueue(QUEUE_NOTIFICATION_DELIVER);
+  if (existing && existing.policy !== "exclusive") {
+    await boss.deleteQueue(QUEUE_NOTIFICATION_DELIVER);
+  }
+  await boss.createQueue(QUEUE_NOTIFICATION_DELIVER, { policy: "exclusive" });
 
   return {
     boss,
@@ -37,6 +52,15 @@ export async function createRunQueue(connectionString: string): Promise<BossQueu
         payload,
         { singletonKey: payload.approvalId },
         new Date(atMs),
+      );
+    },
+    async enqueueNotificationDelivery(deliveryId: string): Promise<void> {
+      await boss.send(
+        QUEUE_NOTIFICATION_DELIVER,
+        { deliveryId },
+        // backoff because the receiver is an external service: hammering a
+        // down endpoint every 30s converts an outage into five fast failures.
+        { singletonKey: deliveryId, retryLimit: 5, retryDelay: 30, retryBackoff: true },
       );
     },
   };

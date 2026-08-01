@@ -1,0 +1,31 @@
+{
+  "checkpointRequired": {
+    "title": "Action needed",
+    "body": "Run #{{runNumber}} \"{{taskTitle}}\" is waiting on \"{{checkpointTitle}}\" in {{projectName}}."
+  },
+  "checkpointExpired": {
+    "title": "Checkpoint expired",
+    "body": "A checkpoint on run #{{runNumber}} \"{{taskTitle}}\" in {{projectName}} expired without a response."
+  },
+  "runSucceeded": {
+    "title": "Run succeeded",
+    "body": "Run #{{runNumber}} \"{{taskTitle}}\" in {{projectName}} finished successfully."
+  },
+  "runFailed": {
+    "title": "Run failed",
+    "body": "Run #{{runNumber}} \"{{taskTitle}}\" in {{projectName}} failed: {{error}}."
+  },
+  "runCancelled": {
+    "title": "Run cancelled",
+    "body": "Run #{{runNumber}} \"{{taskTitle}}\" in {{projectName}} was cancelled."
+  },
+  "runTimedOut": {
+    "title": "Run timed out",
+    "body": "Run #{{runNumber}} \"{{taskTitle}}\" in {{projectName}} exceeded its duration limit."
+  },
+  "test": {
+    "title": "Test notification",
+    "body": "This is a test notification from Agrippa for project {{projectName}}."
+  },
+  "openRun": "Open run"
+}

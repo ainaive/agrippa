@@ -1,0 +1,1 @@
+ALTER TABLE "notification_endpoints" ADD COLUMN "activated_at" timestamp with time zone DEFAULT now() NOT NULL;

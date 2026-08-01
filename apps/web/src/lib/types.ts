@@ -320,3 +320,32 @@ export type Quota = {
   tokenLimit: number | null;
   hardStop: boolean;
 } | null;
+
+export type NotificationEndpointRow = {
+  id: string;
+  kind: "generic" | "feishu" | "dingtalk";
+  name: string;
+  url: string; // masked by the API
+  events: string[];
+  locale: string;
+  enabled: boolean;
+  hasSecret: boolean;
+  createdAt: string;
+};
+
+export type NotificationDeliveryRow = {
+  id: string;
+  endpointId: string;
+  endpointName: string | null;
+  endpointKind: string | null;
+  runId: string | null;
+  runNumber: number | null;
+  eventType: string;
+  status: "pending" | "succeeded" | "failed";
+  attempts: number;
+  lastAttemptAt: string | null;
+  responseStatus: number | null;
+  responseSnippet: string | null;
+  lastError: string | null;
+  createdAt: string;
+};

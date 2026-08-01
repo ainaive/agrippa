@@ -56,6 +56,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       enqueued.push(id);
     },
     enqueueApprovalExpiry: async () => {},
+    enqueueNotificationDelivery: async () => {},
   };
 
   const engineDeps = (): EngineDeps => ({

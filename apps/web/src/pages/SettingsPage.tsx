@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
+  BellIcon,
   FolderCogIcon,
   GaugeIcon,
   GitBranchIcon,
@@ -17,6 +18,7 @@ import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
+import { RunStatusBadge } from "@/components/RunStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -40,6 +42,8 @@ import type {
   McpServerRow,
   Member,
   ModelRow,
+  NotificationDeliveryRow,
+  NotificationEndpointRow,
   ProviderCatalogRow,
   ProviderCredentialRow,
   Quota,
@@ -765,11 +769,296 @@ function QuotaSection({ projectId }: { projectId: string }) {
   );
 }
 
+const NOTIFY_EVENT_TYPES = [
+  "checkpoint.required",
+  "checkpoint.expired",
+  "run.succeeded",
+  "run.failed",
+  "run.cancelled",
+  "run.timed_out",
+] as const;
+
+const eventTypeKey = (type: string) => type.replaceAll(".", "_");
+
+function NotificationsSection({ projectId }: { projectId: string }) {
+  const { t, i18n } = useTranslation(["settings", "common"]);
+  const queryClient = useQueryClient();
+  const endpoints = useQuery({
+    queryKey: ["notification-endpoints", projectId],
+    queryFn: () => api<NotificationEndpointRow[]>(`/projects/${projectId}/notifications/endpoints`),
+  });
+  const deliveries = useQuery({
+    queryKey: ["notification-deliveries", projectId],
+    queryFn: () =>
+      api<NotificationDeliveryRow[]>(`/projects/${projectId}/notifications/deliveries?limit=30`),
+    refetchInterval: 10_000,
+  });
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["notification-endpoints", projectId] });
+    void queryClient.invalidateQueries({ queryKey: ["notification-deliveries", projectId] });
+  };
+
+  const [kind, setKind] = useState<NotificationEndpointRow["kind"]>("feishu");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const [events, setEvents] = useState<string[]>([]);
+  const [locale, setLocale] = useState(i18n.language.startsWith("zh") ? "zh-CN" : "en");
+
+  const add = useMutation({
+    mutationFn: () =>
+      api(`/projects/${projectId}/notifications/endpoints`, {
+        method: "POST",
+        json: { kind, name, url, secret: secret || undefined, events, locale },
+      }),
+    onSuccess: () => {
+      toast.success(t("settings:notifications.added"));
+      setName("");
+      setUrl("");
+      setSecret("");
+      setEvents([]);
+      invalidate();
+    },
+    onError: toastApiError,
+  });
+  const toggle = useMutation({
+    mutationFn: (endpoint: NotificationEndpointRow) =>
+      api(`/projects/${projectId}/notifications/endpoints/${endpoint.id}`, {
+        method: "PATCH",
+        json: { enabled: !endpoint.enabled },
+      }),
+    onSuccess: invalidate,
+    onError: toastApiError,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) =>
+      api(`/projects/${projectId}/notifications/endpoints/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success(t("settings:notifications.removed"));
+      invalidate();
+    },
+    onError: toastApiError,
+  });
+  const test = useMutation({
+    mutationFn: (id: string) =>
+      api(`/projects/${projectId}/notifications/endpoints/${id}/test`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success(t("settings:notifications.testQueued"));
+      invalidate();
+    },
+    onError: toastApiError,
+  });
+  const retry = useMutation({
+    mutationFn: (id: string) =>
+      api(`/projects/${projectId}/notifications/deliveries/${id}/retry`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success(t("settings:notifications.retried"));
+      invalidate();
+    },
+    onError: toastApiError,
+  });
+
+  const canAdd = name.trim() !== "" && url.trim() !== "" && (kind !== "generic" || secret !== "");
+
+  return (
+    <div className="space-y-8">
+      <div className="space-y-3">
+        <div>
+          <h3 className="text-sm font-medium">{t("settings:notifications.endpointsTitle")}</h3>
+          <p className="text-sm text-muted-foreground">
+            {t("settings:notifications.endpointsHint")}
+          </p>
+        </div>
+        {endpoints.data?.length === 0 && (
+          <EmptyState title={t("settings:notifications.empty")} icon={BellIcon} />
+        )}
+        <div className="space-y-2">
+          {endpoints.data?.map((endpoint) => (
+            <div
+              key={endpoint.id}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  {endpoint.name}
+                  <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                    {t(`settings:notifications.kinds.${endpoint.kind}`)}
+                  </span>
+                  <span className="text-xs text-muted-foreground">{endpoint.locale}</span>
+                </div>
+                <p className="truncate text-xs text-muted-foreground">{endpoint.url}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch
+                  checked={endpoint.enabled}
+                  onCheckedChange={() => toggle.mutate(endpoint)}
+                  aria-label={endpoint.name}
+                />
+                <Button size="sm" variant="outline" onClick={() => test.mutate(endpoint.id)}>
+                  {t("settings:notifications.test")}
+                </Button>
+                <ConfirmDialog
+                  trigger={
+                    <Button size="sm" variant="ghost" aria-label={t("common:actions.remove")}>
+                      <XIcon />
+                    </Button>
+                  }
+                  title={t("settings:notifications.removeConfirm", { name: endpoint.name })}
+                  description={t("settings:notifications.removeHint")}
+                  confirmLabel={t("common:actions.remove")}
+                  destructive
+                  onConfirm={() => remove.mutate(endpoint.id)}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="max-w-md space-y-4">
+        <h3 className="text-sm font-medium">{t("settings:notifications.addTitle")}</h3>
+        <div className="space-y-1">
+          <Label>{t("settings:notifications.kind")}</Label>
+          <Select value={kind} onValueChange={(v) => setKind(v as NotificationEndpointRow["kind"])}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(["feishu", "dingtalk", "generic"] as const).map((k) => (
+                <SelectItem key={k} value={k}>
+                  {t(`settings:notifications.kinds.${k}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="notify-name">{t("settings:notifications.name")}</Label>
+          <Input id="notify-name" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="notify-url">{t("settings:notifications.url")}</Label>
+          <Input
+            id="notify-url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://"
+          />
+          <p className="text-xs text-muted-foreground">
+            {t(`settings:notifications.urlHint.${kind}`)}
+          </p>
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="notify-secret">{t("settings:notifications.secret")}</Label>
+          <Input
+            id="notify-secret"
+            type="password"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            autoComplete="off"
+          />
+          <p className="text-xs text-muted-foreground">
+            {t(`settings:notifications.secretHint.${kind}`)}
+          </p>
+        </div>
+        <div className="space-y-1">
+          <Label>{t("settings:notifications.locale")}</Label>
+          <Select value={locale} onValueChange={setLocale}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="en">English</SelectItem>
+              <SelectItem value="zh-CN">中文</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label>{t("settings:notifications.events")}</Label>
+          <div className="flex flex-wrap gap-2">
+            {NOTIFY_EVENT_TYPES.map((type) => {
+              const active = events.includes(type);
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() =>
+                    setEvents((prev) => (active ? prev.filter((e) => e !== type) : [...prev, type]))
+                  }
+                  className={cn(
+                    "rounded-full border px-2.5 py-0.5 text-xs",
+                    active
+                      ? "border-primary bg-primary/10 font-medium"
+                      : "text-muted-foreground hover:bg-muted/60",
+                  )}
+                >
+                  {t(`settings:notifications.eventTypes.${eventTypeKey(type)}`)}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-muted-foreground">{t("settings:notifications.eventsHint")}</p>
+        </div>
+        <Button disabled={!canAdd || add.isPending} onClick={() => add.mutate()}>
+          {t("settings:notifications.add")}
+        </Button>
+      </div>
+
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium">{t("settings:notifications.deliveriesTitle")}</h3>
+        {deliveries.data?.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            {t("settings:notifications.deliveriesEmpty")}
+          </p>
+        )}
+        <div className="space-y-1.5">
+          {deliveries.data?.map((delivery) => (
+            <div
+              key={delivery.id}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm"
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <RunStatusBadge status={delivery.status} />
+                <span>
+                  {t(`settings:notifications.eventTypes.${eventTypeKey(delivery.eventType)}`, {
+                    defaultValue: delivery.eventType,
+                  })}
+                </span>
+                <span className="text-muted-foreground">{delivery.endpointName}</span>
+                {delivery.runNumber !== null && (
+                  <span className="text-xs text-muted-foreground">#{delivery.runNumber}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {delivery.lastError && (
+                  <span
+                    className="max-w-64 truncate text-xs text-destructive"
+                    title={delivery.responseSnippet ?? delivery.lastError}
+                  >
+                    {delivery.lastError}
+                  </span>
+                )}
+                <span className="text-xs text-muted-foreground">×{delivery.attempts}</span>
+                {delivery.status === "failed" && (
+                  <Button size="sm" variant="outline" onClick={() => retry.mutate(delivery.id)}>
+                    {t("settings:notifications.retry")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
   { key: "general", icon: FolderCogIcon },
   { key: "members", icon: UsersIcon },
   { key: "resources", icon: ShieldCheckIcon },
   { key: "repos", icon: GitBranchIcon },
+  { key: "notifications", icon: BellIcon },
   { key: "quota", icon: GaugeIcon },
 ];
 
@@ -812,6 +1101,7 @@ export function SettingsPage() {
             {section === "members" && <MembersSection projectId={projectId} />}
             {section === "resources" && <ResourcesSection projectId={projectId} />}
             {section === "repos" && <ReposSection projectId={projectId} />}
+            {section === "notifications" && <NotificationsSection projectId={projectId} />}
             {section === "quota" && <QuotaSection projectId={projectId} />}
           </CardContent>
         </Card>

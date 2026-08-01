@@ -82,6 +82,21 @@ GET    /projects/:id/task-types/:taskTypeId/preflight   # viewer-readable submit
    # item so the submit summary can deep-link to the right tab. 409 if the template has no published version.
 GET    /projects/:id/quota                PUT /projects/:id/quota
 GET    /projects/:id/usage   # current-month totals + byModel + byTaskType + byDay (same window as the quota gate)
+GET    /projects/:id/notifications/endpoints              POST /projects/:id/notifications/endpoints
+PATCH  /projects/:id/notifications/endpoints/:endpointId  DELETE .../endpoints/:endpointId
+POST   /projects/:id/notifications/endpoints/:endpointId/test   # 202 {deliveryId} — queues a test send
+GET    /projects/:id/notifications/deliveries?limit=&status=    # delivery log w/ endpoint + run context
+POST   /projects/:id/notifications/deliveries/:deliveryId/retry # CAS failed→pending (else 409 not_retryable)
+   # ALL admin-only, reads included: IM bot webhook URLs are capability URLs, so responses carry a masked
+   # url + hasSecret only. The signing secret is write-only (secrets kind webhook_secret); required for
+   # kind generic, optional for feishu/dingtalk. Changing the URL of a SIGNED endpoint requires re-entering
+   # the secret (the provider-credential rule; enforced in the route since unsigned endpoints are exempt).
+   # PATCH resets the activation watermark (activated_at) on re-enable and on url/events changes AND
+   # fails the endpoint's still-pending deliveries in the same transaction, so a changed endpoint never
+   # replays historical events (a worker-side guard catches rows in flight past that transaction).
+   # Bad URL → 400 webhook_url_invalid (per-kind host pins: open.feishu.cn / oapi.dingtalk.com; query
+   # allowed — DingTalk carries access_token there). DELETE removes endpoint + secret in one tx; deliveries
+   # cascade. Audit actions: project.webhook.add|update|remove|test|retry.
 ```
 
 ### Catalog

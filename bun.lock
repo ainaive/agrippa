@@ -82,6 +82,7 @@
         "@agrippa/executor-claude": "workspace:*",
         "@agrippa/executor-codex": "workspace:*",
         "@agrippa/executor-core": "workspace:*",
+        "@agrippa/i18n": "workspace:*",
         "@agrippa/orchestration": "workspace:*",
         "drizzle-orm": "^0.45.2",
         "ioredis": "^5.11.1",

@@ -1,0 +1,31 @@
+{
+  "checkpointRequired": {
+    "title": "检查点待处理",
+    "body": "{{projectName}} 中的执行 #{{runNumber}}「{{taskTitle}}」正在等待「{{checkpointTitle}}」。"
+  },
+  "checkpointExpired": {
+    "title": "检查点已超时",
+    "body": "{{projectName}} 中执行 #{{runNumber}}「{{taskTitle}}」的检查点因无人响应已超时。"
+  },
+  "runSucceeded": {
+    "title": "执行成功",
+    "body": "{{projectName}} 中的执行 #{{runNumber}}「{{taskTitle}}」已成功完成。"
+  },
+  "runFailed": {
+    "title": "执行失败",
+    "body": "{{projectName}} 中的执行 #{{runNumber}}「{{taskTitle}}」失败：{{error}}。"
+  },
+  "runCancelled": {
+    "title": "执行已取消",
+    "body": "{{projectName}} 中的执行 #{{runNumber}}「{{taskTitle}}」已被取消。"
+  },
+  "runTimedOut": {
+    "title": "执行超时",
+    "body": "{{projectName}} 中的执行 #{{runNumber}}「{{taskTitle}}」超出了时长限制。"
+  },
+  "test": {
+    "title": "测试通知",
+    "body": "这是 Agrippa 为项目 {{projectName}} 发送的测试通知。"
+  },
+  "openRun": "查看执行"
+}

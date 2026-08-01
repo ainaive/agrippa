@@ -55,7 +55,7 @@ invitations (id pk, org_id fk, email,                         -- invite-only onb
            accepted_at null, accepted_user_id fk users null)  -- null = pending
            -- self-registration is closed (05); this is the only path a new member joins
 
-secrets   (id pk, org_id fk, kind text,                       -- 'mcp_auth' | 'git_credential' | 'provider_api_key' | ...
+secrets   (id pk, org_id fk, kind text,                       -- 'mcp_auth' | 'git_credential' | 'provider_api_key' | 'webhook_secret' | ...
            ciphertext bytea, created_by fk, created_at, rotated_at)
            -- AES-256-GCM via node:crypto; key from AGRIPPA_SECRET_KEY env
 ```
@@ -92,6 +92,24 @@ project_quotas (id pk, project_id fk unique,
            token_limit bigint null,
            hard_stop boolean not null default true,
            current_period_start date)
+
+notification_endpoints (id pk, project_id fk cascade,
+           kind text,                                          -- 'generic' | 'feishu' | 'dingtalk' (TS-only enum)
+           name, url,                                          -- url is a capability URL for IM bots: admin-only reads, masked in responses
+           secret_ref fk secrets null,                         -- signing secret; required for 'generic' (API-enforced)
+           events jsonb default '[]',                          -- NotifiableEventType[]; empty = all
+           locale text default 'zh-CN',                        -- the channel's rendering locale (design/07)
+           enabled bool,
+           activated_at tstz default now(),                    -- watermark: no event older than this is delivered;
+                                                               -- PATCH resets it on re-enable and url/events changes
+           created_by fk, created_at)
+
+notification_deliveries (id pk, endpoint_id fk cascade, project_id fk cascade,
+           run_id fk null, event_id fk run_events null,        -- both null only for test sends
+           event_type text, status check in ('pending','succeeded','failed'),
+           attempts int, payload jsonb,                        -- redacted rendered snapshot
+           last_attempt_at, response_status, response_snippet, last_error, created_at,
+           unique (endpoint_id, event_id) where event_id is not null)  -- delivery bookkeeping is idempotent
 ```
 
 ### Scenario layer
