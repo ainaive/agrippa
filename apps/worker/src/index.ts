@@ -3,16 +3,14 @@ import {
   type ApprovalExpirePayload,
   EXECUTOR_CATALOG,
   isExecutorId,
-  isTerminalRunStatus,
   type NotificationDeliverPayload,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
   QUEUE_RUN_EXECUTE,
-  type RunExecutePayload,
+  runExecuteSubsetQueues,
 } from "@agrippa/core";
 import {
   awaitSchema,
-  checkpoints,
   createDb,
   executorRegistrations,
   notificationDeliveries,
@@ -24,21 +22,18 @@ import type { Executor } from "@agrippa/executor-core";
 import {
   appendRunEvent,
   createRunQueue,
+  dbRunExecutorResolver,
   decideCheckpoint,
-  durationToMinutes,
   type EngineDeps,
-  ExecutorUnavailableError,
-  executeRun,
   FakeScmService,
-  finalizeRun,
   findStrandedCheckpointRuns,
   InProcessEventBus,
   RedisEventBus,
   sweepNotificationDeliveries,
-  syncRunNotifications,
 } from "@agrippa/orchestration";
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
+import { createRunConsumer, startRunFetchLoop } from "./consumer";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
 import { deliverNotification } from "./deps/notify";
@@ -75,7 +70,9 @@ await markBootStarted(db, containerId);
 const bus = process.env.REDIS_URL
   ? new RedisEventBus(process.env.REDIS_URL)
   : new InProcessEventBus();
-const queue = await createRunQueue(process.env.DATABASE_URL as string);
+const queue = await createRunQueue(process.env.DATABASE_URL as string, {
+  resolveRunExecutors: dbRunExecutorResolver(db),
+});
 
 const executors: Record<string, Executor> = {
   "claude-agent-sdk": createClaudeExecutor(),
@@ -147,66 +144,22 @@ const deps: EngineDeps = {
 
 const SLOTS = Number(process.env.WORKER_SLOTS ?? 2);
 
-await queue.boss.work(
-  QUEUE_RUN_EXECUTE,
-  {
-    batchSize: 1,
-    includeMetadata: true,
-    pollingIntervalSeconds: 1,
-    localConcurrency: SLOTS,
-  } as const,
-  async (jobs: JobWithMetadata<RunExecutePayload>[]) => {
-    for (const job of jobs) {
-      const { runId } = job.data;
-      const meta = job as unknown as { retryCount?: number; retryLimit?: number };
-      try {
-        const outcome = await executeRun(deps, runId);
-        deps.logger.info(`run ${runId}: ${outcome}`);
-        if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);
-        // post-commit delivery sync (idempotent) — covers checkpoint.required
-        // and every engine-side terminal event in one place
-        await syncNotificationsBestEffort(runId);
-      } catch (err) {
-        // Heterogeneous fleet: this worker lacks the run's executor. The
-        // throw happens before any status transition, so for pre-claim states
-        // we DECLINE the job (no pg-boss retries burned) and let the sweepers
-        // re-enqueue — `queued` runs re-enqueue after 30s (queuedAt never
-        // refreshes), decided `waiting_approval` runs via the stranded-
-        // checkpoint sweep; a still-pending checkpoint re-enqueues on its
-        // decision. The run bounces ≤60s at a time until a capable worker
-        // takes it. A `running` run (crash-recovery pickup) must rethrow:
-        // nothing re-enqueues an unclaimed running run today — the execution
-        // lease is ADR-0009 future work.
-        if (
-          (typeof err === "object" &&
-            err !== null &&
-            (err as { code?: string }).code === "executor_unavailable_on_worker") ||
-          err instanceof ExecutorUnavailableError
-        ) {
-          const [run] = await db
-            .select({ status: runs.status })
-            .from(runs)
-            .where(eq(runs.id, runId));
-          if (run && (run.status === "queued" || run.status === "waiting_approval")) {
-            deps.logger.warn(`run ${runId}: declining — ${String((err as Error).message)}`);
-            // one timeline event so the SPA can show WHY the run is waiting
-            await appendRunEvent(db, {
-              runId,
-              type: "run.deferred",
-              payload: { reason: String((err as Error).message) },
-            });
-            continue;
-          }
-        }
-        deps.logger.error(`run ${runId} crashed`, { err: String(err) });
-        if ((meta.retryCount ?? 0) >= (meta.retryLimit ?? 0)) {
-          await markRunFailed(runId, err);
-        }
-        throw err; // let pg-boss retry — the engine resumes step-granularly
-      }
-    }
-  },
-);
+const consumer = createRunConsumer(db, deps, queue);
+
+// This worker consumes exactly the executor-set queues covered by its own
+// executors (required-set ⊆ own-set), plus the legacy single queue as the
+// deploy-skew fallback — an old api still sends there mid-deploy, and jobs
+// already queued under the old name must drain. The queues are created
+// up front so the first fetch cannot race their existence.
+const runQueues = [...runExecuteSubsetQueues(Object.keys(executors)), QUEUE_RUN_EXECUTE];
+for (const name of runQueues) await queue.boss.createQueue(name);
+const fetchLoop = startRunFetchLoop({
+  boss: queue.boss,
+  queues: runQueues,
+  slots: SLOTS,
+  handler: consumer.handleRunJob,
+  logger: deps.logger,
+});
 
 await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayload>[]) => {
   for (const job of jobs) {
@@ -236,7 +189,7 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
     deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
     // the onTimeout resume must never wait on delivery bookkeeping
     await queue.enqueueRun(job.data.runId); // engine applies the template's onTimeout
-    await syncNotificationsBestEffort(job.data.runId);
+    await consumer.syncNotificationsBestEffort(job.data.runId);
   }
 });
 
@@ -272,56 +225,10 @@ await queue.boss.work(
   },
 );
 
-// every boss.work() above has returned — only now is this replica actually
-// consuming, which is the signal deploy verification counts (issue #15)
+// every consumer above is live — the two boss.work() calls returned and the
+// run fetch loop is ticking — which is the signal deploy verification counts
+// (issue #15)
 await markConsumersReady(db, containerId);
-
-async function scheduleApprovalExpiry(runId: string): Promise<void> {
-  const rows = await db
-    .select()
-    .from(checkpoints)
-    .where(and(eq(checkpoints.runId, runId), eq(checkpoints.status, "pending")));
-  for (const approval of rows) {
-    const payload = approval.payload as { timeoutMinutes?: number };
-    const minutes = payload.timeoutMinutes ?? durationToMinutes("24h");
-    await queue.enqueueApprovalExpiry(
-      { approvalId: approval.id, runId },
-      approval.requestedAt.getTime() + minutes * 60_000,
-    );
-  }
-}
-
-async function markRunFailed(runId: string, err: unknown): Promise<void> {
-  const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
-  if (!run || isTerminalRunStatus(run.status)) return;
-  // one shared finalization impl: CAS from the *current* status (so a queued run
-  // whose setup threw before it was claimed transitions queued→failed, not the
-  // illegal queued→failed of a hard-coded from), and it emits the terminal event
-  // that the old id-only update omitted
-  const error = { code: "internal", message: `retries exhausted: ${String(err).slice(0, 500)}` };
-  await finalizeRun(db, {
-    runId,
-    from: run.status,
-    to: "failed",
-    error,
-    usageTotals: {},
-    eventPayload: { error },
-  });
-  await syncNotificationsBestEffort(runId);
-}
-
-/**
- * Trigger-site delivery syncs are best-effort: the reconciliation sweeper is
- * the delivery guarantee, so a bookkeeping failure must never fail (or
- * pg-boss-retry) the critical work that preceded it.
- */
-async function syncNotificationsBestEffort(runId: string): Promise<void> {
-  try {
-    await syncRunNotifications(db, queue, runId);
-  } catch (err) {
-    deps.logger.warn(`notification sync failed for run ${runId}`, { err: String(err) });
-  }
-}
 
 /**
  * Reconciliation sweeper: re-enqueues queued runs whose job got lost (e.g.
@@ -360,6 +267,10 @@ console.log(
 
 process.on("SIGTERM", async () => {
   deps.logger.info("draining…");
+  // stop fetching first so no new run lands mid-shutdown; in-flight engines
+  // are still killed by the exit below — the drain-abort (resume on a healthy
+  // worker without burning retries) arrives with the execution lease.
+  await fetchLoop.stop({ awaitInFlight: false });
   await queue.stop();
   process.exit(0);
 });

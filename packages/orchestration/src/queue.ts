@@ -4,23 +4,60 @@ import {
   QUEUE_NOTIFICATION_DELIVER,
   QUEUE_RUN_EXECUTE,
   type RunQueue,
+  requiredExecutorIds,
+  runExecuteQueueName,
 } from "@agrippa/core";
+import { type Db, runs } from "@agrippa/db";
+import { eq } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 
 export type BossQueue = RunQueue & { boss: PgBoss; stop(): Promise<void> };
+
+/**
+ * Resolves the executor ids a run requires, so enqueueRun can derive its
+ * executor-set queue name. Returning [] (unknown run) falls back to the
+ * legacy queue — the job then fails visibly instead of being silently lost.
+ */
+export type RunExecutorResolver = (runId: string) => Promise<readonly string[]>;
+
+/** The standard resolver: one indexed select on the run row. */
+export function dbRunExecutorResolver(db: Db): RunExecutorResolver {
+  return async (runId) => {
+    const [run] = await db
+      .select({ executorId: runs.executorId, agentBindings: runs.agentBindings })
+      .from(runs)
+      .where(eq(runs.id, runId));
+    return run ? requiredExecutorIds(run) : [];
+  };
+}
 
 /**
  * pg-boss handle shared by the api (producer) and worker (consumer).
  * Sends are singleton-keyed by run id: at most one queued/active job per run,
  * so the post-commit send plus the worker's reconciliation sweeper give
  * effectively-exactly-once handoff (docs/design/04, ADR-0003).
+ *
+ * Run sends route to the executor-set queue derived from the run row
+ * (`run.execute.<sorted ids>`); the resolver is injected so this module owns
+ * the name derivation in exactly one place. Set queues are created lazily on
+ * first send — createQueue is ON CONFLICT DO NOTHING, so producer/consumer
+ * races are harmless.
  */
-export async function createRunQueue(connectionString: string): Promise<BossQueue> {
+export async function createRunQueue(
+  connectionString: string,
+  opts: { resolveRunExecutors: RunExecutorResolver },
+): Promise<BossQueue> {
   const boss = new PgBoss({ connectionString });
   boss.on("error", (err: Error) => console.error("[pg-boss]", err));
   await boss.start();
   await boss.createQueue(QUEUE_RUN_EXECUTE);
   await boss.createQueue(QUEUE_APPROVAL_EXPIRE);
+  const createdQueues = new Set<string>([QUEUE_RUN_EXECUTE, QUEUE_APPROVAL_EXPIRE]);
+  const ensureQueue = async (name: string): Promise<void> => {
+    if (createdQueues.has(name)) return;
+    await boss.createQueue(name);
+    createdQueues.add(name);
+  };
   // exclusive = ONE unique index on (name, singleton_key) across the whole
   // created/retry/active range, so a sweeper re-enqueue cannot mint a fresh
   // job while the original waits out its retry backoff. Neither of the
@@ -40,11 +77,10 @@ export async function createRunQueue(connectionString: string): Promise<BossQueu
     boss,
     stop: () => boss.stop({ graceful: true }),
     async enqueueRun(runId: string): Promise<void> {
-      await boss.send(
-        QUEUE_RUN_EXECUTE,
-        { runId },
-        { singletonKey: runId, retryLimit: 2, retryDelay: 5 },
-      );
+      const executorIds = await opts.resolveRunExecutors(runId);
+      const name = executorIds.length > 0 ? runExecuteQueueName(executorIds) : QUEUE_RUN_EXECUTE;
+      await ensureQueue(name);
+      await boss.send(name, { runId }, { singletonKey: runId, retryLimit: 2, retryDelay: 5 });
     },
     async enqueueApprovalExpiry(payload: ApprovalExpirePayload, atMs: number): Promise<void> {
       await boss.sendAfter(
