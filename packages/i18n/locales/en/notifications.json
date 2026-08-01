@@ -1,6 +1,6 @@
 {
   "checkpointRequired": {
-    "title": "Approval needed",
+    "title": "Action needed",
     "body": "Run #{{runNumber}} \"{{taskTitle}}\" is waiting on \"{{checkpointTitle}}\" in {{projectName}}."
   },
   "checkpointExpired": {

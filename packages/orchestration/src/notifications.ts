@@ -107,6 +107,8 @@ const SWEEP_WINDOW = sql`now() - interval '24 hours'`;
 const STALE_PENDING = sql`now() - interval '60 seconds'`;
 /** Rows pending past this many attempts are finalized failed by the sweep. */
 const MAX_SWEPT_ATTEMPTS = 8;
+/** Stale re-enqueues per sweep tick — a backlog drains oldest-first instead of being re-sent wholesale. */
+const STALE_BATCH = 100;
 
 /**
  * Worker-side backstop, run on the reconciliation interval:
@@ -171,7 +173,11 @@ export async function sweepNotificationDeliveries(db: Db, queue: RunQueue): Prom
 
   await db
     .update(notificationDeliveries)
-    .set({ status: "failed", lastError: "delivery attempts exhausted" })
+    .set({
+      status: "failed",
+      // the last attempt's real receiver error is more useful than this label
+      lastError: sql`coalesce(${notificationDeliveries.lastError}, 'delivery attempts exhausted')`,
+    })
     .where(
       and(
         eq(notificationDeliveries.status, "pending"),
@@ -187,7 +193,9 @@ export async function sweepNotificationDeliveries(db: Db, queue: RunQueue): Prom
         eq(notificationDeliveries.status, "pending"),
         lt(notificationDeliveries.createdAt, STALE_PENDING),
       ),
-    );
+    )
+    .orderBy(notificationDeliveries.createdAt)
+    .limit(STALE_BATCH);
   for (const row of stale) {
     await queue.enqueueNotificationDelivery(row.id);
   }

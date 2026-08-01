@@ -49,7 +49,7 @@ const NOW = new Date("2026-08-01T04:05:00Z");
 describe("renderMessage", () => {
   it("renders english with the checkpoint title picked by locale", () => {
     const msg = renderMessage(ctx());
-    expect(msg.title).toBe("Approval needed");
+    expect(msg.title).toBe("Action needed");
     expect(msg.body).toContain('Run #3 "Fix the widget"');
     expect(msg.body).toContain('"Review the plan"');
     expect(msg.body).toContain("Widgets");
@@ -57,7 +57,7 @@ describe("renderMessage", () => {
 
   it("renders zh-CN and falls back through pickLocale for missing locales", () => {
     const zh = renderMessage(ctx({ locale: "zh-CN" }));
-    expect(zh.title).toBe("等待审批");
+    expect(zh.title).toBe("检查点待处理");
     expect(zh.body).toContain("评审计划");
 
     const fallback = renderMessage(
@@ -121,7 +121,7 @@ describe("feishu formatter", () => {
     const ts = body.timestamp as string;
     const expected = createHmac("sha256", `${ts}\nfeishu-secret`).update("").digest("base64");
     expect(body.sign).toBe(expected);
-    expect(JSON.stringify(body.card)).toContain("Approval needed");
+    expect(JSON.stringify(body.card)).toContain("Action needed");
     expect(JSON.stringify(body.card)).toContain("/runs/r-1");
   });
 

@@ -109,7 +109,7 @@
     "events": "Events",
     "eventsHint": "Leave all unchecked to send every event.",
     "eventTypes": {
-      "checkpoint_required": "Approval needed",
+      "checkpoint_required": "Action needed",
       "checkpoint_expired": "Checkpoint expired",
       "run_succeeded": "Run succeeded",
       "run_failed": "Run failed",

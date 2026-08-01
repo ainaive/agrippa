@@ -42,7 +42,7 @@ BYO compute: a daemon on a user/team machine registers, reports which executors 
 - [x] Outbound webhook on `waiting_approval` (+ new `checkpoint.expired` event) and terminal states; per-project endpoint config, secret-signed payloads, durable retryable delivery log
 - [x] Feishu/DingTalk card formatters (CN deployment; no email infrastructure)
 - [ ] Runtime-offline notifications — deferred to Phase A, which owns worker fleet health
-- Verify: an approval checkpoint posts a card with a deep link to the run within seconds; delivery failures are visible and retryable
+- Verify: an approval checkpoint posts a card with a deep link to the run within seconds; delivery failures are visible and retryable *(covered in tests; the live Feishu smoke on the deployed stack is still outstanding)*
 
 ## Craft checklist (adopt opportunistically, any branch)
 

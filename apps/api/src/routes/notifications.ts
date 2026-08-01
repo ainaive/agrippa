@@ -265,7 +265,8 @@ export const notificationRoutes = new Hono<AppEnv>()
     },
   )
   .get("/:projectId/notifications/deliveries", requireProjectRole("admin"), async (c) => {
-    const limit = Math.min(Number(c.req.query("limit") ?? 50) || 50, 200);
+    const rawLimit = Number(c.req.query("limit") ?? 50);
+    const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : 50, 1), 200);
     const status = c.req.query("status");
     const conditions = [eq(notificationDeliveries.projectId, c.req.param("projectId"))];
     if (status === "pending" || status === "succeeded" || status === "failed") {

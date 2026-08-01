@@ -109,7 +109,7 @@
     "events": "事件",
     "eventsHint": "全部不勾选则发送所有事件。",
     "eventTypes": {
-      "checkpoint_required": "等待审批",
+      "checkpoint_required": "检查点待处理",
       "checkpoint_expired": "检查点超时",
       "run_succeeded": "执行成功",
       "run_failed": "执行失败",

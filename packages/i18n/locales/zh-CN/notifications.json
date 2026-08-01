@@ -1,6 +1,6 @@
 {
   "checkpointRequired": {
-    "title": "等待审批",
+    "title": "检查点待处理",
     "body": "{{projectName}} 中的执行 #{{runNumber}}「{{taskTitle}}」正在等待「{{checkpointTitle}}」。"
   },
   "checkpointExpired": {

@@ -165,7 +165,7 @@ await queue.boss.work(
         if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);
         // post-commit delivery sync (idempotent) — covers checkpoint.required
         // and every engine-side terminal event in one place
-        await syncRunNotifications(db, queue, runId);
+        await syncNotificationsBestEffort(runId);
       } catch (err) {
         // Heterogeneous fleet: this worker lacks the run's executor. The
         // throw happens before any status transition, so for pre-claim states
@@ -210,26 +210,33 @@ await queue.boss.work(
 
 await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayload>[]) => {
   for (const job of jobs) {
-    // CAS pending → expired; null means a user already decided it (or a prior
-    // run of this job did) — nothing to do
-    const expired = await decideCheckpoint(db, job.data.approvalId, { status: "expired" });
+    // CAS pending → expired and its timeline event commit TOGETHER: the CAS
+    // makes this job's retry a no-op, so a crash between the two would leave
+    // an expired checkpoint that event-derived notifications can never see.
+    // null means a user already decided it (or a prior run of this job did).
+    const expired = await db.transaction(async (tx) => {
+      const row = await decideCheckpoint(tx, job.data.approvalId, { status: "expired" });
+      if (!row) return null;
+      // the expiry previously left no trace until the engine resumed — one
+      // timeline event so the timeline (and notifications) can show it
+      await appendRunEvent(tx, {
+        runId: job.data.runId,
+        type: "checkpoint.expired",
+        payload: {
+          checkpointRowId: row.id,
+          checkpointId: row.checkpointId,
+          kind: row.kind,
+          iteration: row.iteration,
+          title: (row.payload as { title?: unknown }).title,
+        },
+      });
+      return row;
+    });
     if (!expired) continue;
     deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
-    // the expiry previously left no trace until the engine resumed — one
-    // timeline event so the timeline (and notifications) can show it
-    await appendRunEvent(db, {
-      runId: job.data.runId,
-      type: "checkpoint.expired",
-      payload: {
-        checkpointRowId: expired.id,
-        checkpointId: expired.checkpointId,
-        kind: expired.kind,
-        iteration: expired.iteration,
-        title: (expired.payload as { title?: unknown }).title,
-      },
-    });
-    await syncRunNotifications(db, queue, job.data.runId);
+    // the onTimeout resume must never wait on delivery bookkeeping
     await queue.enqueueRun(job.data.runId); // engine applies the template's onTimeout
+    await syncNotificationsBestEffort(job.data.runId);
   }
 });
 
@@ -300,7 +307,20 @@ async function markRunFailed(runId: string, err: unknown): Promise<void> {
     usageTotals: {},
     eventPayload: { error },
   });
-  await syncRunNotifications(db, queue, runId);
+  await syncNotificationsBestEffort(runId);
+}
+
+/**
+ * Trigger-site delivery syncs are best-effort: the reconciliation sweeper is
+ * the delivery guarantee, so a bookkeeping failure must never fail (or
+ * pg-boss-retry) the critical work that preceded it.
+ */
+async function syncNotificationsBestEffort(runId: string): Promise<void> {
+  try {
+    await syncRunNotifications(db, queue, runId);
+  } catch (err) {
+    deps.logger.warn(`notification sync failed for run ${runId}`, { err: String(err) });
+  }
 }
 
 /**

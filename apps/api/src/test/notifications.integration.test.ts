@@ -384,6 +384,10 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
       await admin.request(`${base()}/deliveries?status=failed`),
     );
     expect(failed.every((r) => r.status === "failed")).toBe(true);
+
+    // hostile limits clamp instead of reaching Postgres as LIMIT -5
+    expect((await admin.request(`${base()}/deliveries?limit=-5`)).status).toBe(200);
+    expect((await admin.request(`${base()}/deliveries?limit=abc`)).status).toBe(200);
   });
 
   it("retry is CAS: failed retries once, non-failed conflicts", async () => {
