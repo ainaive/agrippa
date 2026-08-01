@@ -66,14 +66,9 @@ await awaitSchema(db, {
   log: (msg) => console.log(`[worker] ${msg}`),
 });
 
-await markBootStarted(db, containerId);
-const bus = process.env.REDIS_URL
-  ? new RedisEventBus(process.env.REDIS_URL)
-  : new InProcessEventBus();
-const queue = await createRunQueue(process.env.DATABASE_URL as string, {
-  resolveRunExecutors: dbRunExecutorResolver(db),
-});
-
+// Executor construction is DB-free (the codex probe runs a CLI, nothing
+// else), so it happens before the first heartbeat write: boot-start carries
+// the capability advertisement the API's submit gating and fleet page read.
 const executors: Record<string, Executor> = {
   "claude-agent-sdk": createClaudeExecutor(),
   fake: new DemoExecutor(),
@@ -107,12 +102,27 @@ for (const [id, executor] of Object.entries(executors)) {
   }
 }
 
+const workerAd = {
+  executors: Object.entries(executors).map(([id, executor]) => ({
+    id,
+    envAuthProviders: executor.envAuthProviders ? [...executor.envAuthProviders] : undefined,
+  })),
+  version: process.env.AGRIPPA_VERSION ?? null,
+};
+
+await markBootStarted(db, containerId, workerAd);
+const bus = process.env.REDIS_URL
+  ? new RedisEventBus(process.env.REDIS_URL)
+  : new InProcessEventBus();
+const queue = await createRunQueue(process.env.DATABASE_URL as string, {
+  resolveRunExecutors: dbRunExecutorResolver(db),
+});
+
 /**
- * Advertise what this worker actually registered: the API rejects submissions
- * that bind an executor with no recent registration, so a codex-less
- * deployment fails at submit with an actionable error instead of exhausting
- * queue retries later. Heartbeated below so a reconfigured deployment ages
- * out of the live set.
+ * Deployment-wide registration rows — now a deploy-skew dual-write only: the
+ * API reads per-worker advertisements from worker_heartbeats and unions these
+ * in so an old worker's executors don't read as vanished mid-deploy. The
+ * table and this writer are dropped by a post-merge cleanup.
  */
 async function registerExecutors(): Promise<void> {
   for (const executorId of Object.keys(executors)) {
@@ -238,7 +248,7 @@ setInterval(async () => {
   try {
     // liveness beat FIRST: deploy verification reads it through a sliding
     // window, so a transient error in the sweep work below must not skip it
-    await touchWorkerHeartbeat(db, containerId);
+    await touchWorkerHeartbeat(db, containerId, workerAd);
 
     const stragglers = await db
       .select({ id: runs.id })

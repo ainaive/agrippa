@@ -29,6 +29,11 @@ const rowFor = async (containerId: string) => {
   return row;
 };
 
+const AD = {
+  executors: [{ id: "fake" }, { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }],
+  version: "test-1",
+};
+
 describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
   beforeAll(async () => {
     // drop the drizzle schema too — the migrator journals there, and dropping
@@ -65,13 +70,13 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
   it("touch bumps liveness without ever granting readiness", async () => {
     // a fresh row via touch alone (e.g. after an out-of-band delete) must not
     // count as ready — readiness is written only after boss.work() returns
-    await touchWorkerHeartbeat(db, "ctr-touch-only");
+    await touchWorkerHeartbeat(db, "ctr-touch-only", AD);
     expect((await rowFor("ctr-touch-only"))?.consumersReadyAt).toBeNull();
 
     // and on a ready row, touch must preserve the boot-time readiness stamp
     await markConsumersReady(db, "ctr-touch-ready");
     const before = (await rowFor("ctr-touch-ready"))?.consumersReadyAt;
-    await touchWorkerHeartbeat(db, "ctr-touch-ready");
+    await touchWorkerHeartbeat(db, "ctr-touch-ready", AD);
     expect((await rowFor("ctr-touch-ready"))?.consumersReadyAt?.getTime()).toBe(before?.getTime());
   });
 
@@ -81,10 +86,25 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
     await markConsumersReady(db, "ctr-reboot");
     expect((await rowFor("ctr-reboot"))?.consumersReadyAt).not.toBeNull();
 
-    await markBootStarted(db, "ctr-reboot");
+    await markBootStarted(db, "ctr-reboot", AD);
     const row = await rowFor("ctr-reboot");
     expect(row?.consumersReadyAt).toBeNull();
     expect(row?.heartbeatAt).not.toBeNull();
+  });
+
+  it("boot start and touch carry the executor advertisement", async () => {
+    await markBootStarted(db, "ctr-ad", AD);
+    let row = await rowFor("ctr-ad");
+    expect(row?.executors).toEqual(AD.executors);
+    expect(row?.version).toBe("test-1");
+
+    // a reconfigured worker (codex CLI removed, version bump) must converge
+    // the row on its next beat, not advertise the old capability forever
+    const changed = { executors: [{ id: "fake" }], version: "test-2" };
+    await touchWorkerHeartbeat(db, "ctr-ad", changed);
+    row = await rowFor("ctr-ad");
+    expect(row?.executors).toEqual(changed.executors);
+    expect(row?.version).toBe("test-2");
   });
 
   it("deploy verification counts exactly the ready-AND-alive containers of THIS fleet", async () => {

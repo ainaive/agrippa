@@ -344,6 +344,14 @@ export async function resolveAgentBindings(
      * the availability check rather than blocking every submission.
      */
     registeredExecutors?: Set<string>;
+    /**
+     * Per-live-worker executor id sets. Jobs route by executor-set queue, so
+     * a run whose slots span executors no single worker registers could never
+     * be claimed — reject it at submit instead. Skipped when undefined/empty,
+     * or when any worker advertises an empty set (pre-advertisement build
+     * during deploy skew: the fleet is unknowable, not empty).
+     */
+    workerExecutorSets?: readonly (readonly string[])[];
   } = {},
 ): Promise<AgentBindingResolution> {
   const slots = compiled.spec.agents;
@@ -491,6 +499,25 @@ export async function resolveAgentBindings(
   }
 
   const primary = bindings[slotIds[0] as string] as { faberId: string; executorId: string };
+
+  // Coverage: the per-slot check above proves each executor exists SOMEWHERE
+  // in the fleet; executor-set routing needs them all on ONE worker. Only
+  // cataloged ids participate (a custom AGRIPPA_EXECUTOR predates the catalog
+  // and stays unfiltered, same as the per-slot check), demo mode never gates.
+  const sets = opts.workerExecutorSets;
+  if (!demoMode && sets && sets.length > 0 && sets.every((s) => s.length > 0)) {
+    const required = [...new Set(Object.values(bindings).map((b) => b.executorId))].filter((id) =>
+      isExecutorId(id),
+    );
+    const covered = sets.some((set) => required.every((id) => set.includes(id)));
+    if (required.length > 0 && !covered) {
+      throw new SubmitError(
+        "executor_unavailable",
+        `No single worker registers all required executors (${required.join(", ")}) — runs are routed to one worker, so this combination can never be claimed`,
+      );
+    }
+  }
+
   return { bindings, modelResolution, primary };
 }
 
@@ -677,7 +704,10 @@ export async function preflightSubmit(
   projectId: string,
   compiled: CompiledTemplate,
   defaults: { faberId: string; executorId: string },
-  opts: { registeredExecutors?: Set<string> } = {},
+  opts: {
+    registeredExecutors?: Set<string>;
+    workerExecutorSets?: readonly (readonly string[])[];
+  } = {},
 ): Promise<PreflightResult> {
   const checks: PreflightCheck[] = [];
 
