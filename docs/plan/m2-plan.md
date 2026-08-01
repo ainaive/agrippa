@@ -1,16 +1,16 @@
 # M2 Plan — Living Checklist
 
-> Theme: **distributed runtimes + automation** — *execution goes to where the code and credentials live; governance stays on the platform.* Motivated by the [Multica analysis](multica-analysis.md). Unlike M1's single branch, phases and tracks here are independently shippable: each gets its own `feat/*` branch + PR. Each lands only when the full verify gate (`bun run check` + `bun test` + `templates:validate` + `build`) is green **and** the phase's verify criterion passes. Status legend: ☐ todo · ◐ in progress · ☑ done
+> Theme: **distributed runtimes + automation** — *execution goes to where the code and credentials live; governance stays on the platform.* Motivated by the [Multica analysis](multica-analysis.md). Tracks T and N are independently shippable on their own `feat/*` branches; **Phases A and B ship together as one branch + PR** (`feat/m2-remote-runtimes` — A is B's prerequisite and they tell one story; decided 2026-08-01, superseding the per-phase-branch plan). Each lands only when the full verify gate (`bun run check` + `bun test` + `templates:validate` + `build`) is green **and** the phase's verify criterion passes. Status legend: ☐ todo · ◐ in progress · ☑ done
 
 Ordering: Track T and Track N are cheap and independent — they can land while the Phase B ADR is being designed. Phase A unblocks B; C builds on B.
 
-## Phase A — capability routing + fleet visibility ☐
+## Phase A — capability routing + fleet visibility ☑
 
 Small; removes the known routing wart and gives operators eyes on the fleet.
 
-- [ ] Route jobs by required executor using `executor_registrations` (`packages/db/src/schema/registry.ts:219`) — per-executor pg-boss queues or claim-time filtering, replacing today's bounce-until-capable-worker behavior ([03-executor-abstraction](../design/03-executor-abstraction.md) lists this as future work)
-- [ ] Admin UI: worker fleet health from `worker_heartbeats` + executor registrations (deferred since M1.6; [08-deployment](../design/08-deployment.md) notes it)
-- Verify: heterogeneous-fleet integration test — a codex-requiring run never lands on a codex-less worker; admin page shows live/stale workers and their executors
+- [x] Route jobs by required executor — **executor-set pg-boss queues** (`run.execute.<sorted ids>`; workers fetch only subsets of their own set via a manual fetch loop), replacing the bounce-until-capable-worker behavior; per-worker capability advertisements live on `worker_heartbeats` (`executor_registrations` is a deploy-skew dual-write until its post-merge drop), and submit gating adds a coverage check (a run's whole set must fit one worker)
+- [x] Admin UI: worker fleet health — **Admin → Workers** from `worker_heartbeats` advertisements (live/stale at 150 s on the database clock, executors + env-auth + version, 10 s polling)
+- Verify: ☑ heterogeneous-fleet integration test (`apps/worker/src/heterogeneous-fleet.integration.test.ts` — a claude-requiring run executes only on the worker registering it, zero `run.deferred` events); admin page shows live/stale workers and their executors
 
 ## Phase B — remote runtime daemon (the headline) ☐
 
@@ -41,7 +41,7 @@ BYO compute: a daemon on a user/team machine registers, reports which executors 
 
 - [x] Outbound webhook on `waiting_approval` (+ new `checkpoint.expired` event) and terminal states; per-project endpoint config, secret-signed payloads, durable retryable delivery log
 - [x] Feishu/DingTalk card formatters (CN deployment; no email infrastructure)
-- [ ] Runtime-offline notifications — deferred to Phase A, which owns worker fleet health
+- [ ] Runtime-offline notifications — deferred to Phase B's fleet slice: "offline" is only well-defined once daemons have durable identity in the `runtimes` registry (a Phase A heartbeat-based version would false-alarm on every scale-down)
 - Verify: an approval checkpoint posts a card with a deep link to the run within seconds; delivery failures are visible and retryable *(covered in tests; the live Feishu smoke on the deployed stack is still outstanding)*
 
 ## Craft checklist (adopt opportunistically, any branch)
