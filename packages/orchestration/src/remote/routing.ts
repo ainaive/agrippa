@@ -35,6 +35,71 @@ function resolvedProviders(run: RunRow): Set<string> {
   return providers;
 }
 
+type ProviderCatalog = Awaited<ReturnType<typeof loadProviderCatalog>>;
+type ExecutorAd = { id: string; envAuthProviders?: string[] };
+
+/**
+ * The env-policy providers each executor's OWN slots resolve. Auth is scored
+ * per executor, not as a cross-product: a claude-implementer/codex-reviewer
+ * run needs anthropic auth on the claude executor and openai auth on codex —
+ * requiring every executor to authenticate every provider would wrongly
+ * disqualify every mixed fleet. Flat (pre-slot) resolutions attribute all
+ * providers to the run's primary executor. Every required executor gets an
+ * entry, possibly empty.
+ */
+function envProvidersByExecutor(run: RunRow, catalog: ProviderCatalog): Map<string, Set<string>> {
+  const perExecutor = new Map<string, Set<string>>();
+  for (const id of requiredExecutorIds(run)) perExecutor.set(id, new Set());
+  const add = (executorId: string, provider: string | undefined) => {
+    if (!provider || providerAuthPolicy(provider, catalog) !== "env") return;
+    perExecutor.get(executorId)?.add(provider);
+  };
+
+  const bindings = run.agentBindings ?? {};
+  const raw = run.modelResolution as Record<string, unknown>;
+  const values = Object.values(raw);
+  const flat = values.every(
+    (v) => v !== null && typeof v === "object" && "providerModelId" in (v as object),
+  );
+  if (flat) {
+    for (const value of values) add(run.executorId, (value as { provider?: string }).provider);
+    return perExecutor;
+  }
+  for (const [slot, resolution] of Object.entries(raw)) {
+    if (resolution === null || typeof resolution !== "object") continue;
+    const executorId = bindings[slot]?.executorId ?? run.executorId;
+    for (const entry of Object.values(resolution as Record<string, { provider?: string }>)) {
+      add(executorId, entry?.provider);
+    }
+  }
+  return perExecutor;
+}
+
+/**
+ * Whether one host's advertisement can serve the run: every required executor
+ * is present AND can authenticate the env-policy providers ITS slots resolve
+ * (an undefined advertisement means ungated — fake/demo/custom executors).
+ * Used symmetrically for central workers and daemon runtimes, so a keyless
+ * central worker can no longer mask an authenticated daemon.
+ */
+function adsCoverRun(
+  ads: ReadonlyMap<string, ExecutorAd>,
+  perExecutor: ReadonlyMap<string, ReadonlySet<string>>,
+): boolean {
+  for (const [executorId, providers] of perExecutor) {
+    const ad = ads.get(executorId);
+    if (!ad) return false;
+    if (ad.envAuthProviders === undefined) continue;
+    for (const provider of providers) {
+      if (!ad.envAuthProviders.includes(provider)) return false;
+    }
+  }
+  return true;
+}
+
+const adsOf = (executors: ExecutorAd[] | null | undefined): Map<string, ExecutorAd> =>
+  new Map((executors ?? []).map((e) => [e.id, e]));
+
 /**
  * Where a run executes (ADR-0017 Decisions 3 + 7). Deterministic given the
  * run row and registry state, with the persisted pin absolute — a resume must
@@ -61,7 +126,6 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
     return { kind: "central" }; // pin row deleted — engine will fail it honestly
   }
 
-  const required = requiredExecutorIds(run);
   const [project] = await db
     .select({ orgId: projects.orgId })
     .from(projects)
@@ -101,15 +165,17 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
   // applies the approved patch to a pristine server-side clone — the daemon
   // never touches platform git credentials either way.
 
-  // ── prefer central when it can serve ───────────────────────────────────────
+  // ── prefer central when it can serve — executors AND auth ─────────────────
+  // Coverage is the same predicate daemons are scored by: a keyless central
+  // worker (executor present, no env auth for the resolved provider) must
+  // NOT win the preference and starve an authenticated daemon — that is the
+  // primary BYO-credentials scenario.
+  const perExecutor = envProvidersByExecutor(run, catalog);
   const centralWorkers = await db
     .select({ executors: workerHeartbeats.executors })
     .from(workerHeartbeats)
     .where(gte(workerHeartbeats.heartbeatAt, sql`now() - interval '15 minutes'`));
-  const centralCovers = centralWorkers.some((w) => {
-    const ids = new Set((w.executors ?? []).map((e) => e.id));
-    return required.every((id) => ids.has(id));
-  });
+  const centralCovers = centralWorkers.some((w) => adsCoverRun(adsOf(w.executors), perExecutor));
   if (centralCovers) return { kind: "central" };
 
   // ── remote candidates ──────────────────────────────────────────────────────
@@ -126,18 +192,9 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
         ),
       ),
     );
-  const envPolicyProviders = [...providers].filter((p) => providerAuthPolicy(p, catalog) === "env");
-  const eligible = candidates.filter((runtime) => {
-    const ads = new Map((runtime.executors ?? []).map((e) => [e.id, e]));
-    if (!required.every((id) => ads.has(id))) return false;
-    // every executor the run binds must be able to authenticate every
-    // env-policy provider the run resolves, from the DAEMON's own logins
-    return required.every((id) => {
-      const envAuth = ads.get(id)?.envAuthProviders;
-      if (envAuth === undefined) return true; // unadvertised = ungated (fake/custom)
-      return envPolicyProviders.every((p) => envAuth.includes(p));
-    });
-  });
+  const eligible = candidates.filter((runtime) =>
+    adsCoverRun(adsOf(runtime.executors), perExecutor),
+  );
   eligible.sort((a, b) => (b.lastSeenAt?.getTime() ?? 0) - (a.lastSeenAt?.getTime() ?? 0));
   const chosen = eligible[0];
   if (!chosen) return { kind: "central" };

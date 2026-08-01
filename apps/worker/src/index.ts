@@ -15,6 +15,7 @@ import {
   executorRegistrations,
   notificationDeliveries,
   runs,
+  runtimes,
 } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
@@ -34,7 +35,7 @@ import {
   sweepOfflineRuntimes,
   sweepRunLeases,
 } from "@agrippa/orchestration";
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, gte, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { createRunConsumer, startRunFetchLoop } from "./consumer";
 import { DemoExecutor } from "./deps/demo-executor";
@@ -160,16 +161,44 @@ const SLOTS = Number(process.env.WORKER_SLOTS ?? 2);
 
 const consumer = createRunConsumer(db, deps, queue);
 
-// This worker consumes exactly the executor-set queues covered by its own
-// executors (required-set ⊆ own-set), plus the legacy single queue as the
-// deploy-skew fallback — an old api still sends there mid-deploy, and jobs
-// already queued under the old name must drain. The queues are created
-// up front so the first fetch cannot race their existence.
-const runQueues = [...runExecuteSubsetQueues(Object.keys(executors)), QUEUE_RUN_EXECUTE];
-for (const name of runQueues) await queue.boss.createQueue(name);
+/**
+ * The queues this worker polls: executor-set queues covered by its own
+ * executors (required-set ⊆ own-set), PLUS the sets covered by live remote
+ * runtimes — the engine runs centrally even when the executor is remote, so
+ * daemon-only sets need SOME worker fetching their jobs (routing decides
+ * remote at claim time) — plus the legacy single queue as the deploy-skew
+ * fallback. Recomputed on the sweeper tick because runtimes come and go.
+ */
+const knownQueues = new Set<string>();
+async function computeRunQueues(): Promise<string[]> {
+  const names = new Set<string>(runExecuteSubsetQueues(Object.keys(executors)));
+  const liveRuntimes = await db
+    .select({ executors: runtimes.executors })
+    .from(runtimes)
+    .where(
+      and(
+        eq(runtimes.status, "active"),
+        gte(runtimes.lastSeenAt, sql`now() - interval '15 minutes'`),
+      ),
+    );
+  for (const runtime of liveRuntimes) {
+    const ids = (runtime.executors ?? []).map((e) => e.id);
+    if (ids.length > 0) for (const name of runExecuteSubsetQueues(ids)) names.add(name);
+  }
+  names.add(QUEUE_RUN_EXECUTE);
+  const list = [...names];
+  // queues must exist before the first fetch (createQueue is idempotent)
+  for (const name of list) {
+    if (knownQueues.has(name)) continue;
+    await queue.boss.createQueue(name);
+    knownQueues.add(name);
+  }
+  return list;
+}
+
 const fetchLoop = startRunFetchLoop({
   boss: queue.boss,
-  queues: runQueues,
+  queues: await computeRunQueues(),
   slots: SLOTS,
   handler: consumer.handleRunJob,
   logger: deps.logger,
@@ -284,6 +313,10 @@ setInterval(async () => {
     for (const runId of await sweepOfflineRuntimes(db)) {
       await consumer.syncNotificationsBestEffort(runId);
     }
+
+    // queue coverage tracks the live fleet: a runtime registering a new
+    // executor set needs a worker polling that set's queue within a tick
+    fetchLoop.updateQueues(await computeRunQueues());
 
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the

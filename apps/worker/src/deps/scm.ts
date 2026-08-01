@@ -1,4 +1,4 @@
-import { type Db, dispatches } from "@agrippa/db";
+import { type Db, dispatches, runs } from "@agrippa/db";
 import type { PullRequestSpec, PushResult, PushSpec, ScmService } from "@agrippa/orchestration";
 import { applyApprovedPatch, platformGitDirFor, workspaceIntact } from "@agrippa/workspace";
 import { and, desc, eq } from "drizzle-orm";
@@ -101,9 +101,10 @@ export class GitScmService implements ScmService {
 
     // Base + object source: central runs read the platform sidecar (pristine
     // by ADR-0012; refs/agrippa/base always resolves there); daemon runs use
-    // the dispatch-reported baseSha fetched from the remote — safe because
-    // the approved patch is only meaningful against that base, and a lie
-    // surfaces as a fetch/apply failure, never as wrong published content.
+    // the SERVER-pinned base recorded at checkout (ls-remote, before any
+    // daemon involvement) — never the dispatch report. A daemon-chosen base
+    // could be any other reachable commit, and a benign patch applying
+    // cleanly on top would smuggle that commit's contents past the approval.
     const sidecarBase = await platformBaseSha(runId);
     let fetchSource: string;
     let fetchRef: string;
@@ -113,13 +114,22 @@ export class GitScmService implements ScmService {
       fetchRef = "refs/agrippa/base";
       baseSha = sidecarBase;
     } else {
-      const remoteBase = await this.dispatchBaseSha(runId);
-      if (!remoteBase) {
-        throw new Error("no trusted base for publication (no sidecar, no dispatch report)");
+      const pinnedBase = await this.pinnedBaseSha(runId);
+      if (!pinnedBase) {
+        throw new Error("no trusted base for publication (no sidecar, no server-pinned base)");
+      }
+      // cross-check only: the daemon reported what it actually checked out;
+      // a mismatch means it never materialized the pinned base — fail loudly
+      // now instead of publishing a patch applied against something else
+      const reported = await this.dispatchBaseSha(runId);
+      if (reported && reported !== pinnedBase) {
+        throw new Error(
+          `daemon-reported base ${reported} does not match the server-pinned base ${pinnedBase}`,
+        );
       }
       fetchSource = pushUrl;
-      fetchRef = remoteBase;
-      baseSha = remoteBase;
+      fetchRef = pinnedBase;
+      baseSha = pinnedBase;
     }
 
     const { commitSha } = await applyApprovedPatch({
@@ -131,6 +141,21 @@ export class GitScmService implements ScmService {
       pushUrl,
     });
     return { status: "pushed", commitSha };
+  }
+
+  /** The base the SERVER pinned at checkout (runs.workspace_ref, remote runs). */
+  private async pinnedBaseSha(runId: string): Promise<string | null> {
+    const [run] = await this.db
+      .select({ workspaceRef: runs.workspaceRef })
+      .from(runs)
+      .where(eq(runs.id, runId));
+    if (!run?.workspaceRef) return null;
+    try {
+      const spec = JSON.parse(run.workspaceRef) as { baseSha?: string };
+      return spec.baseSha ?? null;
+    } catch {
+      return null; // central-format workspaceRef
+    }
   }
 
   /** The clone base the daemon reported when it completed a dispatch. */

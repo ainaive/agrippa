@@ -86,6 +86,7 @@ const dispatchFor = (
       {
         slug: "builtin/git-workflow",
         version: "1.0.0",
+        dir: ".claude/skills/git-workflow",
         files: [{ path: "SKILL.md", contentBase64: Buffer.from("# skill").toString("base64") }],
       },
     ],
@@ -132,12 +133,12 @@ describe("daemon runner", () => {
       path.join(workspaceDir, ".claude/skills/git-workflow"),
     );
 
-    // skill content was written from the inline payload
-    expect(
-      await Bun.file(
-        path.join(workspaceDir, ".claude", "skills", "builtin/git-workflow", "SKILL.md"),
-      ).text(),
-    ).toBe("# skill");
+    // skill content was written from the inline payload, at EXACTLY the
+    // directory the (rewritten) request points to — the agreement the old
+    // assertion missed, which let the namespaced-slug layout bug through
+    const writtenSkillDir = path.join(workspaceDir, ".claude", "skills", "git-workflow");
+    expect(request?.skills[0]?.localPath).toBe(writtenSkillDir);
+    expect(await Bun.file(path.join(writtenSkillDir, "SKILL.md")).text()).toBe("# skill");
 
     // artifact bytes uploaded BEFORE the event shipped; events in seq order
     expect(api.uploads).toEqual([{ key: "report", bytes: "# report" }]);
@@ -183,5 +184,41 @@ describe("daemon runner", () => {
     await runner.register();
     await runner.executeDispatch(dispatchFor("codex-cli", Bun.randomUUIDv7()));
     expect(api.failed?.message).toContain("codex-cli");
+  });
+});
+
+describe("daemon runner config isolation", () => {
+  it("resets .claude and .mcp.json left by a prior invocation", async () => {
+    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-ws-"));
+    const runId = Bun.randomUUIDv7();
+    const workspaceDir = path.join(process.env.WORKSPACE_ROOT, runId);
+    // a previous agent invocation left hooks, settings, and an MCP config
+    await Bun.write(path.join(workspaceDir, ".claude", "settings.json"), "{}");
+    await Bun.write(path.join(workspaceDir, ".claude", "hooks", "evil.sh"), "#!/bin/sh");
+    await Bun.write(path.join(workspaceDir, ".mcp.json"), "{}");
+
+    const api = new MockApi();
+    const runner = makeRunner(
+      api,
+      new FakeExecutor({ "step-1": { kind: "succeed", output: "x" } }),
+    );
+    await runner.register();
+    await runner.executeDispatch(dispatchFor("fake", runId));
+
+    // the per-invocation reset ran before skills materialized: leftovers gone,
+    // this dispatch's own skill content present
+    expect(await Bun.file(path.join(workspaceDir, ".claude", "settings.json")).exists()).toBe(
+      false,
+    );
+    expect(await Bun.file(path.join(workspaceDir, ".claude", "hooks", "evil.sh")).exists()).toBe(
+      false,
+    );
+    expect(await Bun.file(path.join(workspaceDir, ".mcp.json")).exists()).toBe(false);
+    expect(
+      await Bun.file(
+        path.join(workspaceDir, ".claude", "skills", "git-workflow", "SKILL.md"),
+      ).exists(),
+    ).toBe(true);
+    expect(api.completed).toEqual({});
   });
 });

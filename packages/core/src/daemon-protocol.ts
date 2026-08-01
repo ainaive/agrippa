@@ -67,6 +67,13 @@ export type DispatchWorkspaceSpec = {
   /** Clone URL WITHOUT platform credentials — the daemon uses its machine's ambient git auth. */
   repoUrl: string;
   ref?: string;
+  /**
+   * The SERVER-pinned base commit (resolved by ls-remote at checkout). The
+   * daemon must materialize exactly this commit, and publication applies the
+   * approved patch against exactly this commit — a daemon-chosen base could
+   * smuggle any other reachable commit's contents past the approval.
+   */
+  baseSha: string;
   access: "readOnly" | "readWrite";
   /** Platform-created work branch the daemon checks out (git.branch ran centrally). */
   workBranch?: string;
@@ -75,6 +82,14 @@ export type DispatchWorkspaceSpec = {
 export type DispatchSkillContent = {
   slug: string;
   version: string;
+  /**
+   * Workspace-relative directory the files belong in — derived from the
+   * resolved skill's actual localPath, so the daemon reproduces the central
+   * materializer's layout exactly (namespaced slugs use the basename:
+   * `builtin/git-workflow` lives at `.claude/skills/git-workflow`) and the
+   * request's `skills[].localPath` always points at real files.
+   */
+  dir: string;
   files: Array<{ path: string; contentBase64: string }>;
 };
 

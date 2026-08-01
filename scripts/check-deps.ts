@@ -10,7 +10,12 @@ const ALLOWED: Record<string, string[]> = {
   "@agrippa/core": [],
   "@agrippa/i18n": [],
   "@agrippa/db": ["@agrippa/core"],
-  "@agrippa/orchestration": ["@agrippa/core", "@agrippa/db", "@agrippa/executor-core"],
+  "@agrippa/orchestration": [
+    "@agrippa/core",
+    "@agrippa/db",
+    "@agrippa/executor-core",
+    "@agrippa/workspace",
+  ],
   "@agrippa/executor-core": ["@agrippa/core"],
   "@agrippa/workspace": ["@agrippa/core", "@agrippa/executor-core"],
   "@agrippa/executor-claude": ["@agrippa/core", "@agrippa/executor-core"],

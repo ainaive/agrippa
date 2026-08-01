@@ -10,6 +10,7 @@ import {
   orchestrationTemplates,
   projects,
   providerCredentials,
+  repoConnections,
   runEvents,
   runSteps,
   runs,
@@ -23,10 +24,13 @@ import {
 } from "@agrippa/db";
 import type { StepExecutionRequest } from "@agrippa/executor-core";
 import { and, eq, sql } from "drizzle-orm";
-import { silentLogger } from "../engine/fakes";
+import type { EngineDeps } from "../engine/deps";
+import { FakeResourceMaterializer, silentLogger } from "../engine/fakes";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import { sweepOfflineRuntimes } from "./offline";
+import { remoteEngineDeps } from "./remote-deps";
 import { RemoteExecutor } from "./remote-executor";
+import { RemoteWorkspaceManager } from "./remote-workspace";
 import { routeRun } from "./routing";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
@@ -270,6 +274,120 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     await db.delete(runtimes);
   });
 
+  it("a keyless central worker does not mask an authenticated daemon", async () => {
+    // central advertises the executor but NO env auth for the resolved
+    // provider — the primary BYO-credentials scenario: the run must go remote
+    await db.insert(workerHeartbeats).values({
+      containerId: "w-keyless",
+      executors: [{ id: "claude-agent-sdk", envAuthProviders: [] }],
+    });
+    const runtimeId = await newRuntime([
+      { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] },
+    ]);
+    const run = await newRun();
+    const decision = await routeRun(db, run);
+    expect(decision.kind === "remote" && decision.runtime.id === runtimeId).toBe(true);
+    await db.delete(workerHeartbeats);
+    await db.update(runs).set({ runtimeId: null });
+    await db.delete(runtimes);
+  });
+
+  it("scores env auth per executor, not as a cross-product", async () => {
+    // claude implementer on anthropic + codex reviewer on openai: each
+    // executor must authenticate ITS OWN provider only
+    const mixed = await newRun({
+      agentBindings: {
+        implementer: { faberId, executorId: "claude-agent-sdk" },
+        reviewer: { faberId, executorId: "codex-cli" },
+      },
+      modelResolution: {
+        implementer: CLAUDE_RESOLUTION,
+        reviewer: {
+          coding: {
+            ...CLAUDE_RESOLUTION.coding,
+            provider: "openai",
+            providerModelId: "gpt-5-codex",
+          },
+        },
+      },
+    });
+
+    // the flagship mixed fleet: eligible (a cross-product check would demand
+    // codex⊇anthropic and claude⊇openai and wrongly send this central)
+    const good = await newRuntime([
+      { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] },
+      { id: "codex-cli", envAuthProviders: ["openai"] },
+    ]);
+    const decision = await routeRun(db, mixed);
+    expect(decision.kind === "remote" && decision.runtime.id === good).toBe(true);
+    await db.update(runs).set({ runtimeId: null });
+    await db.delete(runtimes);
+
+    // swapped auth: each executor lacks exactly its own provider → ineligible
+    await newRuntime([
+      { id: "claude-agent-sdk", envAuthProviders: ["openai"] },
+      { id: "codex-cli", envAuthProviders: ["anthropic"] },
+    ]);
+    expect((await routeRun(db, mixed)).kind).toBe("central");
+    await db.update(runs).set({ runtimeId: null });
+    await db.delete(runtimes);
+  });
+
+  it("remote guard: project credentials fail typed, platform-authed MCP reports missing", async () => {
+    const runtimeId = await newRuntime([
+      { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] },
+    ]);
+    const [runtime] = await db.select().from(runtimes).where(eq(runtimes.id, runtimeId));
+    const run = await newRun({ runtimeId });
+
+    const [secret] = await db
+      .insert(secrets)
+      .values({ orgId, kind: "mcp_auth", ciphertext: "x", createdBy: userId })
+      .returning({ id: secrets.id });
+    const authedSlug = `authed-${Bun.randomUUIDv7().slice(-6)}`;
+    const openSlug = `open-${Bun.randomUUIDv7().slice(-6)}`;
+    await db.insert(mcpServers).values([
+      {
+        slug: authedSlug,
+        nameI18n: { en: "Authed", "zh-CN": "Authed" },
+        transport: "http",
+        config: {},
+        authSecretRef: secret?.id as string,
+      },
+      { slug: openSlug, nameI18n: { en: "Open", "zh-CN": "Open" }, transport: "http", config: {} },
+    ]);
+
+    const inner = new FakeResourceMaterializer({
+      providerCredentials: { anthropic: { apiKey: "sk-live-platform" } },
+      mcpServers: [authedSlug, openSlug],
+    });
+    const base = { db, resources: inner, executors: {}, logger: silentLogger };
+    const deps = remoteEngineDeps(
+      base as unknown as EngineDeps,
+      run,
+      runtime as typeof runtimes.$inferSelect,
+    );
+
+    // a credential added after the pin (paused run) must never serialize out —
+    // it fails typed instead of shipping or silently inverting precedence
+    const err = await deps.resources
+      .providerCredential(projectId, "anthropic")
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as { code?: string }).code).toBe("provider_credential_unroutable");
+
+    // platform-held MCP auth: reported missing (with the reason), not shipped
+    const mcp = await deps.resources.mcpServers([openSlug, authedSlug]);
+    expect(mcp.resolved.map((r) => r.slug)).toEqual([openSlug]);
+    expect(mcp.missing).toEqual([
+      `${authedSlug} (platform-held MCP auth cannot ship to a remote runtime)`,
+    ]);
+
+    await db.update(runs).set({ runtimeId: null });
+    await db.delete(runtimes);
+  });
+
   const baseRequest = (runId: string, stepId: string): StepExecutionRequest => ({
     runId,
     stepId,
@@ -444,6 +562,73 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
       .from(dispatches)
       .where(eq(dispatches.id, stale?.id as string));
     expect(staleAfter?.abortRequested).toBe(true);
+  });
+
+  it("refuses to dispatch a request carrying platform provider credentials", async () => {
+    const runtimeId = await newRuntime([{ id: "claude-agent-sdk" }]);
+    const run = await newRun({ runtimeId });
+    await runningStepRow(run.id, "step-leak");
+    const executor = makeExecutor(runtimeId);
+
+    const request: StepExecutionRequest = {
+      ...baseRequest(run.id, "step-leak"),
+      providerAuth: { provider: "anthropic", apiKey: "sk-live-should-never-ship" },
+    };
+    const controller = new AbortController();
+    const iterate = async (): Promise<void> => {
+      for await (const _ of executor.executeStep(request, {
+        signal: controller.signal,
+        logger: silentLogger,
+      })) {
+        // drain — the guard must throw before any event
+      }
+    };
+    await expect(iterate()).rejects.toThrow(/refusing to dispatch/);
+    // and nothing was persisted for a daemon to claim
+    const rows = await db.select().from(dispatches).where(eq(dispatches.runId, run.id));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("checkout pins the publication base server-side (ls-remote at checkout)", async () => {
+    // local bare origin with two commits: the pin is resolved by the SERVER
+    // before any daemon involvement
+    const sh = (args: string[], cwd?: string): string => {
+      const res = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      if (res.exitCode !== 0) throw new Error(`git ${args[0]}: ${res.stderr.toString()}`);
+      return res.stdout.toString();
+    };
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const origin = `${mkdtempSync(path.join(tmpdir(), "agrippa-remote-origin-"))}/repo.git`;
+    sh(["init", "--bare", "-b", "main", origin]);
+    const work = mkdtempSync(path.join(tmpdir(), "agrippa-remote-work-"));
+    sh(["clone", origin, work]);
+    sh(["-C", work, "config", "user.email", "f@example.com"]);
+    sh(["-C", work, "config", "user.name", "Fixture"]);
+    await Bun.write(path.join(work, "README.md"), "# base\n");
+    sh(["add", "-A"], work);
+    sh(["commit", "-m", "init"], work);
+    sh(["push", "origin", "main"], work);
+    const tipSha = sh(["rev-parse", "HEAD"], work).trim();
+
+    const [conn] = await db
+      .insert(repoConnections)
+      .values({ projectId, provider: "generic-git", url: origin, defaultBranch: "main" })
+      .returning({ id: repoConnections.id });
+    const runtimeId = await newRuntime([{ id: "claude-agent-sdk" }]);
+    const run = await newRun({ runtimeId });
+
+    const manager = new RemoteWorkspaceManager(db, runtimeId);
+    await manager.checkout(run.id, {
+      repo: { repoConnectionId: conn?.id as string },
+      ref: "main",
+      access: "readWrite",
+      projectId,
+    });
+    const spec = await manager.workspaceSpec(run.id);
+    expect(spec?.repoUrl).toBe(origin);
+    expect(spec?.ref).toBe("main");
+    expect(spec?.baseSha).toBe(tipSha);
   });
 });
 

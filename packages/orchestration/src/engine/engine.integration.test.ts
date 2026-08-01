@@ -808,47 +808,56 @@ for (const transport of TRANSPORTS) {
         expect(serialized).not.toContain(secret);
       });
 
-      it("materializes the project provider credential per step and redacts its key", async () => {
-        const fx = await setupFixture();
-        const apiKey = "sk-bailian-project-key-1234567890";
-        const script: Record<string, FakeStepBehavior> = {
-          ...HAPPY_SCRIPT,
-          "reproduce-bug": {
-            kind: "succeed",
-            events: [
-              { type: "message.completed", role: "assistant", text: `the key is ${apiKey} oops` },
-              { type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" },
-            ],
-            output: "done",
-          },
-        };
-        // same credential under every provider — the fixture resolution is
-        // mixed-provider ('*'), so the step's provider is data, not a constant
-        const cred = { apiKey };
-        const deps = fx.makeDeps(script, {
-          providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
-        });
-        await executeRun(deps, fx.runId);
+      // These two exercise a PROJECT credential flowing into the executor
+      // request — semantics that deliberately do not exist over the remote
+      // transport (ADR-0017 Decision 7): routing keeps credentialed runs
+      // central, RemoteResourceGuard fails a pinned run typed if a credential
+      // appears later, and buildPayload refuses any request carrying
+      // providerAuth. That exclusion is covered in remote.integration.test.ts.
+      it.skipIf(transport === "remote")(
+        "materializes the project provider credential per step and redacts its key",
+        async () => {
+          const fx = await setupFixture();
+          const apiKey = "sk-bailian-project-key-1234567890";
+          const script: Record<string, FakeStepBehavior> = {
+            ...HAPPY_SCRIPT,
+            "reproduce-bug": {
+              kind: "succeed",
+              events: [
+                { type: "message.completed", role: "assistant", text: `the key is ${apiKey} oops` },
+                { type: "artifact", key: "reproduction-report", kind: "markdown", inline: "# R" },
+              ],
+              output: "done",
+            },
+          };
+          // same credential under every provider — the fixture resolution is
+          // mixed-provider ('*'), so the step's provider is data, not a constant
+          const cred = { apiKey };
+          const deps = fx.makeDeps(script, {
+            providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
+          });
+          await executeRun(deps, fx.runId);
 
-        // every request carries the credential matching its model's provider
-        expect(deps.executor.requests.length).toBeGreaterThan(0);
-        for (const req of deps.executor.requests) {
-          expect(req.providerAuth?.apiKey).toBe(apiKey);
-          expect(req.providerAuth?.provider).toBe(req.model.provider);
-        }
+          // every request carries the credential matching its model's provider
+          expect(deps.executor.requests.length).toBeGreaterThan(0);
+          for (const req of deps.executor.requests) {
+            expect(req.providerAuth?.apiKey).toBe(apiKey);
+            expect(req.providerAuth?.provider).toBe(req.model.provider);
+          }
 
-        // materialized fresh for every step, so a rotated/removed/added key
-        // genuinely applies at the next step (the documented contract)
-        const materializer = deps.resources as FakeResourceMaterializer;
-        expect(materializer.providerCredentialCalls.length).toBe(deps.executor.requests.length);
+          // materialized fresh for every step, so a rotated/removed/added key
+          // genuinely applies at the next step (the documented contract)
+          const materializer = deps.resources as FakeResourceMaterializer;
+          expect(materializer.providerCredentialCalls.length).toBe(deps.executor.requests.length);
 
-        // the key was registered with the redactor at materialization — an agent
-        // echoing it can never persist it
-        const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
-        const serialized = JSON.stringify(events.map((e) => e.payload));
-        expect(serialized).not.toContain(apiKey);
-        expect(serialized).toContain("[REDACTED]");
-      });
+          // the key was registered with the redactor at materialization — an agent
+          // echoing it can never persist it
+          const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+          const serialized = JSON.stringify(events.map((e) => e.payload));
+          expect(serialized).not.toContain(apiKey);
+          expect(serialized).toContain("[REDACTED]");
+        },
+      );
 
       it("omits providerAuth when the project has no provider credential", async () => {
         const fx = await setupFixture();
@@ -858,27 +867,30 @@ for (const transport of TRANSPORTS) {
         for (const req of deps.executor.requests) expect(req.providerAuth).toBeUndefined();
       });
 
-      it("a worker without usable auth declines the run instead of failing it", async () => {
-        const fx = await setupFixture();
-        // this worker's executor advertises NO env auth, and the project has no
-        // credentials either → same pre-claim decline as an unregistered executor
-        const keyless = fx.makeDeps(HAPPY_SCRIPT, { envAuthProviders: [] });
-        await expect(executeRun(keyless, fx.runId)).rejects.toThrow(ExecutorUnavailableError);
-        const [still] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
-        expect(still?.status).toBe("queued"); // untouched — another worker can claim it
-        const keylessResources = keyless.resources as FakeResourceMaterializer;
-        expect(keylessResources.providerCredentialPresenceCalls.length).toBeGreaterThan(0);
-        expect(keylessResources.providerCredentialCalls).toHaveLength(0);
+      it.skipIf(transport === "remote")(
+        "a worker without usable auth declines the run instead of failing it",
+        async () => {
+          const fx = await setupFixture();
+          // this worker's executor advertises NO env auth, and the project has no
+          // credentials either → same pre-claim decline as an unregistered executor
+          const keyless = fx.makeDeps(HAPPY_SCRIPT, { envAuthProviders: [] });
+          await expect(executeRun(keyless, fx.runId)).rejects.toThrow(ExecutorUnavailableError);
+          const [still] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+          expect(still?.status).toBe("queued"); // untouched — another worker can claim it
+          const keylessResources = keyless.resources as FakeResourceMaterializer;
+          expect(keylessResources.providerCredentialPresenceCalls.length).toBeGreaterThan(0);
+          expect(keylessResources.providerCredentialCalls).toHaveLength(0);
 
-        // a project credential covers the gap even on a keyless worker
-        const cred = { apiKey: "sk-project-key-1234567890" };
-        const covered = fx.makeDeps(HAPPY_SCRIPT, {
-          envAuthProviders: [],
-          providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
-        });
-        expect(await executeRun(covered, fx.runId)).not.toBe("failed");
-        expect(covered.executor.requests.length).toBeGreaterThan(0);
-      });
+          // a project credential covers the gap even on a keyless worker
+          const cred = { apiKey: "sk-project-key-1234567890" };
+          const covered = fx.makeDeps(HAPPY_SCRIPT, {
+            envAuthProviders: [],
+            providerCredentials: { anthropic: cred, openai: cred, dashscope: cred },
+          });
+          expect(await executeRun(covered, fx.runId)).not.toBe("failed");
+          expect(covered.executor.requests.length).toBeGreaterThan(0);
+        },
+      );
 
       it("claims before materializing a present credential and fails bad endpoints actionably", async () => {
         const fx = await setupFixture();

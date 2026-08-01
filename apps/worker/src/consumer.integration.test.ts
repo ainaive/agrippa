@@ -129,6 +129,38 @@ describe.skipIf(!dbUp)("executor-set queue routing + fetch loop", () => {
     expect(deliveries).toBe(1);
   });
 
+  it("updateQueues extends a live loop to a daemon-covered set queue", async () => {
+    const q = await setup();
+    // fresh executor ids so the loops from earlier tests cannot consume these
+    const execD = `exec-d-${suite}`;
+    const execE = `exec-e-${suite}`;
+    const seen: string[] = [];
+    for (const name of [...runExecuteSubsetQueues([execD]), ...runExecuteSubsetQueues([execE])]) {
+      await q.boss.createQueue(name);
+    }
+    const loop = startRunFetchLoop({
+      boss: q.boss,
+      queues: runExecuteSubsetQueues([execD]),
+      slots: 1,
+      handler: async (job) => void seen.push(job.data.runId),
+      logger: noopLogger,
+      tickMs: 100,
+    });
+    loops.push(loop);
+
+    // a daemon-only run parks: nobody polls its set queue yet
+    const runId = Bun.randomUUIDv7();
+    resolvers.set(runId, [execE]);
+    await q.enqueueRun(runId);
+    await Bun.sleep(400);
+    expect(seen).not.toContain(runId);
+
+    // the sweeper notices the live runtime and widens coverage
+    loop.updateQueues([...runExecuteSubsetQueues([execD]), ...runExecuteSubsetQueues([execE])]);
+    await waitFor(() => seen.includes(runId));
+    await waitFor(async () => (await jobRow(runId))?.state === "completed");
+  });
+
   it("a throwing handler fails the job into pg-boss retry accounting", async () => {
     const q = await setup();
     const failing = Bun.randomUUIDv7();

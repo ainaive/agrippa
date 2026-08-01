@@ -36,11 +36,16 @@ export interface WorkspaceManager {
 
 /**
  * Deterministic provider-credential misconfiguration (e.g. a base URL whose
- * host resolves to private address space). The engine converts this into a
- * run failure instead of letting pg-boss retry a config that cannot work.
+ * host resolves to private address space) — or, with an explicit code, any
+ * credential condition that must fail the run rather than retry (a project
+ * credential resolving for a daemon-routed run, ADR-0017 Decision 7). The
+ * engine converts this into a run failure with the carried code.
  */
 export class ProviderCredentialError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code: string = "base_url_invalid",
+  ) {
     super(message);
     this.name = "ProviderCredentialError";
   }

@@ -1521,10 +1521,11 @@ class RunEngine {
     try {
       cred = await this.deps.resources.providerCredential(this.refs.project.id, provider);
     } catch (err) {
-      // deterministic misconfiguration (base URL resolving to private address
-      // space) fails the run; anything else rethrows so pg-boss retries
+      // deterministic credential conditions (private-space base URL; a
+      // credential that cannot ship to a daemon-routed run) fail the run
+      // with their carried code; anything else rethrows so pg-boss retries
       if (err instanceof ProviderCredentialError) {
-        throw new RunFailure("base_url_invalid", err.message, "failed");
+        throw new RunFailure(err.code, err.message, "failed");
       }
       throw err;
     }

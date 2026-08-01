@@ -226,6 +226,13 @@ export type CheckoutSource = {
   displayUrl: string;
   /** Absent = the remote's default branch (daemon dispatches may omit it). */
   ref?: string;
+  /**
+   * Server-pinned base commit: after the clone, HEAD is forced to exactly
+   * this sha (fetching it if the shallow clone missed it), and the trusted
+   * base ref records it. Daemon checkouts always pin (ADR-0017 — the server
+   * chose the base; the daemon may not).
+   */
+  pinSha?: string;
   /** Env profile for the clone call — the one place ambient auth matters. */
   profile?: GitEnvProfile;
 };
@@ -251,6 +258,29 @@ export async function checkoutFromUrl(runId: string, source: CheckoutSource): Pr
     {},
     profile,
   );
+  if (source.pinSha) {
+    const head = (await git(["rev-parse", "HEAD"], dir)).trim();
+    if (head !== source.pinSha) {
+      // the branch moved between the server's pin and this clone — force the
+      // exact pinned commit. The depth-50 clone usually already contains it;
+      // only a farther-moved branch needs the explicit-sha fetch (which
+      // requires the server to allow reachable-sha wants).
+      const present = await git(["cat-file", "-e", `${source.pinSha}^{commit}`], dir).then(
+        () => true,
+        () => false,
+      );
+      if (!present) {
+        await git(["fetch", "--depth", "1", "origin", source.pinSha], dir, {}, profile).catch(
+          (err) => {
+            throw new Error(
+              `pinned base ${source.pinSha} is not fetchable from origin: ${String(err)}`,
+            );
+          },
+        );
+      }
+      await git(["reset", "--hard", source.pinSha], dir);
+    }
+  }
   await git(["remote", "set-url", "origin", source.displayUrl], dir);
   await git(["update-ref", BASE_REF, "HEAD"], dir);
   await git(["config", "user.name", "Agrippa Agent"], dir);
@@ -382,4 +412,24 @@ export async function applyApprovedPatch(
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
+}
+
+/**
+ * Remove project configuration created by a prior agent invocation (`.claude`
+ * and `.mcp.json`) and recreate the empty skills directory. `rm` on a symlink
+ * removes the link itself; it never traverses into the target. Shared by the
+ * worker's materializer (per attempt) and the daemon runner (per dispatch) —
+ * the per-invocation config-isolation contract must not fork between hosts.
+ */
+export async function resetAgentProjectConfig(workspaceDir: string): Promise<void> {
+  for (const relative of [".claude", ".mcp.json"]) {
+    const target = path.join(workspaceDir, relative);
+    try {
+      await lstat(target);
+    } catch {
+      continue;
+    }
+    await rm(target, { recursive: true, force: true });
+  }
+  await mkdir(path.join(workspaceDir, ".claude", "skills"), { recursive: true });
 }

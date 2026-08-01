@@ -195,6 +195,14 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
 export type RunFetchLoop = {
   /** Stop fetching; with awaitInFlight (default true) also wait for running jobs to settle. */
   stop(opts?: { awaitInFlight?: boolean }): Promise<void>;
+  /**
+   * Replace the consumed queue set. Daemon-only executor sets need SOME
+   * worker polling their queues (the engine runs centrally even when the
+   * executor is remote), and live runtimes come and go — the worker's
+   * sweeper recomputes coverage and swaps the list here. Callers must
+   * createQueue() any new names first.
+   */
+  updateQueues(names: readonly string[]): void;
 };
 
 /**
@@ -221,6 +229,7 @@ export function startRunFetchLoop(cfg: {
   let rotate = 0;
   let stopped = false;
   let ticking = false;
+  let queues: readonly string[] = cfg.queues;
   const inFlightJobs = new Set<Promise<void>>();
 
   const runJob = (queueName: string, job: JobWithMetadata<RunExecutePayload>): void => {
@@ -251,9 +260,9 @@ export function startRunFetchLoop(cfg: {
     ticking = true;
     try {
       let capacity = cfg.slots - inFlight;
-      const total = cfg.queues.length;
+      const total = queues.length;
       for (let i = 0; i < total && capacity > 0 && !stopped; i++) {
-        const queueName = cfg.queues[(rotate + i) % total] as string;
+        const queueName = queues[(rotate + i) % total] as string;
         let jobs: JobWithMetadata<RunExecutePayload>[] | null = null;
         try {
           jobs = await cfg.boss.fetch<RunExecutePayload>(queueName, {
@@ -286,6 +295,9 @@ export function startRunFetchLoop(cfg: {
       if (opts?.awaitInFlight !== false) {
         await Promise.allSettled([...inFlightJobs]);
       }
+    },
+    updateQueues(names: readonly string[]): void {
+      queues = [...names];
     },
   };
 }

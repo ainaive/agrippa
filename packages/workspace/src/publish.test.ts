@@ -1,8 +1,14 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { applyApprovedPatch, buildPlatformGitEnv } from "./index";
+import {
+  applyApprovedPatch,
+  buildPlatformGitEnv,
+  checkoutFromUrl,
+  platformBaseSha,
+  workspaceDirFor,
+} from "./index";
 
 const sh = (args: string[], cwd?: string): string => {
   const res = Bun.spawnSync(["git", ...args], {
@@ -121,5 +127,60 @@ describe("applyApprovedPatch (publication inversion)", () => {
         pushUrl: origin,
       }),
     ).rejects.toThrow(/nothing to publish/);
+  });
+});
+
+describe("checkoutFromUrl (server-pinned base, ADR-0017)", () => {
+  let pinOrigin: string;
+  let pinSha: string;
+  let movedSha: string;
+  let savedRoot: string | undefined;
+
+  beforeAll(async () => {
+    savedRoot = process.env.WORKSPACE_ROOT;
+    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "agrippa-pin-ws-"));
+
+    pinOrigin = `${mkdtempSync(path.join(tmpdir(), "agrippa-pin-origin-"))}/repo.git`;
+    sh(["init", "--bare", "-b", "main", pinOrigin]);
+    const work = mkdtempSync(path.join(tmpdir(), "agrippa-pin-work-"));
+    sh(["clone", pinOrigin, work]);
+    await Bun.write(path.join(work, "README.md"), "# pinned\n");
+    sh(["add", "-A"], work);
+    sh(["commit", "-m", "pinned base"], work);
+    pinSha = sh(["rev-parse", "HEAD"], work).trim();
+    await Bun.write(path.join(work, "later.txt"), "moved past the pin\n");
+    sh(["add", "-A"], work);
+    sh(["commit", "-m", "branch moved"], work);
+    movedSha = sh(["rev-parse", "HEAD"], work).trim();
+    sh(["push", "origin", "main"], work);
+  });
+
+  afterAll(() => {
+    if (savedRoot === undefined) delete process.env.WORKSPACE_ROOT;
+    else process.env.WORKSPACE_ROOT = savedRoot;
+  });
+
+  it("forces HEAD and the trusted base ref to the pin when the branch moved past it", async () => {
+    const runId = crypto.randomUUID();
+    await checkoutFromUrl(runId, {
+      cloneUrl: pinOrigin,
+      displayUrl: pinOrigin,
+      ref: "main",
+      pinSha,
+    });
+    expect(movedSha).not.toBe(pinSha); // the fixture really did move
+    expect(sh(["rev-parse", "HEAD"], workspaceDirFor(runId)).trim()).toBe(pinSha);
+    expect(await platformBaseSha(runId)).toBe(pinSha);
+  });
+
+  it("fails typed when the pinned commit does not exist at origin", async () => {
+    await expect(
+      checkoutFromUrl(crypto.randomUUID(), {
+        cloneUrl: pinOrigin,
+        displayUrl: pinOrigin,
+        ref: "main",
+        pinSha: "0123456789012345678901234567890123456789",
+      }),
+    ).rejects.toThrow(/not fetchable from origin/);
   });
 });

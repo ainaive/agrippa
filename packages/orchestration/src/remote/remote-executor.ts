@@ -257,6 +257,15 @@ export class RemoteExecutor implements Executor {
    * ordinary materializer) ships inline — the daemon has no database.
    */
   private async buildPayload(request: StepExecutionRequest): Promise<DispatchPayload> {
+    // Belt and braces behind the RemoteResourceGuard: a decrypted platform
+    // credential must never cross this boundary. Should be unreachable — the
+    // guard fails credentialed resolution first — but a future engine change
+    // must hit a hard stop here, not a silent leak.
+    if (request.providerAuth !== undefined) {
+      throw new Error(
+        "refusing to dispatch: request carries platform provider credentials for a remote runtime",
+      );
+    }
     const root = request.workspaceDir;
     const symbolic = (p: string): string =>
       p === root || p.startsWith(`${root}${path.sep}`)
@@ -268,6 +277,12 @@ export class RemoteExecutor implements Executor {
       skills.push({
         slug: skill.slug,
         version: skill.version,
+        // ship the ACTUAL layout, not a guess: the daemon writes exactly
+        // where the (rewritten) request.skills[].localPath will point (the
+        // basename fallback only fires for fixture paths outside the root)
+        dir: skill.localPath.startsWith(`${root}${path.sep}`)
+          ? path.relative(root, skill.localPath)
+          : path.join(".claude", "skills", skill.slug.split("/").pop() as string),
         files: await readSkillFiles(skill.localPath),
       });
     }

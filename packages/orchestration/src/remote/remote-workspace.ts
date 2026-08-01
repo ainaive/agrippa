@@ -2,7 +2,17 @@ import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DispatchWorkspaceSpec } from "@agrippa/core";
-import { type Db, dispatches, repoConnections, runs, runtimes } from "@agrippa/db";
+import {
+  type Db,
+  decryptSecret,
+  dispatches,
+  loadSecretKey,
+  repoConnections,
+  runs,
+  runtimes,
+  secrets,
+} from "@agrippa/db";
+import { git } from "@agrippa/workspace";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { DiskArtifactStore } from "../artifact-store";
 import type { WorkspaceManager, WorkspaceSpec } from "../engine/deps";
@@ -45,10 +55,9 @@ export class RemoteWorkspaceManager implements WorkspaceManager {
     if (!repoConnectionId) {
       throw new Error("remote checkout requires a repoConnectionId workspace value");
     }
-    // scoped by project, never by raw id (same rule as the git manager) —
-    // and deliberately WITHOUT the credential: it never leaves the server
+    // scoped by project, never by raw id (same rule as the git manager)
     const [conn] = await this.db
-      .select({ url: repoConnections.url })
+      .select()
       .from(repoConnections)
       .where(
         and(
@@ -57,15 +66,55 @@ export class RemoteWorkspaceManager implements WorkspaceManager {
         ),
       );
     if (!conn) throw new Error(`repo connection ${repoConnectionId} not found for project`);
+
+    // Pin the publication base SERVER-SIDE at checkout: the daemon must
+    // materialize exactly this commit, and git.push later applies the
+    // approved patch against exactly this commit. Trusting a daemon-chosen
+    // base would let it pick any other reachable commit and smuggle that
+    // commit's contents past the approval. The credential is decrypted here
+    // for one ls-remote and never leaves this host.
+    const ref = spec.ref || conn.defaultBranch;
+    const baseSha = await this.resolveRemoteRef(conn, ref);
+
     const wireSpec: DispatchWorkspaceSpec = {
       repoUrl: conn.url,
-      ...(spec.ref !== undefined ? { ref: spec.ref } : {}),
+      ref,
+      baseSha,
       access: spec.access,
     };
     await this.db
       .update(runs)
       .set({ workspaceRef: JSON.stringify(wireSpec) })
       .where(eq(runs.id, runId));
+  }
+
+  private async resolveRemoteRef(
+    conn: typeof repoConnections.$inferSelect,
+    ref: string,
+  ): Promise<string> {
+    let credentialedUrl = conn.url;
+    if (conn.credentialSecretRef) {
+      const [secret] = await this.db
+        .select()
+        .from(secrets)
+        .where(eq(secrets.id, conn.credentialSecretRef));
+      if (secret) {
+        const token = decryptSecret(secret.ciphertext, loadSecretKey());
+        const withAuth = new URL(conn.url);
+        withAuth.username = "x-access-token";
+        withAuth.password = token;
+        credentialedUrl = withAuth.toString();
+      }
+    }
+    const heads = await git(["ls-remote", credentialedUrl, `refs/heads/${ref}`]);
+    let sha = heads.split("\t")[0]?.trim();
+    if (!sha) {
+      // not a branch — a tag or other ref form the template pinned
+      const any = await git(["ls-remote", credentialedUrl, ref]);
+      sha = any.split("\t")[0]?.trim();
+    }
+    if (!sha) throw new Error(`cannot resolve ref '${ref}' on ${conn.url}`);
+    return sha;
   }
 
   /** The dispatch payload's workspace block; workBranch is read live (git.branch runs centrally). */

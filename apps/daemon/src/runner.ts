@@ -13,6 +13,7 @@ import type { Executor, ExecutorEvent, Logger, StepExecutionRequest } from "@agr
 import {
   checkoutFromUrl,
   git,
+  resetAgentProjectConfig,
   stagePlatformSnapshot,
   workspaceDirFor,
   workspaceIntact,
@@ -119,6 +120,8 @@ export class DaemonRunner {
             cloneUrl: spec.repoUrl,
             displayUrl: spec.repoUrl,
             ...(spec.ref !== undefined ? { ref: spec.ref } : {}),
+            // the server chose the base; this machine may not (ADR-0017)
+            pinSha: spec.baseSha,
             profile: "ambient",
           });
         }
@@ -130,6 +133,10 @@ export class DaemonRunner {
         await mkdir(workspaceDir, { recursive: true });
       }
 
+      // the same per-invocation config isolation the central materializer
+      // enforces: whatever the previous agent invocation left in .claude /
+      // .mcp.json (hooks, settings, skills) must not leak into this one
+      await resetAgentProjectConfig(workspaceDir);
       await this.materializeSkills(workspaceDir, dispatch);
       const request = this.rewriteRequest(dispatch, workspaceDir);
 
@@ -170,14 +177,21 @@ export class DaemonRunner {
     }
   }
 
-  /** Skill content arrives inline (the daemon has no database) — write it out. */
+  /**
+   * Skill content arrives inline (the daemon has no database), each with the
+   * workspace-relative directory the server materialized it under — written
+   * verbatim so the request's skills[].localPath always points at real files.
+   */
   private async materializeSkills(workspaceDir: string, dispatch: ClaimedDispatch): Promise<void> {
     for (const skill of dispatch.payload.skills) {
-      const skillDir = path.join(workspaceDir, ".claude", "skills", skill.slug);
+      const skillDir = path.resolve(workspaceDir, skill.dir);
+      // containment: shipped paths are platform-produced, but verify anyway
+      if (!skillDir.startsWith(path.resolve(workspaceDir) + path.sep)) {
+        throw new Error(`skill directory escapes the workspace: ${skill.dir}`);
+      }
       for (const file of skill.files) {
         const target = path.join(skillDir, file.path);
-        // containment: shipped paths are platform-produced, but verify anyway
-        if (!path.resolve(target).startsWith(path.resolve(skillDir) + path.sep)) {
+        if (!path.resolve(target).startsWith(skillDir + path.sep)) {
           throw new Error(`skill file escapes its directory: ${file.path}`);
         }
         await mkdir(path.dirname(target), { recursive: true });
