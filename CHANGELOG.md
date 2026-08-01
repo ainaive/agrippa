@@ -6,6 +6,13 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Outbound notifications (Track N of the M2 plan)** — a run that pauses for approval no longer waits for someone to have the inbox open: `checkpoint.required`, a new `checkpoint.expired` timeline event (expiry previously left no trace until the engine resumed), and every terminal state now fan out to per-project **notification endpoints** — a Feishu custom-bot card, a DingTalk robot card, or a generic JSON webhook signed `X-Agrippa-Signature: v1=hex(HMAC-SHA256(secret, "<ts>.<body>"))`. Cards render in the endpoint's own configured locale (a channel has no single recipient — amends the design/07 rule) and deep-link to the run via `AGRIPPA_BASE_URL`, which now reaches the worker in compose.
+  - *Delivery bookkeeping is idempotent by construction.* Deliveries derive from `run_events` rows (written transactionally by the lifecycle) deduplicated per endpoint by a partial unique index; the sync runs post-commit at the three trigger sites (worker after `executeRun`, retry exhaustion, the API's direct cancel finalize) and enqueues a new `notification.deliver` pg-boss job per row (backoff, limit 5). The reconciliation sweeper backfills missed events (24 h window), re-enqueues stale pending rows, and finalizes rows whose attempts were exhausted without bookkeeping. Zero engine changes — the compliance suite is untouched.
+  - *Security posture matches provider credentials.* Signing secrets are write-only (`secrets` kind `webhook_secret`); endpoint routes are admin-only **including reads** — IM webhook URLs are capability URLs, so responses carry a masked URL and `hasSecret` only; per-kind host pins (open.feishu.cn / oapi.dingtalk.com) plus the same global-unicast DNS guard as provider endpoints, re-resolved at every send; changing a signed endpoint's URL requires re-entering the secret. IM success is judged by the response body's code, not HTTP status — both platforms answer 200 on errors.
+  - *UI.* Project Settings gains a **Notifications** section: endpoint list with enable toggle and test-send, per-kind URL/secret hints, an event filter, and a recent-deliveries panel (10 s polling) with retry on failed rows. Every mutation is audited (`project.webhook.*`).
+
 ## [0.3.0] — 2026-08-01
 
 ### Added

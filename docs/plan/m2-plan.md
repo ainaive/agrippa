@@ -37,10 +37,11 @@ BYO compute: a daemon on a user/team machine registers, reports which executors 
 - [ ] Webhook triggers: per-trigger token + signing secret, durable delivery log with payload inspection + replay
 - Verify: `pm.weekly-report` runs weekly unattended; a signed webhook submits a run; a revoked key gets 401 and an audit row
 
-## Track N — checkpoint notifications ☐ *(parallel, independent)*
+## Track N — checkpoint notifications ☑ *(parallel, independent)*
 
-- [ ] Outbound webhook on `waiting_approval`, terminal states, and runtime-offline; per-project endpoint config, secret-signed payloads
-- [ ] Feishu/DingTalk card formatter (CN deployment; no email infrastructure)
+- [x] Outbound webhook on `waiting_approval` (+ new `checkpoint.expired` event) and terminal states; per-project endpoint config, secret-signed payloads, durable retryable delivery log
+- [x] Feishu/DingTalk card formatters (CN deployment; no email infrastructure)
+- [ ] Runtime-offline notifications — deferred to Phase A, which owns worker fleet health
 - Verify: an approval checkpoint posts a card with a deep link to the run within seconds; delivery failures are visible and retryable
 
 ## Craft checklist (adopt opportunistically, any branch)

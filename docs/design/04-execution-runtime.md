@@ -44,8 +44,10 @@ Step statuses mirror this at finer grain: `pending | running | waiting_approval 
 `apps/worker` boots pg-boss consumers:
 
 - `run.execute` — the main handler; concurrency = configurable slots (default 2 per worker; horizontal scale = more worker containers).
-- `run.expire-approval` — scheduled when an approval is requested; enforces `timeout`/`onTimeout`.
-- `quota.rollup` — periodic aggregation of `token_usage` into project usage summaries.
+- `approval.expire` — scheduled when an approval is requested; enforces `timeout`/`onTimeout`, and appends a `checkpoint.expired` run event so the timeline (and notifications) show the expiry.
+- `notification.deliver` — one job per `notification_deliveries` row; retries with backoff (limit 5), the consumer flips the row to `failed` only at exhaustion.
+
+(There is no `quota.rollup` job — project usage is computed on read from `token_usage`.)
 
 Graceful shutdown: stop fetching → abort in-flight runs via their `AbortController` → their jobs return failed with `resumable` marker → pg-boss retry (limit 2) picks them up on a healthy worker, where the engine **resumes** rather than restarts.
 
@@ -129,6 +131,12 @@ Two independent layers, both enforced, both denominated in **tokens** — the pl
 
 - **Run limits** (template `limits`): `UsageMeter` accumulates `usage` events against run-level and per-phase `maxTokens`; breach → abort signal → `failed` with `usage_limit_exceeded`. `maxDurationMinutes` → composed `AbortSignal.timeout` → `timed_out`.
 - **Project quota** (`project_quotas.token_limit`): checked at submit (reject with quota error) and re-read from the database at every step boundary; if `hard_stop` and exhausted mid-run → abort as `usage_limit_exceeded` with quota provenance. Submit and engine count the **same monthly window** and the **same measure** (input + output tokens, cache excluded), and the engine's headroom **excludes the run's own consumption** (the meter already carries it, so including it would double-count on resume). Re-reading each step lets concurrent runs see each other's consumption rather than each measuring only a stale start-of-run snapshot. Soft quotas surface warnings in the UI instead of aborting.
+
+### Notifications (outbound)
+
+Deliveries **derive from `run_events`** — the engine is untouched. `syncRunNotifications` turns a run's notifiable events (`checkpoint.required`, `checkpoint.expired`, `run.succeeded|failed|cancelled|timed_out`) into `notification_deliveries` rows, one per enabled filter-matching `notification_endpoints` row of the project, deduplicated by a partial unique index on `(endpoint_id, event_id)` — exactly-once by construction because every notifiable transition writes its event transactionally. It runs post-commit at the three trigger sites (worker after `executeRun`, worker retry-exhaustion, the API's direct cancel finalize) and enqueues a `notification.deliver` job per new row; the worker's reconciliation sweeper backstops it (`sweepNotificationDeliveries`: 24 h event backfill, stale-pending re-enqueue via the singleton key, and finalization of rows whose attempts were exhausted without bookkeeping).
+
+The delivery executor (`apps/worker/src/deps/notify.ts`) sends one attempt per invocation: it re-resolves the webhook host at send time through the same global-unicast guard as provider endpoints, decrypts the write-only signing secret, renders the card copy from the `notifications` i18n namespace in the **endpoint's configured locale** (a channel has no single recipient, so the channel carries its own locale), and posts with a 10 s bound. Formatters are pluggable per endpoint kind — `generic` (JSON payload, `X-Agrippa-Signature: v1=hex(HMAC-SHA256(secret, "<ts>.<body>"))`), `feishu` (interactive card, the platform's timestamp-newline-secret signing), `dingtalk` (action card, sign in query params) — and success is formatter-defined because the IM platforms answer HTTP 200 with an error code in the body. Delivery records keep a redacted payload snapshot, response status/snippet, and attempts; a failed delivery is retryable from Project Settings (CAS `failed → pending` with the attempt budget reset).
 
 ## Live Progress (SSE)
 
