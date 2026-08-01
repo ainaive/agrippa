@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isExecutorId } from "./executors";
 
 /**
  * Wire contract for remote runtime daemons (ADR-0017 Decision 3). Lives in
@@ -38,7 +39,17 @@ export type DaemonProtocolHints = {
 export const EXECUTOR_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export const daemonExecutorAdSchema = z.object({
-  id: z.string().regex(EXECUTOR_ID_PATTERN, "executor id must match [a-z0-9][a-z0-9_-]{0,63}"),
+  // Catalog membership, not just charset: runs can only ever REQUIRE catalog
+  // executors, so a non-catalog ad could never serve anything — while each
+  // FRESH id costs every worker up to 2^n−1 persistent pg-boss queues. The
+  // catalog bounds the queue namespace by construction; rotating ids past a
+  // per-computation cap stops being possible.
+  // (wrapped so the type-guard doesn't narrow the wire type — the daemon
+  // builds ads as plain strings and the server is the validation authority)
+  id: z
+    .string()
+    .regex(EXECUTOR_ID_PATTERN, "executor id must match [a-z0-9][a-z0-9_-]{0,63}")
+    .refine((id): boolean => isExecutorId(id), "executor id is not in the executor catalog"),
   envAuthProviders: z.array(z.string().min(1).max(100)).max(20).optional(),
 });
 

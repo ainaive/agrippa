@@ -1,6 +1,7 @@
 import {
   EXECUTOR_ID_PATTERN,
   executorSubsets,
+  isExecutorId,
   QUEUE_RUN_EXECUTE,
   runExecuteQueueName,
   runExecuteSubsetQueues,
@@ -28,11 +29,13 @@ export type RunQueueLogger = { warn(message: string): void };
  *   is safe;
  * - the legacy `run.execute` queue (deploy-skew fallback).
  *
- * Daemon-supplied ids are untrusted input from another trust domain: ids are
- * filtered through EXECUTOR_ID_PATTERN (queue-name safety — registration
- * validates too, but rows may predate that), oversized ads skip expansion
- * entirely, and the total is hard-capped. Every bound logs what it dropped —
- * silent truncation would read as full coverage.
+ * Daemon-supplied ids are untrusted input from another trust domain: ids must
+ * be catalog members (registration enforces this too, but rows may predate
+ * that; each FRESH id would cost up to 2^n−1 persistent pg-boss queues, so
+ * rotation must be impossible, not just capped) and pass EXECUTOR_ID_PATTERN
+ * (queue-name safety), oversized ads skip expansion entirely, and the total
+ * is hard-capped as a backstop for catalog growth. Every bound logs what it
+ * dropped — silent truncation would read as full coverage.
  */
 export function selectRunQueues(input: {
   localExecutorIds: readonly string[];
@@ -41,7 +44,10 @@ export function selectRunQueues(input: {
   /** Executor ids advertised by each live runtime, with a label for logging. */
   runtimeAds: readonly { name: string; ids: readonly string[] }[];
   logger: RunQueueLogger;
+  /** Advertised-id gate — defaults to catalog membership; tests inject a permissive one. */
+  isAllowedId?: (id: string) => boolean;
 }): string[] {
+  const isAllowedId = input.isAllowedId ?? isExecutorId;
   const names = new Set<string>(runExecuteSubsetQueues(input.localExecutorIds));
   const centralSets = input.centralWorkerSets.map((ids) => new Set(ids));
   const centrallyCovered = (ids: readonly string[]): boolean =>
@@ -49,10 +55,10 @@ export function selectRunQueues(input: {
 
   for (const runtime of input.runtimeAds) {
     const ids = [...new Set(runtime.ids)];
-    const valid = ids.filter((id) => EXECUTOR_ID_PATTERN.test(id));
+    const valid = ids.filter((id) => EXECUTOR_ID_PATTERN.test(id) && isAllowedId(id));
     if (valid.length < ids.length) {
       input.logger.warn(
-        `runtime '${runtime.name}': dropped ${ids.length - valid.length} queue-unsafe executor id(s) from its advertisement`,
+        `runtime '${runtime.name}': dropped ${ids.length - valid.length} unknown or queue-unsafe executor id(s) from its advertisement`,
       );
     }
     if (valid.length > MAX_RUNTIME_AD_IDS) {

@@ -118,10 +118,12 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     expect(audits[0]?.actorUserId).toBeNull();
   });
 
-  it("register rejects queue-unsafe executor ids", async () => {
-    // advertised ids become pg-boss queue name segments on every worker —
-    // an unconstrained id would crash queue creation fleet-wide
-    for (const id of ["evil+name", "has space", "Dot.ted", "UPPER"]) {
+  it("register rejects queue-unsafe and non-catalog executor ids", async () => {
+    // advertised ids become pg-boss queue name segments on every worker — an
+    // unconstrained id would crash queue creation fleet-wide, and each FRESH
+    // pattern-valid id would mint persistent queues (rotation), so ids must
+    // also be catalog members
+    for (const id of ["evil+name", "has space", "Dot.ted", "UPPER", "not-a-real-executor"]) {
       const res = await daemonRequest("/register", {
         hostname: "mba.local",
         executors: [{ id }],

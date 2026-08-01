@@ -14,7 +14,6 @@ import {
   notificationDeliveries,
   runs,
   runtimes,
-  workerHeartbeats,
 } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
@@ -29,6 +28,7 @@ import {
   FakeScmService,
   findStrandedCheckpointRuns,
   InProcessEventBus,
+  liveCentralWorkerSets,
   RedisEventBus,
   sweepNotificationDeliveries,
   sweepOfflineRuntimes,
@@ -181,13 +181,13 @@ async function computeRunQueues(): Promise<string[]> {
         gte(runtimes.lastSeenAt, sql`now() - interval '15 minutes'`),
       ),
     );
-  const liveWorkers = await db
-    .select({ executors: workerHeartbeats.executors })
-    .from(workerHeartbeats)
-    .where(gte(workerHeartbeats.heartbeatAt, sql`now() - interval '15 minutes'`));
+  // the SAME live-and-ready predicate routing's central-coverage check uses
+  // (150s + consumers ready) — a dead or boot-wedged sole-capable worker must
+  // not suppress a live daemon's queues for the old 15-minute window
+  const liveWorkers = await liveCentralWorkerSets(db);
   const list = selectRunQueues({
     localExecutorIds: Object.keys(executors),
-    centralWorkerSets: liveWorkers.map((w) => (w.executors ?? []).map((e) => e.id)),
+    centralWorkerSets: liveWorkers.map((ads) => ads.map((e) => e.id)),
     runtimeAds: liveRuntimes.map((r) => ({
       name: r.name,
       ids: (r.executors ?? []).map((e) => e.id),

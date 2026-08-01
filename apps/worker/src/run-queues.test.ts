@@ -49,6 +49,21 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
     expect(names).toContain(runExecuteQueueName(["claude-agent-sdk", "codex-cli"]));
   });
 
+  it("drops non-catalog advertised ids by default — rotation cannot mint queues", () => {
+    const { warnings, logger } = collect();
+    // pattern-valid but unknown ids: each fresh one would otherwise cost the
+    // fleet persistent pg-boss queues, so catalog membership is the gate
+    const names = selectRunQueues({
+      localExecutorIds: ["fake"],
+      centralWorkerSets: [],
+      runtimeAds: [{ name: "rotator", ids: ["codex-cli", "rot-1", "rot-2"] }],
+      logger,
+    });
+    expect(names).toContain(runExecuteQueueName(["codex-cli"]));
+    expect(names.some((n) => n.includes("rot-"))).toBe(false);
+    expect(warnings.some((w) => w.includes("unknown or queue-unsafe"))).toBe(true);
+  });
+
   it("drops queue-unsafe advertised ids and logs the drop", () => {
     const { warnings, logger } = collect();
     const names = selectRunQueues({
@@ -56,6 +71,7 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
       centralWorkerSets: [],
       runtimeAds: [{ name: "evil", ids: ["ok-executor", "evil+name", "has space", "Dot.ted"] }],
       logger,
+      isAllowedId: () => true, // isolate the charset filter from the catalog gate
     });
     expect(names).toContain(runExecuteQueueName(["ok-executor"]));
     expect(names.some((n) => n.includes("+") || n.includes(" "))).toBe(false);
@@ -71,6 +87,7 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
       centralWorkerSets: [],
       runtimeAds: [{ name: "greedy", ids }],
       logger,
+      isAllowedId: () => true, // the catalog gate would empty this ad first
     });
     expect(names.some((n) => n.includes("exec-0"))).toBe(false);
     expect(warnings.some((w) => w.includes("skipping its queues"))).toBe(true);
@@ -88,6 +105,7 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
       centralWorkerSets: [],
       runtimeAds,
       logger,
+      isAllowedId: () => true, // the catalog gate would empty these ads first
     });
     expect(names.length).toBeLessThanOrEqual(1025); // cap + the legacy queue
     expect(warnings.some((w) => w.includes("cap"))).toBe(true);

@@ -247,14 +247,35 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
   });
 
   it("prefers central coverage and scores daemon env auth per executor", async () => {
-    // live central worker covering the set → central even with a live daemon
+    // live-and-READY central worker covering the set → central even with a
+    // live daemon
     await db.insert(workerHeartbeats).values({
       containerId: "w-central",
       executors: [{ id: "claude-agent-sdk" }],
+      consumersReadyAt: new Date(),
     });
     await newRuntime([{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }]);
     const run = await newRun();
     expect((await routeRun(db, run)).kind).toBe("central");
+    await db.delete(workerHeartbeats);
+
+    // a boot-wedged worker (heartbeats, never became ready) and a stale one
+    // (silent past the 150s window) are NOT capable pollers — the daemon wins
+    await db.insert(workerHeartbeats).values([
+      {
+        containerId: "w-wedged",
+        executors: [{ id: "claude-agent-sdk" }],
+        consumersReadyAt: null,
+      },
+      {
+        containerId: "w-stale",
+        executors: [{ id: "claude-agent-sdk" }],
+        consumersReadyAt: new Date(),
+        heartbeatAt: sql`now() - interval '10 minutes'`,
+      },
+    ]);
+    await db.update(runs).set({ runtimeId: null });
+    expect((await routeRun(db, run)).kind).toBe("remote");
     await db.delete(workerHeartbeats);
 
     // a daemon whose executor advertises NO anthropic auth is ineligible
@@ -280,6 +301,7 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     await db.insert(workerHeartbeats).values({
       containerId: "w-keyless",
       executors: [{ id: "claude-agent-sdk", envAuthProviders: [] }],
+      consumersReadyAt: new Date(),
     });
     const runtimeId = await newRuntime([
       { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] },
@@ -360,6 +382,35 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     expect(after?.runtimeId).toBe(winner);
 
     await db.update(runs).set({ runtimeId: null });
+    await db.delete(runtimes);
+  });
+
+  it("refuses to pin a run whose lease another worker holds", async () => {
+    // A duplicate delivery routing while the owner executes must not poison
+    // the pin: its own claim will fail RunClaimLost, so the pin write rejects
+    // leased runs and the delivery returns central with no side effects.
+    await newRuntime([{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }]);
+    const run = await newRun();
+    await db
+      .update(runs)
+      .set({ leaseOwner: "owner-a", leaseExpiresAt: new Date(Date.now() + 60_000) })
+      .where(eq(runs.id, run.id));
+
+    expect((await routeRun(db, run)).kind).toBe("central");
+    const [after] = await db
+      .select({ runtimeId: runs.runtimeId })
+      .from(runs)
+      .where(eq(runs.id, run.id));
+    expect(after?.runtimeId).toBeNull();
+
+    // an EXPIRED lease is a dead owner — pinning is legitimate again
+    await db
+      .update(runs)
+      .set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(runs.id, run.id));
+    expect((await routeRun(db, run)).kind).toBe("remote");
+
+    await db.update(runs).set({ runtimeId: null, leaseOwner: null, leaseExpiresAt: null });
     await db.delete(runtimes);
   });
 

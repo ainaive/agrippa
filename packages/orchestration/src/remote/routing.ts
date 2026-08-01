@@ -19,6 +19,39 @@ export type RouteDecision = { kind: "central" } | { kind: "remote"; runtime: Run
 /** Liveness window for routing candidates — 4× the daemon heartbeat cadence. */
 const RUNTIME_LIVE_WINDOW_MS = 60_000;
 
+/**
+ * Staleness bound for treating a central worker as a capable poller — 2.5×
+ * the 60 s heartbeat, the same bound the fleet UI shows as live/stale. The
+ * old 15-minute window meant one dead sole-capable worker suppressed daemon
+ * queue coverage AND won the routing preference for a quarter hour.
+ */
+export const CENTRAL_WORKER_LIVE_WINDOW_MS = 150_000;
+
+/**
+ * The executor advertisements of central workers that are live AND ready —
+ * the single predicate both routing's central-coverage check and the worker's
+ * queue selection share, so they cannot disagree about who can serve. The
+ * consumers_ready_at gate matters: a boot-wedged worker still heartbeats but
+ * never becomes ready, and it must not count as a capable poller.
+ */
+export async function liveCentralWorkerSets(
+  db: Db,
+): Promise<Array<{ id: string; envAuthProviders?: string[] }[]>> {
+  const rows = await db
+    .select({ executors: workerHeartbeats.executors })
+    .from(workerHeartbeats)
+    .where(
+      and(
+        isNotNull(workerHeartbeats.consumersReadyAt),
+        gte(
+          workerHeartbeats.heartbeatAt,
+          sql`now() - interval '${sql.raw(String(CENTRAL_WORKER_LIVE_WINDOW_MS / 1000))} seconds'`,
+        ),
+      ),
+    );
+  return rows.map((row) => row.executors ?? []);
+}
+
 /** Every provider the run's (flat or slot-keyed) model resolution names. */
 function resolvedProviders(run: RunRow): Set<string> {
   const providers = new Set<string>();
@@ -171,11 +204,8 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
   // NOT win the preference and starve an authenticated daemon — that is the
   // primary BYO-credentials scenario.
   const perExecutor = envProvidersByExecutor(run, catalog);
-  const centralWorkers = await db
-    .select({ executors: workerHeartbeats.executors })
-    .from(workerHeartbeats)
-    .where(gte(workerHeartbeats.heartbeatAt, sql`now() - interval '15 minutes'`));
-  const centralCovers = centralWorkers.some((w) => adsCoverRun(adsOf(w.executors), perExecutor));
+  const centralWorkers = await liveCentralWorkerSets(db);
+  const centralCovers = centralWorkers.some((ads) => adsCoverRun(adsOf(ads), perExecutor));
   if (centralCovers) return { kind: "central" };
 
   // ── remote candidates ──────────────────────────────────────────────────────
@@ -199,16 +229,30 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
   const chosen = eligible[0];
   if (!chosen) return { kind: "central" };
 
-  // Persist the affinity pin before the first dispatch. The CAS ("still
-  // unpinned") can lose to a concurrent delivery of the same job — routing
-  // runs before the execution lease is taken — and the loser must ADOPT the
-  // persisted winner rather than proceed with its local choice: the pin is
-  // absolute, and executing against a different runtime than the one on the
-  // run row would strand the workspace on resume.
+  // Persist the affinity pin before the first dispatch. Two CAS conditions:
+  //
+  // - "still unpinned": routing runs before the execution lease, so a
+  //   concurrent delivery of the same job can pin first — the loser must
+  //   ADOPT the persisted winner rather than proceed with its local choice
+  //   (the pin is absolute; executing against a different runtime than the
+  //   run row names would strand the workspace on resume).
+  // - "no live lease": the only legitimate pin is pre-claim (no lease, or an
+  //   expired one from a dead owner). A pin against a LEASED run is a
+  //   duplicate delivery poisoning the pin while the owner executes — its own
+  //   claim will fail RunClaimLost anyway, so refuse and return central (no
+  //   side effects). Row-lock ordering makes this airtight: once a claim
+  //   commits its lease, no later pin write can pass this WHERE, which is
+  //   what lets the consumer's post-claim verify be a single read.
   const pinned = await db
     .update(runs)
     .set({ runtimeId: chosen.id })
-    .where(and(eq(runs.id, run.id), sql`${runs.runtimeId} is null`))
+    .where(
+      and(
+        eq(runs.id, run.id),
+        sql`${runs.runtimeId} is null`,
+        sql`(${runs.leaseExpiresAt} is null or ${runs.leaseExpiresAt} < now())`,
+      ),
+    )
     .returning({ id: runs.id });
   if (pinned.length === 0) {
     const [current] = await db
@@ -219,7 +263,9 @@ export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
       const [winner] = await db.select().from(runtimes).where(eq(runtimes.id, current.runtimeId));
       if (winner) return { kind: "remote", runtime: winner };
     }
-    return { kind: "central" }; // winner's pin row vanished — dead-pin semantics
+    // still unpinned (a live lease blocked the write) or the winner's runtime
+    // row vanished — either way central, with no side effects
+    return { kind: "central" };
   }
   return { kind: "remote", runtime: chosen };
 }

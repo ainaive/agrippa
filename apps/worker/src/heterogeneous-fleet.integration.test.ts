@@ -40,6 +40,7 @@ import {
   type RunFetchLoop,
   routingPinChanged,
   startRunFetchLoop,
+  verifyPinAfterClaim,
 } from "./consumer";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
@@ -338,6 +339,22 @@ describe.skipIf(!dbUp)("heterogeneous fleet routing (Phase A verify)", () => {
     // path is the same shape (routeRun returns central WITH the stale pin as
     // expectedPin), so neither may drain-loop
     expect(await routingPinChanged(db, runId, runtimeId)).toBe(false);
+
+    // the onStarted wrapper: drains on mismatch, not on match — and FAILS
+    // CLOSED when the check itself errors (proceeding unverified is the bug)
+    let drains = 0;
+    const handle = { drain: () => void drains++ };
+    await verifyPinAfterClaim(db, runId, runtimeId, handle, silentLogger);
+    expect(drains).toBe(0);
+    await verifyPinAfterClaim(db, runId, null, handle, silentLogger);
+    expect(drains).toBe(1);
+    const brokenDb = {
+      select: () => {
+        throw new Error("connection reset");
+      },
+    } as unknown as typeof db;
+    await verifyPinAfterClaim(brokenDb, runId, runtimeId, handle, silentLogger);
+    expect(drains).toBe(2);
 
     await db.update(runs).set({ runtimeId: null }).where(eq(runs.id, runId));
     await db.delete(runtimes).where(eq(runtimes.id, runtimeId));

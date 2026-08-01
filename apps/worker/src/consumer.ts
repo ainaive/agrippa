@@ -56,6 +56,35 @@ export async function routingPinChanged(
   return (row.runtimeId ?? null) !== expectedPin;
 }
 
+/**
+ * The post-claim leg of the routing/lease handshake, FAIL-CLOSED: a moved pin
+ * — or an inability to check — drains the engine (nothing finalizes, no retry
+ * budget burned; the re-enqueued delivery re-routes honoring the pin).
+ * Draining on a transient DB error is safe; proceeding on one is not. It
+ * cannot be awaited (onStarted is a synchronous engine callback), but the
+ * lease-aware pin CAS in routeRun guarantees no pin can move AFTER the claim
+ * commits, so this single read deterministically covers every pre-claim
+ * interleaving — the async gap risks at most a few early events before the
+ * drain lands, which resume treats as an ordinary recorded crash.
+ */
+export async function verifyPinAfterClaim(
+  db: Db,
+  runId: string,
+  expectedPin: string | null,
+  handle: Pick<RunControlHandle, "drain">,
+  logger: EngineDeps["logger"],
+): Promise<void> {
+  try {
+    if (!(await routingPinChanged(db, runId, expectedPin))) return;
+    logger.warn(`run ${runId}: pin changed between routing and claim — draining`);
+  } catch (err) {
+    logger.warn(`run ${runId}: pin verification failed — draining fail-closed`, {
+      err: String(err),
+    });
+  }
+  handle.drain();
+}
+
 export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): RunConsumer {
   const active = new Map<string, RunControlHandle>();
   /**
@@ -137,17 +166,8 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
           // Routing ran BEFORE the execution lease; a concurrent delivery may
           // have pinned the run differently in that window. onStarted fires
           // after the claim CAS — i.e. under the lease — so re-check the
-          // persisted pin here and hand off via drain (nothing finalizes) if
-          // it moved: the re-enqueued delivery re-routes honoring the pin.
-          void routingPinChanged(db, runId, expectedPin)
-            .then((changed) => {
-              if (!changed) return;
-              deps.logger.warn(`run ${runId}: pin changed between routing and claim — draining`);
-              handle.drain();
-            })
-            .catch((err) => {
-              deps.logger.warn(`run ${runId}: pin verification failed`, { err: String(err) });
-            });
+          // persisted pin here, fail-closed (see verifyPinAfterClaim).
+          void verifyPinAfterClaim(db, runId, expectedPin, handle, deps.logger);
         },
       });
       deps.logger.info(`run ${runId}: ${outcome}`);
