@@ -4,11 +4,20 @@ import {
   EXECUTOR_CATALOG,
   isExecutorId,
   isTerminalRunStatus,
+  type NotificationDeliverPayload,
   QUEUE_APPROVAL_EXPIRE,
+  QUEUE_NOTIFICATION_DELIVER,
   QUEUE_RUN_EXECUTE,
   type RunExecutePayload,
 } from "@agrippa/core";
-import { awaitSchema, checkpoints, createDb, executorRegistrations, runs } from "@agrippa/db";
+import {
+  awaitSchema,
+  checkpoints,
+  createDb,
+  executorRegistrations,
+  notificationDeliveries,
+  runs,
+} from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
@@ -25,11 +34,14 @@ import {
   findStrandedCheckpointRuns,
   InProcessEventBus,
   RedisEventBus,
+  sweepNotificationDeliveries,
+  syncRunNotifications,
 } from "@agrippa/orchestration";
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
 import { DiskArtifactStore } from "./deps/artifacts";
 import { DemoExecutor } from "./deps/demo-executor";
+import { deliverNotification } from "./deps/notify";
 import {
   markBootStarted,
   markConsumersReady,
@@ -151,6 +163,9 @@ await queue.boss.work(
         const outcome = await executeRun(deps, runId);
         deps.logger.info(`run ${runId}: ${outcome}`);
         if (outcome === "waiting_approval") await scheduleApprovalExpiry(runId);
+        // post-commit delivery sync (idempotent) — covers checkpoint.required
+        // and every engine-side terminal event in one place
+        await syncRunNotifications(db, queue, runId);
       } catch (err) {
         // Heterogeneous fleet: this worker lacks the run's executor. The
         // throw happens before any status transition, so for pre-claim states
@@ -200,9 +215,55 @@ await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayl
     const expired = await decideCheckpoint(db, job.data.approvalId, { status: "expired" });
     if (!expired) continue;
     deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
+    // the expiry previously left no trace until the engine resumed — one
+    // timeline event so the timeline (and notifications) can show it
+    await appendRunEvent(db, {
+      runId: job.data.runId,
+      type: "checkpoint.expired",
+      payload: {
+        checkpointRowId: expired.id,
+        checkpointId: expired.checkpointId,
+        kind: expired.kind,
+        iteration: expired.iteration,
+        title: (expired.payload as { title?: unknown }).title,
+      },
+    });
+    await syncRunNotifications(db, queue, job.data.runId);
     await queue.enqueueRun(job.data.runId); // engine applies the template's onTimeout
   }
 });
+
+await queue.boss.work(
+  QUEUE_NOTIFICATION_DELIVER,
+  { includeMetadata: true, pollingIntervalSeconds: 1 } as const,
+  async (jobs: JobWithMetadata<NotificationDeliverPayload>[]) => {
+    for (const job of jobs) {
+      const meta = job as unknown as { retryCount?: number; retryLimit?: number };
+      try {
+        await deliverNotification(db, job.data.deliveryId);
+      } catch (err) {
+        deps.logger.warn(`notification ${job.data.deliveryId} attempt failed`, {
+          err: String(err),
+        });
+        if ((meta.retryCount ?? 0) >= (meta.retryLimit ?? 0)) {
+          // terminal bookkeeping mirrors markRunFailed: the attempt itself was
+          // already recorded by deliverNotification; only the status flips here
+          await db
+            .update(notificationDeliveries)
+            .set({ status: "failed" })
+            .where(
+              and(
+                eq(notificationDeliveries.id, job.data.deliveryId),
+                eq(notificationDeliveries.status, "pending"),
+              ),
+            );
+          continue; // retries exhausted — completing the job ends the churn
+        }
+        throw err; // pg-boss retries with backoff
+      }
+    }
+  },
+);
 
 // every boss.work() above has returned — only now is this replica actually
 // consuming, which is the signal deploy verification counts (issue #15)
@@ -239,6 +300,7 @@ async function markRunFailed(runId: string, err: unknown): Promise<void> {
     usageTotals: {},
     eventPayload: { error },
   });
+  await syncRunNotifications(db, queue, runId);
 }
 
 /**
@@ -264,6 +326,9 @@ setInterval(async () => {
 
     // executor-availability heartbeat (the API's live window is minutes-wide)
     await registerExecutors();
+
+    // notification backstop: backfill missed events, re-enqueue stale rows
+    await sweepNotificationDeliveries(db, queue);
   } catch (err) {
     deps.logger.warn("sweeper failed", { err: String(err) });
   }

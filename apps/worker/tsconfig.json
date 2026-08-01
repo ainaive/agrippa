@@ -4,6 +4,7 @@
   "references": [
     { "path": "../../packages/core" },
     { "path": "../../packages/db" },
+    { "path": "../../packages/i18n" },
     { "path": "../../packages/orchestration" },
     { "path": "../../packages/executor-core" },
     { "path": "../../packages/executor-claude" },

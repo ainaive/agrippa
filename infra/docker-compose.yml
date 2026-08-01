@@ -99,6 +99,8 @@ services:
       CODEX_API_KEY: ${CODEX_API_KEY:-}
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
       WORKER_SLOTS: ${WORKER_SLOTS:-2}
+      # notification deep links point at the SPA — same value the api uses
+      AGRIPPA_BASE_URL: ${AGRIPPA_BASE_URL:-http://localhost:3000}
       # optional toggles; empty is the default in every case
       AGRIPPA_MAX_ARTIFACT_BYTES: ${AGRIPPA_MAX_ARTIFACT_BYTES:-}
       AGRIPPA_KEEP_WORKSPACES: ${AGRIPPA_KEEP_WORKSPACES:-}

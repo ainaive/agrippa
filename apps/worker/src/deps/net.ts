@@ -72,27 +72,32 @@ function isPermanentLookupFailure(err: unknown): boolean {
   return code === "ENOTFOUND" || code === "ENODATA";
 }
 
-/** Resolve the host and reject when ANY address is not global-unicast. */
+/**
+ * Resolve the host and reject when ANY address is not global-unicast.
+ * `what` names the URL's role in error messages — the same guard fronts
+ * provider endpoints and notification webhooks.
+ */
 export async function assertPublicHost(
   hostname: string,
   resolve: HostLookup = lookup,
+  what = "provider base URL",
 ): Promise<void> {
   let addresses: LookupResult;
   try {
     addresses = await resolve(hostname, { all: true });
   } catch (err) {
     if (isPermanentLookupFailure(err)) {
-      throw new ProviderCredentialError(`provider base URL host '${hostname}' does not resolve`);
+      throw new ProviderCredentialError(`${what} host '${hostname}' does not resolve`);
     }
     throw err;
   }
   if (addresses.length === 0) {
-    throw new ProviderCredentialError(`provider base URL host '${hostname}' does not resolve`);
+    throw new ProviderCredentialError(`${what} host '${hostname}' does not resolve`);
   }
   for (const { address } of addresses) {
     if (!isPublicAddress(address)) {
       throw new ProviderCredentialError(
-        `provider base URL host '${hostname}' resolves to a non-public address (${address})`,
+        `${what} host '${hostname}' resolves to a non-public address (${address})`,
       );
     }
   }
