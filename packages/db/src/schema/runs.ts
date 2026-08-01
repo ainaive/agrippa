@@ -141,7 +141,11 @@ export const runEvents = pgTable(
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: createdAtCol(),
   },
-  (t) => [uniqueIndex("run_events_run_seq_uq").on(t.runId, t.seq)],
+  (t) => [
+    uniqueIndex("run_events_run_seq_uq").on(t.runId, t.seq),
+    // notification sweeper backstop: scan recent notifiable events by type
+    index("run_events_type_created_idx").on(t.type, t.createdAt),
+  ],
 );
 
 /**
