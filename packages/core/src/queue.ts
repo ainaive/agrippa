@@ -2,9 +2,11 @@
 
 export const QUEUE_RUN_EXECUTE = "run.execute";
 export const QUEUE_APPROVAL_EXPIRE = "approval.expire";
+export const QUEUE_NOTIFICATION_DELIVER = "notification.deliver";
 
 export type RunExecutePayload = { runId: string };
 export type ApprovalExpirePayload = { approvalId: string; runId: string };
+export type NotificationDeliverPayload = { deliveryId: string };
 
 /**
  * The API's handle on the queue. Sends are deduplicated by singleton key
@@ -15,4 +17,5 @@ export type ApprovalExpirePayload = { approvalId: string; runId: string };
 export type RunQueue = {
   enqueueRun(runId: string): Promise<void>;
   enqueueApprovalExpiry(payload: ApprovalExpirePayload, atMs: number): Promise<void>;
+  enqueueNotificationDelivery(deliveryId: string): Promise<void>;
 };

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PROJECT_ROLES } from "./domain";
 import { LOCALES } from "./i18n";
+import { NOTIFIABLE_EVENT_TYPES, NOTIFICATION_ENDPOINT_KINDS } from "./notifications";
 
 export const slugSchema = z
   .string()
@@ -193,6 +194,41 @@ export const providerCredentialUpdateSchema = z
     message: "changing the endpoint requires re-entering the API key",
     path: ["apiKey"],
   });
+
+export const notificationEndpointCreateSchema = z
+  .object({
+    kind: z.enum(NOTIFICATION_ENDPOINT_KINDS),
+    name: z.string().min(1).max(100),
+    url: z.url(),
+    /** Write-only; encrypted into the secrets table, never echoed back. */
+    secret: z.string().min(8).optional(),
+    /** Empty array = every notifiable event. */
+    events: z.array(z.enum(NOTIFIABLE_EVENT_TYPES)).default([]),
+    /** Rendering locale for cards/payloads; defaults to the creator's request locale. */
+    locale: z.enum(LOCALES).optional(),
+    enabled: z.boolean().default(true),
+  })
+  .refine((p) => p.kind !== "generic" || p.secret !== undefined, {
+    // an unsigned generic webhook is unverifiable by its receiver; IM bots
+    // may leave signing off because the URL itself is the capability.
+    message: "generic webhooks require a signing secret",
+    path: ["secret"],
+  });
+
+/**
+ * URL and secret travel together when a secret exists: a url-only change would
+ * redirect signed payloads to a new host without proof the caller holds the
+ * secret (the provider-credential rule). Unsigned IM endpoints have no secret
+ * to re-enter, so the check needs the stored row and lives in the route.
+ */
+export const notificationEndpointUpdateSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  url: z.url().optional(),
+  secret: z.string().min(8).optional(),
+  events: z.array(z.enum(NOTIFIABLE_EVENT_TYPES)).optional(),
+  locale: z.enum(LOCALES).optional(),
+  enabled: z.boolean().optional(),
+});
 
 // ── Execution ─────────────────────────────────────────────────────────────────
 

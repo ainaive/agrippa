@@ -177,6 +177,7 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
   const fakeQueue: RunQueue = {
     enqueueRun: async () => {},
     enqueueApprovalExpiry: async () => {},
+    enqueueNotificationDelivery: async () => {},
   };
 
   const engineDeps = (): EngineDeps => ({

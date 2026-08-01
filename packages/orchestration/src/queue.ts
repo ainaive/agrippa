@@ -1,6 +1,7 @@
 import {
   type ApprovalExpirePayload,
   QUEUE_APPROVAL_EXPIRE,
+  QUEUE_NOTIFICATION_DELIVER,
   QUEUE_RUN_EXECUTE,
   type RunQueue,
 } from "@agrippa/core";
@@ -20,6 +21,7 @@ export async function createRunQueue(connectionString: string): Promise<BossQueu
   await boss.start();
   await boss.createQueue(QUEUE_RUN_EXECUTE);
   await boss.createQueue(QUEUE_APPROVAL_EXPIRE);
+  await boss.createQueue(QUEUE_NOTIFICATION_DELIVER);
 
   return {
     boss,
@@ -37,6 +39,15 @@ export async function createRunQueue(connectionString: string): Promise<BossQueu
         payload,
         { singletonKey: payload.approvalId },
         new Date(atMs),
+      );
+    },
+    async enqueueNotificationDelivery(deliveryId: string): Promise<void> {
+      await boss.send(
+        QUEUE_NOTIFICATION_DELIVER,
+        { deliveryId },
+        // backoff because the receiver is an external service: hammering a
+        // down endpoint every 30s converts an outage into five fast failures.
+        { singletonKey: deliveryId, retryLimit: 5, retryDelay: 30, retryBackoff: true },
       );
     },
   };
