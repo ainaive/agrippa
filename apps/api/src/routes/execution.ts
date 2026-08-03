@@ -15,7 +15,6 @@ import {
   artifacts,
   checkpoints,
   fabri,
-  mcpServers,
   orchestrationTemplates,
   projectMembers,
   projects,
@@ -23,7 +22,6 @@ import {
   runEvents,
   runSteps,
   runs,
-  skills,
   tasks,
   taskTypes,
   templateVersions,
@@ -32,13 +30,9 @@ import {
 } from "@agrippa/db";
 import {
   appendRunEvent as allocateRunEvent,
-  authorizeResources,
-  buildParamsValidator,
-  type CompiledTemplate,
   decideCheckpoint,
   finalizeRun,
   flattenPhases,
-  resolveAgentBindings,
   SubmitError,
   syncRunNotifications,
   upgradeCompiledTemplate,
@@ -48,60 +42,12 @@ import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
-import { audit } from "../lib/audit";
-import { liveWorkerExecutors } from "../lib/executors";
+import { audit, sessionActor } from "../lib/audit";
+import { resolveRunPlan } from "../lib/run-plan";
+import { submitTask } from "../lib/submit";
 import { assertQuotaHeadroom } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
-
-const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
-
-/**
- * Everything a new run derives from CURRENT project configuration: the
- * resource manifest, and per-slot agent bindings and model resolution. Shared
- * by submit and retry so the two paths cannot drift — a retry is a
- * re-submission of the pinned task (ADR-0014); only the template version and
- * params snapshot stay pinned. Run limits are NOT here: the engine reads them
- * from the pinned template_versions.compiled row, never from a copy.
- */
-async function resolveRunPlan(
-  db: AppEnv["Variables"]["db"],
-  projectId: string,
-  taskType: { defaultFaberId: string },
-  compiled: CompiledTemplate,
-  overrides: Record<string, { executorId?: string; faberId?: string }>,
-) {
-  const skillRows = await db.select({ id: skills.id, slug: skills.slug }).from(skills);
-  // a disabled server is not "registered" — pinning it would only defer the
-  // failure to worker materialization (skill versions are checked downstream
-  // in authorizeResources; the skills head table has no status column)
-  const mcpRows = await db
-    .select({ id: mcpServers.id, slug: mcpServers.slug })
-    .from(mcpServers)
-    .where(eq(mcpServers.status, "active"));
-  // required grants enforced; optional resources pinned only when granted
-  const resourceManifest = await authorizeResources(db, projectId, compiled, {
-    skillIdBySlug: new Map(skillRows.map((s) => [s.slug, s.id])),
-    mcpIdBySlug: new Map(mcpRows.map((m) => [m.slug, m.id])),
-  });
-  // every agent slot resolves to a concrete faber + executor (per-slot
-  // provider-filtered models, checked against the executors the deployment's
-  // workers actually registered) and freezes onto the run
-  const [projectRow] = await db
-    .select({ orgId: projects.orgId })
-    .from(projects)
-    .where(eq(projects.id, projectId));
-  const live = await liveWorkerExecutors(db, { orgId: projectRow?.orgId });
-  const agentResolution = await resolveAgentBindings(
-    db,
-    projectId,
-    compiled,
-    { faberId: taskType.defaultFaberId, executorId: DEFAULT_EXECUTOR },
-    overrides,
-    { registeredExecutors: live.union, workerExecutorSets: live.sets },
-  );
-  return { resourceManifest, agentResolution };
-}
 
 async function loadRunScoped(
   c: { var: AppEnv["Variables"] },
@@ -321,101 +267,14 @@ export const executionRoutes = new Hono<AppEnv>()
     requireProjectRole("member"),
     validate("json", taskSubmitSchema),
     async (c) => {
-      const projectId = c.req.param("projectId");
-      const input = c.req.valid("json");
-      const db = c.var.db;
-      const user = c.var.user;
-
-      const [taskType] = await db
-        .select()
-        .from(taskTypes)
-        .where(eq(taskTypes.id, input.taskTypeId));
-      if (!taskType?.enabled) throw AppError.notFound("Task type");
-
-      const [template] = await db
-        .select()
-        .from(orchestrationTemplates)
-        .where(eq(orchestrationTemplates.id, taskType.templateId));
-      if (!template?.latestPublishedVersionId) {
-        throw new AppError("template_unpublished", 409, "Task type has no published template");
-      }
-      const [version] = await db
-        .select()
-        .from(templateVersions)
-        .where(eq(templateVersions.id, template.latestPublishedVersionId));
-      if (!version) throw AppError.notFound("Template version");
-      const compiled = upgradeCompiledTemplate(version.compiled);
-
-      // params validated against the same compiled schema the SPA renders from
-      const parsed = buildParamsValidator(compiled.spec.inputs).safeParse(input.params);
-      if (!parsed.success) throw AppError.validation(parsed.error.issues);
-
-      // hard-stop quotas reject new work before anything persists
-      await assertQuotaHeadroom(db, projectId);
-
       try {
-        // every repoRef must reference a connection owned by this project
-        await verifyRepoRefs(db, projectId, compiled.spec.inputs, parsed.data);
-
-        const { resourceManifest, agentResolution } = await resolveRunPlan(
-          db,
-          projectId,
-          taskType,
-          compiled,
-          input.agents ?? {},
-        );
-
-        const { task, run } = await db.transaction(async (tx) => {
-          const [task] = await tx
-            .insert(tasks)
-            .values({
-              orgId: user.orgId,
-              projectId,
-              taskTypeId: taskType.id,
-              title: input.title,
-              params: parsed.data,
-              agentOverrides: input.agents ?? {},
-              createdBy: user.id,
-            })
-            .returning();
-          if (!task) throw new Error("task insert failed");
-          const [run] = await tx
-            .insert(runs)
-            .values({
-              taskId: task.id,
-              projectId,
-              number: 1,
-              templateVersionId: version.id,
-              faberId: agentResolution.primary.faberId,
-              executorId: agentResolution.primary.executorId,
-              agentBindings: agentResolution.bindings,
-              paramsSnapshot: parsed.data,
-              modelResolution: agentResolution.modelResolution,
-              resourceManifest,
-              createdBy: user.id,
-            })
-            .returning();
-          if (!run) throw new Error("run insert failed");
-          await tx.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
-          // in the tx: a committed mutation without its audit row would break
-          // the every-mutation-is-audited invariant (ADR-0013 amendment 1)
-          await audit(
-            c,
-            {
-              action: "task.submit",
-              resourceType: "task",
-              resourceId: task.id,
-              projectId,
-              payload: { taskTypeId: taskType.id, runId: run.id },
-            },
-            tx,
-          );
-          return { task, run };
+        const { taskId, runId } = await submitTask(c.var.db, c.var.queue, {
+          projectId: c.req.param("projectId"),
+          actorUserId: c.var.user.id,
+          actor: sessionActor(c),
+          input: c.req.valid("json"),
         });
-
-        // post-commit send; singleton key + worker sweeper make this loss-proof
-        await c.var.queue?.enqueueRun(run.id);
-        return c.json({ taskId: task.id, runId: run.id }, 202);
+        return c.json({ taskId, runId }, 202);
       } catch (err) {
         if (err instanceof SubmitError) {
           throw new AppError(err.code, 400, err.message, err.details);

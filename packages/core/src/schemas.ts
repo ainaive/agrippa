@@ -247,6 +247,7 @@ export const taskSubmitSchema = z.object({
     )
     .optional(),
 });
+export type TaskSubmitInput = z.infer<typeof taskSubmitSchema>;
 
 /**
  * Kind-discriminated payload for POST /runs/:id/checkpoints/:checkpointId/respond.
