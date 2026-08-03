@@ -1,6 +1,6 @@
 import { buildProviderCatalog, type ProviderCatalog, type ProviderCatalogRow } from "@agrippa/core";
 import { and, eq, isNull, or } from "drizzle-orm";
-import type { Db, DbOrTx } from "./client";
+import type { DbOrTx } from "./client";
 import { providerCatalog } from "./schema";
 
 /**
