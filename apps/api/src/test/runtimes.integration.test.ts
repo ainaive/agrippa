@@ -316,6 +316,43 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     expect(row?.lastContactAt).not.toBeNull();
   });
 
+  it("re-offers an orphaned claim (lost response, no events) to its own runtime", async () => {
+    // The claim UPDATE can commit while the response socket dies — the daemon
+    // never learns it holds the dispatch. With zero events and stale contact,
+    // the next poll from the SAME runtime must get it back instead of the
+    // deadman burning an attempt 120s later.
+    const id = await newDispatch();
+    const got = await jsonOf<{ dispatch: { id: string } | null }>(await daemonClaim());
+    expect(got.dispatch?.id).toBe(id);
+
+    // fresh contact (keepalives would keep it fresh mid-execution) → NOT re-offered
+    const fresh = await jsonOf<{ dispatch: null }>(await daemonClaim());
+    expect(fresh.dispatch).toBeNull();
+
+    // stale contact + no events → re-offered, and only to its own runtime
+    await db
+      .update(dispatches)
+      .set({ lastContactAt: sql`now() - interval '30 seconds'` })
+      .where(eq(dispatches.id, id));
+    const foreign = await jsonOf<{ dispatch: null }>(await daemonClaim(otherToken));
+    expect(foreign.dispatch).toBeNull();
+    const reoffered = await jsonOf<{ dispatch: { id: string } | null }>(await daemonClaim());
+    expect(reoffered.dispatch?.id).toBe(id);
+
+    // once ANY event has landed, a stale claim is the deadman's business
+    await daemonPost(`/dispatches/${id}/events`, {
+      batch: [{ seq: 1, event: { type: "message", role: "assistant", text: "hi" } }],
+    });
+    await db
+      .update(dispatches)
+      .set({ lastContactAt: sql`now() - interval '30 seconds'` })
+      .where(eq(dispatches.id, id));
+    const withEvents = await jsonOf<{ dispatch: null }>(await daemonClaim());
+    expect(withEvents.dispatch).toBeNull();
+    // cleanup so later suites see no claimed leftovers
+    await db.update(dispatches).set({ status: "failed" }).where(eq(dispatches.id, id));
+  });
+
   it("event batches dedupe on (dispatch, seq) and carry the abort flag back", async () => {
     const id = await newDispatch();
     await daemonClaim();

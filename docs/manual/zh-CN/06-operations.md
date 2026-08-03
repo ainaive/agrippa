@@ -109,8 +109,9 @@ docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
 团队成员机器上的守护进程可以用该机器自己的 CLI 登录凭证执行智能体工作——配额、检查点、审计与 git 发布仍留在平台侧（见 [design/03](../../design/03-executor-abstraction.md) 与 ADR-0017）。
 
 1. **签发令牌**：在**管理 → 工作节点 → 远程运行时**中创建。令牌仅显示一次——请立即保存。
-2. **构建二进制**：`bun run build:daemon` 产出 `dist/agrippa-daemon`（自包含；Claude Agent SDK 已内嵌，Codex 从机器 `PATH` 探测）。
-3. **在持有 CLI 登录的机器上运行**：
+2. **构建二进制**：`bun run build:daemon` 产出 `dist/agrippa-daemon`。Claude Agent SDK 的 JS 已内嵌，但其原生 `claude` 可执行文件无法打包——守护进程会使用机器自己的 Claude Code CLI（`PATH` 上的 `claude`，或 `CLAUDE_CODE_EXECUTABLE` 指定）；找不到时不会通告 claude 执行器。Codex 同样从 `PATH` 探测。
+3. **把机器的模型凭证暴露为环境变量**——通告基于环境变量：anthropic 需要导出 `CLAUDE_CODE_OAUTH_TOKEN`（或 `ANTHROPIC_API_KEY`）；openai 则会自动识别普通的 `codex login`（`~/.codex/auth.json`）。某服务商没有通告凭证的守护进程不会收到解析到该服务商的任务。
+4. **在持有 CLI 登录的机器上运行**：
 
 ```sh
 ./agrippa-daemon --server https://your-agrippa.example.com --token agrd_…

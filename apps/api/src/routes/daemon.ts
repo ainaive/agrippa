@@ -138,12 +138,29 @@ export const daemonRoutes = new Hono<DaemonEnv>()
     const deadline = Date.now() + waitSec * 1000;
     let claimed: DaemonClaimResponse["dispatch"] = null;
     for (;;) {
+      // Claimable: pending — or claimed by THIS runtime with zero events and
+      // stale contact. The second arm re-offers a claim whose RESPONSE was
+      // lost (socket died between the claim UPDATE committing and the daemon
+      // reading it) or whose daemon crashed pre-execution: nothing partially
+      // executed reached the server (no events), only this runtime can claim
+      // its dispatches, and its single-threaded runner is asking for work —
+      // so handing it back is safe, and beats stalling until the deadman
+      // burns an attempt. 15s staleness (3× the keepalive cadence) keeps an
+      // actively-executing dispatch out of reach.
       const rows = (await c.var.db.execute(sql`
         update dispatches set status = 'claimed', claimed_at = now(), last_contact_at = now()
         where id = (
-          select id from dispatches
-          where runtime_id = ${c.var.runtime.id} and status = 'pending'
-          order by created_at
+          select id from dispatches d
+          where d.runtime_id = ${c.var.runtime.id}
+            and (
+              d.status = 'pending'
+              or (
+                d.status = 'claimed'
+                and d.last_contact_at < now() - interval '15 seconds'
+                and not exists (select 1 from dispatch_events e where e.dispatch_id = d.id)
+              )
+            )
+          order by d.created_at
           limit 1
           for update skip locked
         )

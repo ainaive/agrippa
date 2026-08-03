@@ -99,8 +99,9 @@ Workers register the executors they can actually run, at boot and on a 60 s hear
 A daemon on a team member's machine can execute agent work with that machine's own CLI logins — quotas, checkpoints, audit, and git publication stay on the platform (see [design/03](../../design/03-executor-abstraction.md) and ADR-0017).
 
 1. **Issue a token** in **Admin → Workers → Remote runtimes**. It is shown exactly once — store it immediately.
-2. **Build the binary**: `bun run build:daemon` produces `dist/agrippa-daemon` (self-contained; the Claude Agent SDK is embedded, Codex is detected from the machine's `PATH`).
-3. **Run it** on the machine that has the CLI logins:
+2. **Build the binary**: `bun run build:daemon` produces `dist/agrippa-daemon`. The Claude Agent SDK's JS is embedded, but its native `claude` executable cannot be — the daemon uses the machine's own Claude Code CLI (`claude` on `PATH`, or `CLAUDE_CODE_EXECUTABLE`); without one, the claude executor is not advertised. Codex is detected from `PATH` the same way.
+3. **Expose the machine's model auth as env vars** — advertisement is env-based: export `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) for anthropic; an ordinary `codex login` (`~/.codex/auth.json`) is detected automatically for openai. A daemon advertising no auth for a provider will not receive runs that resolve it.
+4. **Run it** on the machine that has the CLI logins:
 
 ```sh
 ./agrippa-daemon --server https://your-agrippa.example.com --token agrd_…

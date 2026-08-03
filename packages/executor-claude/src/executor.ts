@@ -25,6 +25,7 @@ export function buildQueryArgs(
   req: StepExecutionRequest,
   _ctx: ExecutionContext,
   abortController: AbortController,
+  claudeExecutablePath?: string,
 ): { prompt: string; options: Options } {
   const agents: NonNullable<Options["agents"]> = {};
   for (const subagent of req.subagents) {
@@ -79,6 +80,11 @@ export function buildQueryArgs(
     // auth family — the slot resolves single-provider, so one base URL also
     // serves every subagent model in this query
     env: overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "anthropic"),
+    // The SDK spawns a NATIVE claude executable (a platform-specific optional
+    // dependency). Inside node_modules the SDK finds its own; a compiled
+    // daemon binary embeds only the JS, so the host machine's Claude Code CLI
+    // is used instead — resolved at executor construction, threaded here.
+    ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
     maxTurns: req.limits.maxTurns,
     includePartialMessages: true,
     resume: req.resumeSessionId,
@@ -122,12 +128,17 @@ function textOf(content: Array<{ type: string; text?: string }>): string {
     .join("");
 }
 
-export function createClaudeExecutor(queryFn: QueryFn = sdkQuery as QueryFn): Executor {
+export function createClaudeExecutor(
+  queryFn: QueryFn = sdkQuery as QueryFn,
+  options: { claudeExecutablePath?: string } = {},
+): Executor {
   const envAuth = Boolean(
     process.env.ANTHROPIC_API_KEY ||
       process.env.ANTHROPIC_AUTH_TOKEN ||
       process.env.CLAUDE_CODE_OAUTH_TOKEN,
   );
+  const claudeExecutablePath =
+    options.claudeExecutablePath ?? process.env.CLAUDE_CODE_EXECUTABLE ?? undefined;
   return {
     id: "claude-agent-sdk",
     capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
@@ -149,7 +160,7 @@ export function createClaudeExecutor(queryFn: QueryFn = sdkQuery as QueryFn): Ex
       // touching other steps' artifacts (or recursively deleting the dir)
       clearExpectedArtifacts(req.workspaceDir, req.expectedArtifacts);
 
-      const { prompt, options } = buildQueryArgs(req, ctx, abortController);
+      const { prompt, options } = buildQueryArgs(req, ctx, abortController, claudeExecutablePath);
       let started = false;
       let terminal: ExecutorEvent | null = null;
 

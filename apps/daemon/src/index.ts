@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import path from "node:path";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor, Logger } from "@agrippa/executor-core";
@@ -17,11 +18,24 @@ const config = await loadConfig();
 process.env.WORKSPACE_ROOT = config.workspaceRoot;
 
 // Detect what THIS machine can execute — the advertisement routing scores.
-// The claude executor embeds the Agent SDK (always available in the binary);
-// codex only registers when its CLI is usable, same probe as the worker.
-const executors: Record<string, Executor> = {
-  "claude-agent-sdk": createClaudeExecutor(),
-};
+// The compiled binary embeds the Agent SDK's JS but NOT its native claude
+// executable (a platform-specific optional dependency bun's compiler cannot
+// bundle), so claude registers only when the machine's own Claude Code CLI
+// is discoverable — CLAUDE_CODE_EXECUTABLE, then PATH. A source-run daemon
+// (dev: `bun apps/daemon/src/index.ts`) still has node_modules and falls
+// back to the SDK's bundled executable. Codex probes its CLI the same way
+// the worker does.
+const compiled = path.basename(process.execPath) !== "bun";
+const claudeExecutablePath = process.env.CLAUDE_CODE_EXECUTABLE ?? Bun.which("claude") ?? undefined;
+const executors: Record<string, Executor> = {};
+if (claudeExecutablePath || !compiled) {
+  executors["claude-agent-sdk"] = createClaudeExecutor(undefined, { claudeExecutablePath });
+  if (claudeExecutablePath) logger.info(`claude executor uses ${claudeExecutablePath}`);
+} else {
+  logger.info(
+    "claude executor not available (no `claude` CLI found — install Claude Code or set CLAUDE_CODE_EXECUTABLE)",
+  );
+}
 const codexProbe = probeCodexCli();
 if (codexProbe.ok) {
   executors["codex-cli"] = createCodexExecutor();

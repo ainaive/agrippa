@@ -166,6 +166,16 @@ describe("claude executor option mapping (docs/design/03)", () => {
     }
   });
 
+  it("threads an explicit claude executable path into the SDK options", () => {
+    // A compiled daemon binary embeds the SDK's JS but not its native claude
+    // executable — the machine's own Claude Code CLI must be usable instead
+    const req = makeRequest();
+    const withPath = buildQueryArgs(req, makeCtx(), new AbortController(), "/opt/bin/claude");
+    expect(withPath.options.pathToClaudeCodeExecutable).toBe("/opt/bin/claude");
+    const withoutPath = buildQueryArgs(req, makeCtx(), new AbortController());
+    expect(withoutPath.options.pathToClaudeCodeExecutable).toBeUndefined();
+  });
+
   it("overlays a project provider credential onto the subprocess env", () => {
     const req = makeRequest({
       model: { provider: "dashscope", providerModelId: "qwen3.7-max" },

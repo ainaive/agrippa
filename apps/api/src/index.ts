@@ -33,4 +33,11 @@ console.log(`[api] listening on :${port}`);
 export default {
   port,
   fetch: app.fetch,
+  // Bun.serve's default idleTimeout is 10s — it killed the daemon claim
+  // long-poll (25s of silence by design) mid-wait, right after the claim
+  // UPDATE committed: the daemon saw a dead socket, the dispatch sat claimed
+  // with nobody executing, and the 120s deadman burned an attempt. Must
+  // comfortably exceed DAEMON_PROTOCOL_HINTS.claimWaitSec; SSE is unaffected
+  // either way (its keepalive frames reset the idle clock).
+  idleTimeout: 60,
 };
