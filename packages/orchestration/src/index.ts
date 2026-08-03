@@ -1,4 +1,5 @@
 export * from "./artifact-store";
+export * from "./audit";
 export * from "./compile";
 export * from "./engine/bus";
 export * from "./engine/deps";
@@ -15,5 +16,9 @@ export * from "./remote/remote-executor";
 export * from "./remote/remote-workspace";
 export * from "./remote/routing";
 export * from "./resolve";
+export * from "./run-plan";
 export * from "./seed-builtins";
+export * from "./submit";
 export * from "./template-schema";
+export * from "./usage";
+export * from "./worker-executors";

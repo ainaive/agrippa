@@ -1,11 +1,8 @@
 import { type Db, mcpServers, projects, skills } from "@agrippa/db";
-import {
-  authorizeResources,
-  type CompiledTemplate,
-  resolveAgentBindings,
-} from "@agrippa/orchestration";
 import { eq } from "drizzle-orm";
-import { liveWorkerExecutors } from "./executors";
+import { authorizeResources, resolveAgentBindings } from "./resolve";
+import type { CompiledTemplate } from "./template-schema";
+import { liveWorkerExecutors } from "./worker-executors";
 
 export const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
 

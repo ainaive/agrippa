@@ -8,13 +8,10 @@ import {
   taskTypes,
   templateVersions,
 } from "@agrippa/db";
-import {
-  buildParamsValidator,
-  upgradeCompiledTemplate,
-  verifyRepoRefs,
-} from "@agrippa/orchestration";
 import { eq } from "drizzle-orm";
 import { type AuditActor, auditAs } from "./audit";
+import { upgradeCompiledTemplate } from "./compile";
+import { buildParamsValidator, verifyRepoRefs } from "./resolve";
 import { resolveRunPlan } from "./run-plan";
 import { assertQuotaHeadroom } from "./usage";
 

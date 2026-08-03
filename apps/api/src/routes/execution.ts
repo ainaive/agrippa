@@ -30,10 +30,14 @@ import {
 } from "@agrippa/db";
 import {
   appendRunEvent as allocateRunEvent,
+  assertProjectAcceptsWork,
+  assertQuotaHeadroom,
   decideCheckpoint,
   finalizeRun,
   flattenPhases,
+  resolveRunPlan,
   SubmitError,
+  submitTask,
   syncRunNotifications,
   upgradeCompiledTemplate,
   verifyRepoRefs,
@@ -43,9 +47,6 @@ import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit, requestActor } from "../lib/audit";
-import { resolveRunPlan } from "../lib/run-plan";
-import { assertProjectAcceptsWork, submitTask } from "../lib/submit";
-import { assertQuotaHeadroom } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
 
