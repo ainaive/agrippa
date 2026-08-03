@@ -5,10 +5,15 @@ import {
   type TriggerDisabledReason,
 } from "@agrippa/core";
 import { type Db, triggerDeliveries, triggerEndpoints } from "@agrippa/db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, lt, sql } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
-import { notifyProjectEvent } from "./notifications";
+import {
+  enqueueProjectEventDeliveries,
+  insertProjectEventDeliveries,
+  notifyProjectEvent,
+} from "./notifications";
+import { enqueueAfterCommit } from "./queue";
 import { submitTask } from "./submit";
 
 export type TriggerFireOutcome =
@@ -56,13 +61,33 @@ export async function fireTrigger(
   const markAttempt = async (patch: Record<string, unknown>): Promise<void> => {
     await db
       .update(triggerDeliveries)
-      .set({
-        attempts: sql`${triggerDeliveries.attempts} + 1`,
-        lastAttemptAt: new Date(),
-        ...patch,
-      })
+      .set({ lastAttemptAt: new Date(), ...patch })
       .where(eq(triggerDeliveries.id, deliveryId));
   };
+
+  // Claim the attempt by CAS before doing anything observable — the attempts
+  // counter is the version. A plain read-then-submit lets two concurrent
+  // invocations (a redelivered job racing a sweeper re-enqueue, or an operator
+  // double-clicking Retry) both see `pending` and both submit, which is two
+  // runs and two charges for one webhook. The 20s window mirrors the
+  // notification executor's and is chosen against the queue's retry delay: it
+  // must outlast an in-flight submit but stay under the 30s first retry and
+  // the 60s sweeper threshold, or a legitimate retry would be turned away as
+  // if it were a duplicate. Losing the race is a quiet no-op — whoever holds
+  // the claim records the outcome.
+  const [claimed] = await db
+    .update(triggerDeliveries)
+    .set({ attempts: delivery.attempts + 1, lastAttemptAt: new Date() })
+    .where(
+      and(
+        eq(triggerDeliveries.id, deliveryId),
+        eq(triggerDeliveries.status, "pending"),
+        eq(triggerDeliveries.attempts, delivery.attempts),
+        sql`(${triggerDeliveries.lastAttemptAt} IS NULL OR ${triggerDeliveries.lastAttemptAt} < now() - interval '20 seconds')`,
+      ),
+    )
+    .returning({ id: triggerDeliveries.id });
+  if (!claimed) return { kind: "skipped", reason: "already_handled" };
 
   if (!endpoint.enabled) {
     await markAttempt({ status: "failed", lastError: "trigger is disabled" });
@@ -75,27 +100,36 @@ export async function fireTrigger(
     ownerId: endpoint.createdBy,
   });
   if (denied) {
-    await db
-      .update(triggerEndpoints)
-      .set({ enabled: false, disabledReason: denied, updatedAt: new Date() })
-      .where(eq(triggerEndpoints.id, endpoint.id));
-    await markAttempt({ status: "failed", lastError: `trigger disabled: ${denied}` });
-    await auditAs(
-      db,
-      { orgId: endpoint.orgId, userId: endpoint.createdBy },
-      {
-        action: "trigger.disabled",
-        resourceType: "trigger_endpoint",
-        resourceId: endpoint.id,
+    // one transaction, for the reason schedule-fire spells out: the flag that
+    // stops the trigger is also the flag that makes the retry skip, so the
+    // announcement has to be committed with it or it is lost for good
+    const deliveryIds = await db.transaction(async (tx) => {
+      await tx
+        .update(triggerEndpoints)
+        .set({ enabled: false, disabledReason: denied, updatedAt: new Date() })
+        .where(eq(triggerEndpoints.id, endpoint.id));
+      await tx
+        .update(triggerDeliveries)
+        .set({ status: "failed", lastError: `trigger disabled: ${denied}` })
+        .where(eq(triggerDeliveries.id, deliveryId));
+      await auditAs(
+        tx,
+        { orgId: endpoint.orgId, userId: endpoint.createdBy },
+        {
+          action: "trigger.disabled",
+          resourceType: "trigger_endpoint",
+          resourceId: endpoint.id,
+          projectId: endpoint.projectId,
+          payload: { reason: denied, name: endpoint.name },
+        },
+      );
+      return insertProjectEventDeliveries(tx, {
         projectId: endpoint.projectId,
-        payload: { reason: denied, name: endpoint.name },
-      },
-    );
-    await notifyProjectEvent(db, queue, {
-      projectId: endpoint.projectId,
-      eventType: "trigger.disabled",
-      payload: { triggerId: endpoint.id, triggerName: endpoint.name, reason: denied },
+        eventType: "trigger.disabled",
+        payload: { triggerId: endpoint.id, triggerName: endpoint.name, reason: denied },
+      });
     });
+    await enqueueProjectEventDeliveries(queue, deliveryIds);
     return { kind: "disabled", reason: denied };
   }
 
@@ -134,5 +168,57 @@ export async function fireTrigger(
       payload: { triggerId: endpoint.id, triggerName: endpoint.name, error: message, deliveryId },
     });
     return { kind: "failed", error: message };
+  }
+}
+
+/** A delivery pending longer than this lost its job and needs re-enqueueing. */
+const STALE_PENDING = sql`now() - interval '60 seconds'`;
+/** Give up after this many attempts rather than retrying a doomed row forever. */
+const MAX_SWEPT_ATTEMPTS = 8;
+/** Bound one tick's work; the next tick takes the rest. */
+const STALE_BATCH = 100;
+
+/**
+ * Backstop for accepted deliveries whose job never arrived.
+ *
+ * The inbound request writes the row and then enqueues, so a crash, a queue
+ * outage, or a deduplicated retry whose original never got a job all leave a
+ * `pending` row with nothing scheduled. Nothing else can rescue it: the retry
+ * endpoint only moves `failed → pending`, and the UI offers Retry only on
+ * `failed`, so without this sweep a stranded delivery is reachable only by
+ * hand-written SQL — an acknowledged webhook that silently never ran.
+ *
+ * Mirrors `sweepNotificationDeliveries` minus its backfill half; there is
+ * nothing to backfill here, because the request itself creates the row.
+ */
+export async function sweepTriggerDeliveries(db: Db, queue: RunQueue): Promise<void> {
+  // a row that has burned its attempts is failed, not pending — that both
+  // stops the churn and puts Retry in front of the operator in the UI
+  await db
+    .update(triggerDeliveries)
+    .set({
+      status: "failed",
+      lastError: sql`coalesce(${triggerDeliveries.lastError}, 'delivery attempts exhausted')`,
+    })
+    .where(
+      and(
+        eq(triggerDeliveries.status, "pending"),
+        sql`${triggerDeliveries.attempts} >= ${MAX_SWEPT_ATTEMPTS}`,
+      ),
+    );
+
+  const stale = await db
+    .select({ id: triggerDeliveries.id })
+    .from(triggerDeliveries)
+    .where(
+      and(eq(triggerDeliveries.status, "pending"), lt(triggerDeliveries.createdAt, STALE_PENDING)),
+    )
+    .orderBy(triggerDeliveries.createdAt)
+    .limit(STALE_BATCH);
+  for (const row of stale) {
+    await enqueueAfterCommit(
+      () => queue.enqueueTriggerDelivery(row.id),
+      `trigger delivery ${row.id}`,
+    );
   }
 }

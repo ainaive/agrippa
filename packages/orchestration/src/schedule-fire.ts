@@ -11,7 +11,12 @@ import { eq } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
 import { requestRunCancellation } from "./engine/run-lifecycle";
-import { notifyProjectEvent } from "./notifications";
+import {
+  enqueueProjectEventDeliveries,
+  insertProjectEventDeliveries,
+  notifyProjectEvent,
+} from "./notifications";
+import { enqueueAfterCommit } from "./queue";
 import { submitTask } from "./submit";
 
 export type ScheduleFireOutcome =
@@ -54,27 +59,42 @@ export async function fireSchedule(
   if (!schedule?.enabled) return { kind: "skipped", reason: "disabled" };
 
   const disable = async (reason: ScheduleDisabledReason): Promise<ScheduleFireOutcome> => {
-    await db
-      .update(taskSchedules)
-      .set({ enabled: false, disabledReason: reason, updatedAt: new Date() })
-      .where(eq(taskSchedules.id, scheduleId));
-    await auditAs(
-      db,
-      { orgId: schedule.orgId, userId: schedule.createdBy },
-      {
-        action: "schedule.disabled",
-        resourceType: "task_schedule",
-        resourceId: scheduleId,
+    // Stopping and saying so commit together. Flipping `enabled` first and
+    // announcing afterwards looks equivalent but is not: the flag is exactly
+    // what makes this function skip on its next invocation, so a failure in
+    // between is never retried, and a run-less notification that was never
+    // written cannot be reconstructed by any sweeper. The schedule would go
+    // quiet without a word — the one outcome this whole design exists to
+    // prevent.
+    const deliveryIds = await db.transaction(async (tx) => {
+      await tx
+        .update(taskSchedules)
+        .set({ enabled: false, disabledReason: reason, updatedAt: new Date() })
+        .where(eq(taskSchedules.id, scheduleId));
+      await auditAs(
+        tx,
+        { orgId: schedule.orgId, userId: schedule.createdBy },
+        {
+          action: "schedule.disabled",
+          resourceType: "task_schedule",
+          resourceId: scheduleId,
+          projectId: schedule.projectId,
+          payload: { reason, name: schedule.name },
+        },
+      );
+      return insertProjectEventDeliveries(tx, {
         projectId: schedule.projectId,
-        payload: { reason, name: schedule.name },
-      },
-    );
-    await notifyProjectEvent(db, queue, {
-      projectId: schedule.projectId,
-      eventType: "schedule.disabled",
-      payload: { scheduleId, scheduleName: schedule.name, reason },
+        eventType: "schedule.disabled",
+        payload: { scheduleId, scheduleName: schedule.name, reason },
+      });
     });
-    await queue?.unregisterSchedule(scheduleId);
+    // post-commit, both best-effort: the notification sweeper re-enqueues a
+    // stranded delivery row, and boot reconciliation drops a stale cron entry
+    await enqueueProjectEventDeliveries(queue, deliveryIds);
+    await enqueueAfterCommit(
+      () => queue?.unregisterSchedule(scheduleId) ?? Promise.resolve(),
+      `unregister schedule ${scheduleId}`,
+    );
     return { kind: "disabled", reason };
   };
 

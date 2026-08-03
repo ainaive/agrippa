@@ -15,6 +15,30 @@ import { PgBoss } from "pg-boss";
 export type BossQueue = RunQueue & { boss: PgBoss; stop(): Promise<void> };
 
 /**
+ * Hand work to the queue *after* its row is already committed.
+ *
+ * Never throws. Every post-commit send in this codebase is backed by a sweeper
+ * — queued runs by the straggler sweep, decided checkpoints by
+ * `findStrandedCheckpointRuns`, deliveries by their own sweepers — so a failed
+ * send delays work, it does not lose it. Reporting it as a failure would be a
+ * lie about durable state, and a costly one: the caller's retry creates a
+ * *second* task and run while the first is still recovered by the sweeper.
+ */
+export async function enqueueAfterCommit(
+  send: () => Promise<void>,
+  context: string,
+): Promise<void> {
+  try {
+    await send();
+  } catch (err) {
+    console.warn(
+      `[queue] post-commit enqueue failed (${context}) — the sweeper will recover it:`,
+      String(err),
+    );
+  }
+}
+
+/**
  * Resolves the executor ids a run requires, so enqueueRun can derive its
  * executor-set queue name. Returning [] (unknown run) falls back to the
  * legacy queue — the job then fails visibly instead of being silently lost.
@@ -73,7 +97,15 @@ export async function createRunQueue(
   }
   await boss.createQueue(QUEUE_NOTIFICATION_DELIVER, { policy: "exclusive" });
   await boss.createQueue(QUEUE_SCHEDULE_FIRE);
-  await boss.createQueue(QUEUE_TRIGGER_FIRE);
+  // trigger.fire needs the same treatment as the delivery queue, and for the
+  // same reason: enqueueTriggerDelivery leans on singletonKey to keep a
+  // sender's retry, a sweeper re-enqueue and an operator's replay from racing
+  // into two runs, and on 'standard' that key enforces nothing at all.
+  const existingTrigger = await boss.getQueue(QUEUE_TRIGGER_FIRE);
+  if (existingTrigger && existingTrigger.policy !== "exclusive") {
+    await boss.deleteQueue(QUEUE_TRIGGER_FIRE);
+  }
+  await boss.createQueue(QUEUE_TRIGGER_FIRE, { policy: "exclusive" });
 
   return {
     boss,
@@ -120,7 +152,9 @@ export async function createRunQueue(
       await boss.send(
         QUEUE_TRIGGER_FIRE,
         { deliveryId },
-        { singletonKey: deliveryId, retryLimit: 3, retryDelay: 10 },
+        // retryDelay outlasts the 20s claim window in fireTrigger, so a retry
+        // is never mistaken for a concurrent duplicate and turned away
+        { singletonKey: deliveryId, retryLimit: 3, retryDelay: 30 },
       );
     },
     async enqueueNotificationDelivery(deliveryId: string): Promise<void> {

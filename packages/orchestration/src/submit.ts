@@ -11,6 +11,7 @@ import {
 import { eq } from "drizzle-orm";
 import { type AuditActor, auditAs } from "./audit";
 import { upgradeCompiledTemplate } from "./compile";
+import { enqueueAfterCommit } from "./queue";
 import { buildParamsValidator, verifyRepoRefs } from "./resolve";
 import { resolveRunPlan } from "./run-plan";
 import { assertQuotaHeadroom } from "./usage";
@@ -147,7 +148,10 @@ export async function submitTask(
     return { task, run };
   });
 
-  // post-commit send; singleton key + worker sweeper make this loss-proof
-  await queue?.enqueueRun(run.id);
+  // Post-commit: the worker's straggler sweep is the delivery guarantee, so a
+  // send failure must not surface as a submission failure — the run exists and
+  // will execute either way, and telling the caller otherwise invites a retry
+  // that creates a second one.
+  await enqueueAfterCommit(() => queue?.enqueueRun(run.id) ?? Promise.resolve(), `run ${run.id}`);
   return { taskId: task.id, runId: run.id };
 }

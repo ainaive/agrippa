@@ -17,7 +17,7 @@ import {
   triggerDeliveries,
   triggerEndpoints,
 } from "@agrippa/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { tokenMatches, tokenPrefixOf } from "../lib/bearer-tokens";
 
@@ -45,6 +45,39 @@ function signatureMatches(expected: string, provided: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * Read a request body into a string, refusing anything past `limit`.
+ *
+ * The cap is enforced per chunk, so an oversized send is rejected after one
+ * buffer rather than after all of it — the pattern `stageDispatchArtifact`
+ * uses for daemon artifact uploads. The reader is always cancelled, so the
+ * sender is not left streaming into a request nobody is reading.
+ */
+async function readBoundedText(
+  body: ReadableStream<Uint8Array> | null,
+  limit: number,
+): Promise<string> {
+  if (!body) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let seen = 0;
+  let out = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      seen += value.byteLength;
+      if (seen > limit) {
+        throw new AppError("trigger_payload_too_large", 413, "Payload exceeds the size limit");
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return out + decoder.decode();
+}
+
 export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async (c) => {
   const token = c.req.param("token");
   if (!token.startsWith(TRIGGER_TOKEN_PREFIX)) throw invalid();
@@ -57,22 +90,24 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
   // a disabled trigger is indistinguishable from a wrong token, on purpose
   if (!endpoint.enabled) throw invalid();
 
-  // Read the body ONCE, as raw bytes: the signature covers the exact bytes the
-  // sender hashed, and re-serializing parsed JSON would change them.
-  // Bound the body BEFORE reading it, the way the daemon event batch does:
-  // deciding after `text()` means an oversized send is already resident in
-  // memory by the time we object to it. Content-Length can be absent under
-  // chunked encoding, so the post-read check stays as the backstop that
-  // actually cannot be evaded — the header check is what keeps the common
-  // case from being paid for at all.
-  const declared = Number(c.req.header("content-length") ?? 0);
-  if (declared > TRIGGER_PAYLOAD_MAX_BYTES) {
+  // Read the body ONCE, as raw bytes — the signature covers exactly these, and
+  // re-serializing parsed JSON would change them — and bound it WHILE reading.
+  // A Content-Length check alone is not a bound: the header is absent under
+  // chunked encoding, and `Number("abc")` is
+  // NaN — and `NaN > limit` is false — so either one walks straight past it
+  // into a full buffer of whatever the runtime's body limit allows. The header
+  // is still worth consulting as a fast reject for honest senders; the
+  // streaming count is what actually cannot be evaded.
+  //
+  // Oversize THROWS rather than truncating (unlike `readBounded`, which is
+  // reading a response nobody signed): the signature covers these exact bytes,
+  // so a silently truncated body would fail verification and report itself as
+  // a wrong secret.
+  const declared = Number(c.req.header("content-length"));
+  if (Number.isFinite(declared) && declared > TRIGGER_PAYLOAD_MAX_BYTES) {
     throw new AppError("trigger_payload_too_large", 413, "Payload exceeds the size limit");
   }
-  const raw = await c.req.text();
-  if (Buffer.byteLength(raw, "utf8") > TRIGGER_PAYLOAD_MAX_BYTES) {
-    throw new AppError("trigger_payload_too_large", 413, "Payload exceeds the size limit");
-  }
+  const raw = await readBoundedText(c.req.raw.body, TRIGGER_PAYLOAD_MAX_BYTES);
 
   const timestamp = c.req.header(TRIGGER_TIMESTAMP_HEADER) ?? "";
   const signature = c.req.header(TRIGGER_SIGNATURE_HEADER) ?? "";
@@ -119,7 +154,28 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
     .onConflictDoNothing()
     .returning({ id: triggerDeliveries.id });
 
+  // Only a non-null externalId can conflict: the dedupe index is partial, so a
+  // delivery without one always inserts and `delivery` is defined below.
   if (!delivery) {
+    if (externalId === null) throw new Error("trigger delivery insert returned no row");
+    // A duplicate id means the sender is retrying — usually because it never
+    // saw our first response, which is exactly the case where our first
+    // enqueue may also have been lost. Re-enqueue the existing row if it is
+    // still pending: the job is singleton-keyed, so this cannot produce a
+    // second run, and without it the delivery is unreachable (Retry only
+    // moves failed → pending).
+    const [existing] = await c.var.db
+      .select({ id: triggerDeliveries.id, status: triggerDeliveries.status })
+      .from(triggerDeliveries)
+      .where(
+        and(
+          eq(triggerDeliveries.endpointId, endpoint.id),
+          eq(triggerDeliveries.externalId, externalId),
+        ),
+      );
+    if (existing?.status === "pending") {
+      await c.var.queue?.enqueueTriggerDelivery(existing.id);
+    }
     return c.json({ accepted: true, deduplicated: true }, 200);
   }
 

@@ -1,5 +1,6 @@
 import { AppError, scheduleCreateSchema, scheduleUpdateSchema } from "@agrippa/core";
 import { taskSchedules } from "@agrippa/db";
+import { enqueueAfterCommit } from "@agrippa/orchestration";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
@@ -81,7 +82,14 @@ export const scheduleRoutes = new Hono<AppEnv>()
         projectId,
         payload: { name: row.name, cron: row.cron, timezone: row.timezone },
       });
-      await c.var.queue?.registerSchedule(row.id, row.cron, row.timezone);
+      // best-effort, as the module comment promises: the row and its audit are
+      // committed, so a 500 here would tell the user creation failed while the
+      // schedule sits enabled and starts firing at the next worker boot — and
+      // their retry would leave two. Boot reconciliation repairs the calendar.
+      await enqueueAfterCommit(
+        () => c.var.queue?.registerSchedule(row.id, row.cron, row.timezone) ?? Promise.resolve(),
+        `register schedule ${row.id}`,
+      );
       return c.json(row, 201);
     },
   )
@@ -142,8 +150,13 @@ export const scheduleRoutes = new Hono<AppEnv>()
       });
       // the calendar follows the row: a disabled schedule has none at all, so
       // pausing cannot leave a firing in flight
-      if (row.enabled) await c.var.queue?.registerSchedule(row.id, row.cron, row.timezone);
-      else await c.var.queue?.unregisterSchedule(row.id);
+      await enqueueAfterCommit(
+        () =>
+          (row.enabled
+            ? c.var.queue?.registerSchedule(row.id, row.cron, row.timezone)
+            : c.var.queue?.unregisterSchedule(row.id)) ?? Promise.resolve(),
+        `sync schedule calendar ${row.id}`,
+      );
       return c.json(row);
     },
   )
@@ -163,6 +176,9 @@ export const scheduleRoutes = new Hono<AppEnv>()
       projectId,
       payload: { name: row.name },
     });
-    await c.var.queue?.unregisterSchedule(id);
+    await enqueueAfterCommit(
+      () => c.var.queue?.unregisterSchedule(id) ?? Promise.resolve(),
+      `unregister schedule ${id}`,
+    );
     return c.json({ ok: true });
   });

@@ -11,6 +11,7 @@ import {
   triggerDeliveries,
   triggerEndpoints,
 } from "@agrippa/db";
+import { enqueueAfterCommit } from "@agrippa/orchestration";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
@@ -157,10 +158,23 @@ export const triggerRoutes = new Hono<AppEnv>()
   .delete("/:projectId/triggers/:id", requireProjectRole("admin"), async (c) => {
     const projectId = c.req.param("projectId");
     const id = c.req.param("id");
-    const [row] = await c.var.db
-      .delete(triggerEndpoints)
-      .where(and(eq(triggerEndpoints.id, id), eq(triggerEndpoints.projectId, projectId)))
-      .returning({ id: triggerEndpoints.id, name: triggerEndpoints.name });
+    const row = await c.var.db.transaction(async (tx) => {
+      const [deleted] = await tx
+        .delete(triggerEndpoints)
+        .where(and(eq(triggerEndpoints.id, id), eq(triggerEndpoints.projectId, projectId)))
+        // deliveries cascade with the endpoint row
+        .returning({
+          id: triggerEndpoints.id,
+          name: triggerEndpoints.name,
+          secretRef: triggerEndpoints.secretRef,
+        });
+      if (!deleted) return null;
+      // the secret dies with the endpoint — no orphaned key material. The FK
+      // has no reverse cascade, so nothing else would ever reap it, and the
+      // row that pointed at it is the only thing that could have found it.
+      await tx.delete(secrets).where(eq(secrets.id, deleted.secretRef));
+      return deleted;
+    });
     if (!row) throw AppError.notFound("Trigger");
     await audit(c, {
       action: "trigger.delete",
@@ -227,7 +241,13 @@ export const triggerRoutes = new Hono<AppEnv>()
         resourceId: deliveryId,
         projectId,
       });
-      await c.var.queue?.enqueueTriggerDelivery(deliveryId);
+      // the CAS and its audit are committed; the delivery sweeper re-enqueues
+      // a stale pending row, so a send failure must not 500 a replay that did
+      // in fact take effect
+      await enqueueAfterCommit(
+        () => c.var.queue?.enqueueTriggerDelivery(deliveryId) ?? Promise.resolve(),
+        `replay delivery ${deliveryId}`,
+      );
       return c.json({ ok: true });
     },
   );

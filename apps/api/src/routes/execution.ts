@@ -33,6 +33,7 @@ import {
   assertProjectAcceptsWork,
   assertQuotaHeadroom,
   decideCheckpoint,
+  enqueueAfterCommit,
   finalizeRun,
   flattenPhases,
   resolveRunPlan,
@@ -246,7 +247,10 @@ async function respondToCheckpoint(
     // already decided, OR a prior attempt decided then failed to enqueue: in
     // both cases the durable state is correct, so re-enqueue to unstick the
     // run (the sweeper also backstops this) and report the conflict
-    await c.var.queue?.enqueueRun(run.id);
+    await enqueueAfterCommit(
+      () => c.var.queue?.enqueueRun(run.id) ?? Promise.resolve(),
+      `resume run ${run.id}`,
+    );
     throw AppError.conflict("already_decided", "Checkpoint is already decided");
   }
   // publish + enqueue only after the decision durably committed
@@ -257,7 +261,13 @@ async function respondToCheckpoint(
     payload: eventPayload,
     createdAt: result.event.createdAt.toISOString(),
   });
-  await c.var.queue?.enqueueRun(run.id); // resume at the gated step
+  // best-effort: the decision is committed, and findStrandedCheckpointRuns
+  // re-enqueues a decided-but-unresumed run, so a send failure must not 500 a
+  // checkpoint the user has in fact answered
+  await enqueueAfterCommit(
+    () => c.var.queue?.enqueueRun(run.id) ?? Promise.resolve(),
+    `resume run ${run.id}`,
+  );
   return c.json(result.updated);
 }
 
@@ -423,7 +433,10 @@ export const executionRoutes = new Hono<AppEnv>()
         );
         return run;
       });
-      await c.var.queue?.enqueueRun(run.id);
+      await enqueueAfterCommit(
+        () => c.var.queue?.enqueueRun(run.id) ?? Promise.resolve(),
+        `retry run ${run.id}`,
+      );
       return c.json({ runId: run.id, number: run.number }, 202);
     } catch (err) {
       if (err instanceof SubmitError) throw new AppError(err.code, 400, err.message, err.details);
@@ -589,7 +602,10 @@ export const executionRoutes = new Hono<AppEnv>()
         // first (typically the worker just picked it up). The flag is set and
         // the control message fired above; enqueue as a belt-and-suspenders
         // nudge so the worker observes cancelRequested at its next boundary.
-        await c.var.queue?.enqueueRun(run.id);
+        await enqueueAfterCommit(
+          () => c.var.queue?.enqueueRun(run.id) ?? Promise.resolve(),
+          `cancel nudge run ${run.id}`,
+        );
       }
     }
     await audit(c, {

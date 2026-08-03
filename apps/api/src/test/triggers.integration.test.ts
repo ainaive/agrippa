@@ -11,10 +11,11 @@ import {
   projectMembers,
   projects,
   runs,
+  secrets,
   triggerDeliveries,
   triggerEndpoints,
 } from "@agrippa/db";
-import { fireTrigger } from "@agrippa/orchestration";
+import { fireTrigger, sweepTriggerDeliveries } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
@@ -387,6 +388,157 @@ describe.skipIf(!dbUp)("inbound webhook triggers", () => {
       kind: "disabled",
       reason: "project_archived",
     });
+  });
+
+  // ── review round 1 regressions ─────────────────────────────────────────────
+
+  it("does not report failure when the post-commit enqueue fails (the run exists)", async () => {
+    // the sweeper is the delivery guarantee, so a send failure must not look
+    // like a submission failure — reporting one invites a retry that submits
+    // a SECOND run while the first is still swept up and executed
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    const brokenQueue = makeFakeQueue({
+      enqueueRun: async () => {
+        throw new Error("queue is down");
+      },
+    });
+    const outcome = await fireTrigger(db, brokenQueue, deliveryId);
+    expect(outcome.kind).toBe("submitted");
+
+    const [row] = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.id, deliveryId));
+    expect(row?.status).toBe("succeeded");
+    expect(row?.runId).toBeTruthy();
+  });
+
+  it("submits once when two firings race the same delivery", async () => {
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    // concurrent, not sequential: only an atomic claim survives this
+    const outcomes = await Promise.all([
+      fireTrigger(db, queue, deliveryId),
+      fireTrigger(db, queue, deliveryId),
+    ]);
+    expect(outcomes.filter((o) => o.kind === "submitted")).toHaveLength(1);
+    expect(outcomes.filter((o) => o.kind === "skipped")).toHaveLength(1);
+
+    const rows = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.id, deliveryId));
+    expect(rows[0]?.status).toBe("succeeded");
+  });
+
+  it("re-enqueues a stranded pending delivery instead of leaving it unreachable", async () => {
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    // pretend the enqueue was lost and the row aged past the stale threshold
+    await db
+      .update(triggerDeliveries)
+      .set({ createdAt: new Date(Date.now() - 5 * 60_000) })
+      .where(eq(triggerDeliveries.id, deliveryId));
+    enqueued.length = 0;
+
+    await sweepTriggerDeliveries(db, queue);
+    expect(enqueued).toContain(deliveryId);
+  });
+
+  it("fails a delivery that has burned its attempts, so Retry becomes reachable", async () => {
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    await db
+      .update(triggerDeliveries)
+      .set({ attempts: 8, createdAt: new Date(Date.now() - 5 * 60_000) })
+      .where(eq(triggerDeliveries.id, deliveryId));
+
+    await sweepTriggerDeliveries(db, queue);
+    const [row] = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.id, deliveryId));
+    expect(row?.status).toBe("failed");
+  });
+
+  it("re-enqueues on a duplicate delivery id whose original never got its job", async () => {
+    const t = await createTrigger();
+    const first = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }, { deliveryId: "evt-stranded" }),
+    );
+    enqueued.length = 0;
+    const second = await send(t.token as string, { event: "x" }, { deliveryId: "evt-stranded" });
+    expect(second.status).toBe(200);
+    // still one row, but the sender's retry unsticks it rather than 200-ing
+    // into a delivery that no job and no UI action can reach
+    expect(enqueued).toContain(first.deliveryId);
+    const rows = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.externalId, "evt-stranded"));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("rejects an oversized body with no Content-Length, and a junk one", async () => {
+    const t = await createTrigger();
+    const big = "x".repeat(70_000);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const body = JSON.stringify({ blob: big });
+    const sig = `v1=${createHmac("sha256", SECRET).update(`${ts}.${body}`).digest("hex")}`;
+
+    // a chunked body has no Content-Length at all
+    const chunked = await app.request(`/api/triggers/${t.token}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [TRIGGER_TIMESTAMP_HEADER]: ts,
+        [TRIGGER_SIGNATURE_HEADER]: sig,
+      },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+          controller.close();
+        },
+      }),
+      // required by fetch for a stream body
+      duplex: "half",
+    });
+    expect(chunked.status).toBe(413);
+
+    // Number("abc") is NaN and NaN > limit is false — a junk header must not
+    // become a way past the check
+    const junk = await app.request(`/api/triggers/${t.token}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": "not-a-number",
+        [TRIGGER_TIMESTAMP_HEADER]: ts,
+        [TRIGGER_SIGNATURE_HEADER]: sig,
+      },
+      body,
+    });
+    expect(junk.status).toBe(413);
+  });
+
+  it("deletes the signing secret with the trigger", async () => {
+    const t = await createTrigger();
+    const [row] = await db.select().from(triggerEndpoints).where(eq(triggerEndpoints.id, t.id));
+    const secretId = row?.secretRef as string;
+    expect(await db.select().from(secrets).where(eq(secrets.id, secretId))).toHaveLength(1);
+
+    await admin.request(`/api/v1/projects/${projectId}/triggers/${t.id}`, { method: "DELETE" });
+    // no orphaned key material: nothing else references it, so nothing would
+    // ever reap it
+    expect(await db.select().from(secrets).where(eq(secrets.id, secretId))).toHaveLength(0);
   });
 
   // ── delivery log ───────────────────────────────────────────────────────────

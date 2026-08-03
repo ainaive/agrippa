@@ -1,12 +1,14 @@
 import { NOTIFIABLE_EVENT_TYPES, type NotifiableEventType, type RunQueue } from "@agrippa/core";
 import {
   type Db,
+  type DbOrTx,
   notificationDeliveries,
   notificationEndpoints,
   runEvents,
   runs,
 } from "@agrippa/db";
 import { and, eq, inArray, lt, notExists, sql } from "drizzle-orm";
+import { enqueueAfterCommit } from "./queue";
 
 /**
  * Delivery bookkeeping for outbound notifications (docs/design/04).
@@ -102,28 +104,41 @@ export async function syncRunNotifications(
 }
 
 /**
- * Deliver a project-level event that has no run behind it.
+ * A project-level event with no run behind it — a schedule or trigger that
+ * stopped, or a firing that produced nothing.
  *
- * Schedules need this: a firing that never produced a run has nothing to hang
- * a `run_events` row on, and inventing a run to carry the news would put a
- * fictional row in the timeline and the usage tables. Test sends already
- * established the run-less delivery shape (`run_id`/`event_id` null), so this
- * reuses it rather than widening the schema.
+ * Such an event has nothing to hang a `run_events` row on, and inventing a run
+ * to carry the news would put a fictional row in the timeline and the usage
+ * tables. Test sends already established the run-less delivery shape
+ * (`run_id`/`event_id` null), so this reuses it rather than widening the schema.
  *
- * The tradeoff that buys: with no `event_id`, the partial unique index does
- * not apply, so these are not idempotent by construction the way run-derived
- * deliveries are. Callers must therefore fire them once per transition — which
- * is why a schedule sets `disabled` and notifies in the same step, and why
- * `schedule.failed` is written per firing rather than per sweep.
+ * The cost of that shape: with no `event_id` the partial unique index does not
+ * apply, so these are not idempotent the way run-derived deliveries are, and
+ * the sweeper cannot reconstruct one that was never written. Callers therefore
+ * write them exactly once per transition — inside the transaction that makes
+ * the transition true, where that transition also suppresses their own retry.
  */
-export async function notifyProjectEvent(
-  db: Db,
-  queue: RunQueue | null,
-  input: {
-    projectId: string;
-    eventType: NotifiableEventType;
-    payload: Record<string, unknown>;
-  },
+export type ProjectEventInput = {
+  projectId: string;
+  eventType: NotifiableEventType;
+  payload: Record<string, unknown>;
+};
+
+/**
+ * Write the delivery rows for a project-level event, without enqueueing.
+ *
+ * Takes a tx so a caller can commit the rows atomically with whatever made the
+ * event true. That matters most where the same commit also makes the caller
+ * skip its own retry: a schedule that sets `enabled = false` and then fails to
+ * write its notification is never asked again, and the row is not
+ * reconstructible — the sweeper's backfill half derives only from `run_events`,
+ * and this event has none. Inside the transaction, "stopped" and "said so"
+ * become the same fact. Once the row exists the sweeper's stale-pending half
+ * does guarantee delivery, so the enqueue itself can stay best-effort.
+ */
+export async function insertProjectEventDeliveries(
+  db: DbOrTx,
+  input: ProjectEventInput,
 ): Promise<string[]> {
   const endpoints = await db
     .select({
@@ -146,7 +161,37 @@ export async function notifyProjectEvent(
       eventType: input.eventType,
       payload: input.payload,
     }));
-  return insertAndEnqueue(db, queue, values);
+  if (values.length === 0) return [];
+  const inserted = await db
+    .insert(notificationDeliveries)
+    .values(values)
+    .onConflictDoNothing()
+    .returning({ id: notificationDeliveries.id });
+  return inserted.map((r) => r.id);
+}
+
+/** Insert then enqueue, for callers with nothing to be atomic with. */
+export async function notifyProjectEvent(
+  db: Db,
+  queue: RunQueue | null,
+  input: ProjectEventInput,
+): Promise<string[]> {
+  const ids = await insertProjectEventDeliveries(db, input);
+  await enqueueProjectEventDeliveries(queue, ids);
+  return ids;
+}
+
+/** Post-commit delivery kick; the notification sweeper backstops each row. */
+export async function enqueueProjectEventDeliveries(
+  queue: RunQueue | null,
+  deliveryIds: readonly string[],
+): Promise<void> {
+  for (const id of deliveryIds) {
+    await enqueueAfterCommit(
+      () => queue?.enqueueNotificationDelivery(id) ?? Promise.resolve(),
+      `notification delivery ${id}`,
+    );
+  }
 }
 
 /** Sweep window: events older than this are never backfilled. */

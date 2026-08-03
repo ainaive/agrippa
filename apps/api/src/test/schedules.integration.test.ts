@@ -404,6 +404,71 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     });
   });
 
+  it("keeps the schedule enabled when disabling cannot be announced", async () => {
+    // The flag that stops a schedule is the flag that makes the retry skip, so
+    // if the announcement is not committed with it the schedule goes quiet
+    // with nobody told — and a run-less notification cannot be reconstructed.
+    // One transaction means the retry still has work to do.
+    // its own owner: revoking admin's membership would 403 every later test
+    const owner = await signUp(app, "Tess", "tess@example.com");
+    await admin.request(`/api/v1/projects/${projectId}/members`, {
+      method: "POST",
+      json: { email: owner.email, role: "admin" },
+    });
+    const row = await jsonOf<ScheduleRow>(
+      await owner.request(`/api/v1/projects/${projectId}/schedules`, {
+        method: "POST",
+        json: { name: "tess-sched", taskTypeId, params, cron: "0 9 * * 1" },
+      }),
+    );
+    const [before] = await db.select().from(taskSchedules).where(eq(taskSchedules.id, row.id));
+    await db
+      .delete(projectMembers)
+      .where(
+        and(
+          eq(projectMembers.projectId, projectId),
+          eq(projectMembers.userId, before?.createdBy as string),
+        ),
+      );
+    await db.insert(notificationEndpoints).values({
+      projectId,
+      kind: "generic",
+      name: "blocker",
+      url: "https://example.com/blocked",
+      events: [],
+      createdBy: before?.createdBy as string,
+    });
+
+    // NOT VALID: applies to new rows only, so the suite's existing deliveries
+    // do not block adding it
+    await db.execute(
+      `alter table notification_deliveries add constraint tmp_block_schedule_disabled
+       check (event_type <> 'schedule.disabled') not valid`,
+    );
+    try {
+      await expect(fireSchedule(db, queue, row.id)).rejects.toThrow();
+      const [during] = await db.select().from(taskSchedules).where(eq(taskSchedules.id, row.id));
+      expect(during?.enabled).toBe(true); // rolled back with the notification
+    } finally {
+      await db.execute(
+        `alter table notification_deliveries drop constraint tmp_block_schedule_disabled`,
+      );
+    }
+
+    // the retry now completes both halves together
+    expect(await fireSchedule(db, queue, row.id)).toEqual({
+      kind: "disabled",
+      reason: "owner_lost_access",
+    });
+    const [after] = await db.select().from(taskSchedules).where(eq(taskSchedules.id, row.id));
+    expect(after?.enabled).toBe(false);
+    const deliveries = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.eventType, "schedule.disabled"));
+    expect(deliveries.length).toBeGreaterThan(0);
+  });
+
   it("does not fire while disabled, and clears its reason when re-enabled", async () => {
     const row = await createSchedule();
     await admin.request(`/api/v1/projects/${projectId}/schedules/${row.id}`, {
