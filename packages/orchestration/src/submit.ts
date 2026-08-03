@@ -50,9 +50,36 @@ export type SubmitTaskArgs = {
   /** Audit principal; may name an API key or runtime rather than the user. */
   actor: AuditActor;
   input: TaskSubmitInput;
+  /**
+   * Idempotency key identifying **one firing** of an unattended source — a
+   * schedule's pg-boss job id, a webhook's delivery id. Omitted by the human
+   * paths, where the HTTP request is the firing and a second click is a second
+   * intent. See {@link DuplicateFiringError}.
+   */
+  originKey?: string;
 };
 
 export type SubmittedTask = { taskId: string; runId: string };
+
+/**
+ * This firing already produced a run; the caller should report success without
+ * submitting again.
+ *
+ * Its own class because the alternative — letting the unique index raise —
+ * cannot be told apart from a real failure by the callers' catch blocks, and
+ * `fireSchedule` routes anything it catches into a `schedule.failed`
+ * notification. Paging a human because the system correctly refused to charge
+ * twice is its own kind of broken.
+ */
+export class DuplicateFiringError extends Error {
+  constructor(
+    readonly originKey: string,
+    readonly runId: string,
+  ) {
+    super(`firing ${originKey} already produced run ${runId}`);
+    this.name = "DuplicateFiringError";
+  }
+}
 
 /**
  * Create a task and its first run **on the caller's transaction**, without
@@ -74,7 +101,21 @@ export type SubmittedTask = { taskId: string; runId: string };
  * mapping to a response.
  */
 export async function submitTaskIn(db: DbOrTx, args: SubmitTaskArgs): Promise<SubmittedTask> {
-  const { projectId, actorUserId, actor, input } = args;
+  const { projectId, actorUserId, actor, input, originKey } = args;
+
+  // First, before any resolution work: a redelivered job re-runs this function
+  // from the top, and everything below it costs reads the answer does not need.
+  // The `runs_origin_key_uq` index is the real guarantee — this read only turns
+  // the common case (a sequential redelivery, whose predecessor has long since
+  // committed) into a clean outcome instead of a constraint violation that
+  // would abort the caller's whole transaction.
+  if (originKey) {
+    const [existing] = await db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(eq(runs.originKey, originKey));
+    if (existing) throw new DuplicateFiringError(originKey, existing.id);
+  }
 
   await assertProjectAcceptsWork(db, projectId);
 
@@ -139,6 +180,7 @@ export async function submitTaskIn(db: DbOrTx, args: SubmitTaskArgs): Promise<Su
       paramsSnapshot: parsed.data,
       modelResolution: agentResolution.modelResolution,
       resourceManifest,
+      originKey,
       createdBy: actorUserId,
     })
     .returning();

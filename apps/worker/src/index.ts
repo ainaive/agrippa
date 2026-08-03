@@ -11,14 +11,7 @@ import {
   type ScheduleFirePayload,
   type TriggerFirePayload,
 } from "@agrippa/core";
-import {
-  awaitSchema,
-  createDb,
-  notificationDeliveries,
-  runs,
-  runtimes,
-  taskSchedules,
-} from "@agrippa/db";
+import { awaitSchema, createDb, notificationDeliveries, runs, runtimes } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
@@ -278,7 +271,10 @@ await queue.boss.work(QUEUE_SCHEDULE_FIRE, async (jobs: Job<ScheduleFirePayload>
     // fireSchedule never throws for a schedule-level problem: it records the
     // outcome on the row and announces it. A throw here would mean an
     // infrastructure fault, which pg-boss should retry.
-    const outcome = await fireSchedule(db, queue, job.data.scheduleId);
+    // job.id, not the schedule id: it is this FIRING's identity. pg-boss keeps
+    // it when it re-inserts a retried job and mints a new one per cron tick, so
+    // it is exactly the key that tells a redelivery apart from an occurrence.
+    const outcome = await fireSchedule(db, queue, job.data.scheduleId, job.id);
     deps.logger.info(`schedule ${job.data.scheduleId} fired`, { outcome: outcome.kind });
   }
 });
@@ -308,12 +304,35 @@ const scheduleCalendar = {
   unregister: (id: string) => queue.unregisterSchedule(id),
 };
 
+/**
+ * A schedule the reconciler could not repair is named, every time.
+ *
+ * The reconciler is deliberately per-row tolerant so one broken schedule
+ * cannot stop the rest being fixed — but tolerance that reports nothing is
+ * indistinguishable from success, and the schedule stays unregistered forever
+ * while the drift line reads "+0/-0". The package takes no logger, so it hands
+ * the list back and this is where it becomes visible.
+ */
+function logReconcileFailures(failed: Array<{ id: string; error: string }>): void {
+  for (const { id, error } of failed) {
+    deps.logger.warn(`schedule ${id}: calendar reconciliation failed`, { err: error });
+  }
+}
+
 // Converge once at boot so a restart repairs drift immediately; the sweeper
 // stage below then keeps converging, which is what makes a dropped
 // registration recoverable without waiting for the next restart.
 try {
-  const { registered, unregistered } = await reconcileScheduleCalendar(db, scheduleCalendar);
-  deps.logger.info(`schedule calendar reconciled (+${registered}/-${unregistered})`);
+  const { considered, registered, unregistered, failed } = await reconcileScheduleCalendar(
+    db,
+    scheduleCalendar,
+  );
+  // the denominator matters: "+0/-0" is what a converged fleet prints AND what
+  // a fleet whose every repair threw would print without it
+  deps.logger.info(
+    `schedule calendar reconciled (+${registered}/-${unregistered} of ${considered})`,
+  );
+  logReconcileFailures(failed);
 } catch (err) {
   deps.logger.warn("schedule reconciliation failed", { err: String(err) });
 }
@@ -403,10 +422,14 @@ setInterval(async () => {
   // a schedule that silently never fires, or one firing on its old cron while
   // the UI shows the new one. Steady state does no writes.
   await stage("schedule-calendar", async () => {
-    const { registered, unregistered } = await reconcileScheduleCalendar(db, scheduleCalendar);
+    const { registered, unregistered, failed } = await reconcileScheduleCalendar(
+      db,
+      scheduleCalendar,
+    );
     if (registered || unregistered) {
       deps.logger.warn(`schedule calendar drift repaired (+${registered}/-${unregistered})`);
     }
+    logReconcileFailures(failed);
   });
 }, 60_000);
 

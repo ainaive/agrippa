@@ -3,6 +3,7 @@ import {
   AppError,
   type RunQueue,
   TRIGGER_DELIVERY_ID_HEADER,
+  TRIGGER_DELIVERY_ID_MAX_LENGTH,
   TRIGGER_PAYLOAD_MAX_BYTES,
   TRIGGER_SIGNATURE_HEADER,
   TRIGGER_SIGNATURE_WINDOW_SECONDS,
@@ -37,6 +38,36 @@ export type TriggerEnv = {
 
 function invalid(): AppError {
   return new AppError("trigger_request_invalid", 401, "Invalid trigger request");
+}
+
+/**
+ * The sender's idempotency key, or `null` if it did not offer one.
+ *
+ * Blank is absent, not a key. `Headers.get` returns `""` for a header that is
+ * present but empty — a templating bug resolving to nothing, a sender that
+ * always emits the header — and `""` is not null, so the partial dedupe index
+ * would happily store and match it. Every such request from an endpoint would
+ * then collide onto one delivery row, forever: the first creates a run, and
+ * once it succeeds every later request is answered `200 accepted` and runs
+ * nothing at all.
+ *
+ * Over-long is a 400, not a truncation. Rewriting a sender's key into a
+ * different, shorter one silently converts two distinct events into a
+ * duplicate; a rejection the sender can see and fix is the only honest answer.
+ * This runs after signature verification, so the sender has already proved it
+ * holds the secret and a specific error tells an attacker nothing.
+ */
+function parseDeliveryId(header: string | undefined): string | null {
+  const trimmed = header?.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > TRIGGER_DELIVERY_ID_MAX_LENGTH) {
+    throw new AppError(
+      "trigger_delivery_id_too_long",
+      400,
+      `${TRIGGER_DELIVERY_ID_HEADER} must be at most ${TRIGGER_DELIVERY_ID_MAX_LENGTH} characters`,
+    );
+  }
+  return trimmed;
 }
 
 /** Constant-time hex compare that never throws on a malformed candidate. */
@@ -154,7 +185,7 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
     }
   }
 
-  const externalId = c.req.header(TRIGGER_DELIVERY_ID_HEADER)?.slice(0, 200) ?? null;
+  const externalId = parseDeliveryId(c.req.header(TRIGGER_DELIVERY_ID_HEADER));
   const [delivery] = await c.var.db
     .insert(triggerDeliveries)
     .values({
@@ -188,7 +219,8 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
         ),
       );
     if (existing?.status === "pending") {
-      await enqueueAfterCommit(
+      // not awaited, for the reason given at the accept path below
+      void enqueueAfterCommit(
         () => c.var.queue?.enqueueTriggerDelivery(existing.id) ?? Promise.resolve(),
         `trigger delivery ${existing.id}`,
       );
@@ -196,12 +228,22 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
     return c.json({ accepted: true, deduplicated: true }, 200);
   }
 
-  // Best-effort: the delivery row is committed, so a send failure is the
-  // sweeper's problem, not the sender's. A 500 here would be answered by a
-  // retry — and without the optional delivery-id header there is nothing to
-  // dedupe against, so that retry inserts a SECOND delivery and produces a
-  // second run while the sweeper revives the first.
-  await enqueueAfterCommit(
+  // Best-effort AND off the response path. The delivery row is committed, so a
+  // send failure is the sweeper's problem, not the sender's — but
+  // `enqueueAfterCommit` only bounds failure, never latency, and pg-boss's own
+  // pool waits indefinitely for a connection. Awaiting it means a stalled
+  // database holds the acknowledgement open until Bun's 60s idleTimeout kills
+  // the socket, so the sender sees a connection reset rather than a status
+  // code — the most retry-triggering answer there is. Without the optional
+  // delivery-id header that retry has nothing to dedupe against: a SECOND
+  // delivery and a second run, while the sweeper revives the first.
+  //
+  // Un-awaited and deliberately without a `.catch`, unlike the repo's other
+  // `void` calls: every statement in `enqueueAfterCommit` including the send
+  // itself is inside its try, so the promise it returns cannot reject.
+  // Recovery is `sweepTriggerDeliveries`, which finds a never-enqueued row
+  // through `coalesce(lastAttemptAt, createdAt)`.
+  void enqueueAfterCommit(
     () => c.var.queue?.enqueueTriggerDelivery(delivery.id) ?? Promise.resolve(),
     `trigger delivery ${delivery.id}`,
   );

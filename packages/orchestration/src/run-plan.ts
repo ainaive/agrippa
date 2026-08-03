@@ -1,4 +1,4 @@
-import { type Db, type DbOrTx, mcpServers, projects, skills } from "@agrippa/db";
+import { type DbOrTx, mcpServers, projects, skills } from "@agrippa/db";
 import { eq } from "drizzle-orm";
 import { authorizeResources, resolveAgentBindings } from "./resolve";
 import type { CompiledTemplate } from "./template-schema";

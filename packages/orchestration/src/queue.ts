@@ -102,6 +102,14 @@ export async function createRunQueue(
     await boss.deleteQueue(QUEUE_NOTIFICATION_DELIVER);
   }
   await boss.createQueue(QUEUE_NOTIFICATION_DELIVER, { policy: "exclusive" });
+  // The one queue left on pg-boss's defaults (retry_limit 2, retry_delay 0,
+  // expire 15m), and deliberately so. Its retries are wanted — a firing that
+  // died mid-flight should be tried again — and what used to make them
+  // dangerous was that a redelivery could not be told from a new cron
+  // occurrence. `runs.origin_key` settles that at the submission itself, so
+  // the delivery semantics no longer have to carry the guarantee. Tightening
+  // them here would also need the converge-by-recreate dance below, since
+  // createQueue is upsert-blind to options.
   await boss.createQueue(QUEUE_SCHEDULE_FIRE);
   // trigger.fire needs the same treatment as the delivery queue, and for the
   // same reason: enqueueTriggerDelivery leans on singletonKey to keep a

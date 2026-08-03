@@ -34,6 +34,16 @@ export const TRIGGER_SIGNATURE_HEADER = "x-agrippa-signature";
  */
 export const TRIGGER_DELIVERY_ID_HEADER = "x-agrippa-delivery-id";
 
+/**
+ * Longest delivery id accepted. Over-long ids are **rejected**, never
+ * truncated: an idempotency key the receiver silently rewrites is no longer
+ * the sender's key, and two ids sharing a prefix would collapse into one
+ * delivery — dropping an event behind a `200 accepted`. The btree that backs
+ * the dedupe index tops out around 2700 bytes; this sits well under it and
+ * comfortably above any real id.
+ */
+export const TRIGGER_DELIVERY_ID_MAX_LENGTH = 200;
+
 export type TriggerDeliveryStatus = "pending" | "succeeded" | "failed";
 
 /**

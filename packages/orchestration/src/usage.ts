@@ -1,6 +1,5 @@
 import { AppError, type LocalizedText } from "@agrippa/core";
 import {
-  type Db,
   type DbOrTx,
   models,
   projectQuotas,

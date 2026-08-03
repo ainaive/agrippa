@@ -10,7 +10,7 @@ import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
 import { enqueueProjectEventDeliveries, insertProjectEventDeliveries } from "./notifications";
 import { enqueueAfterCommit } from "./queue";
-import { submitTaskIn } from "./submit";
+import { DuplicateFiringError, submitTaskIn } from "./submit";
 
 export type TriggerFireOutcome =
   | { kind: "submitted"; taskId: string; runId: string }
@@ -149,6 +149,12 @@ export async function fireTrigger(
           params: applyScheduleTokens(endpoint.params, new Date(), endpoint.timezone),
           agents: endpoint.agentOverrides,
         },
+        // The delivery row's `succeeded` flip above already suppresses a
+        // redelivery, and it commits with the run. This defends the same
+        // property at the submission itself rather than through a neighbouring
+        // write — one less thing that has to stay true for the guarantee to
+        // hold, and it makes both unattended callers say it the same way.
+        originKey: `trigger:${deliveryId}`,
       });
       await tx
         .update(triggerDeliveries)
@@ -167,6 +173,13 @@ export async function fireTrigger(
       return result;
     });
   } catch (err) {
+    // Reachable only if the delivery's own `succeeded` guard was bypassed —
+    // an operator replaying a row whose status was rewritten by hand, say.
+    // Either way the run exists: report it handled rather than announcing a
+    // failure for work that succeeded.
+    if (err instanceof DuplicateFiringError) {
+      return { kind: "skipped", reason: "already_handled" };
+    }
     const message =
       err instanceof AppError
         ? `${err.code}: ${err.message}`

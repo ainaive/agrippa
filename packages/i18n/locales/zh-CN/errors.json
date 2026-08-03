@@ -4,6 +4,7 @@
   "api_key_invalid": "API 密钥无效、已撤销或已过期",
   "project_archived": "该项目已归档，不再接受新任务",
   "trigger_request_invalid": "触发器请求无效、已过期或未签名",
+  "trigger_delivery_id_too_long": "去重标识请求头过长",
   "trigger_payload_too_large": "触发器请求体超出大小限制",
   "dispatch_not_live": "调度任务未被认领或已结束",
   "dispatch_batch_too_large": "事件批次超出大小限制",

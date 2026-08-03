@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import type { RunQueue } from "@agrippa/core";
 import {
   TRIGGER_DELIVERY_ID_HEADER,
+  TRIGGER_DELIVERY_ID_MAX_LENGTH,
   TRIGGER_SIGNATURE_HEADER,
   TRIGGER_TIMESTAMP_HEADER,
 } from "@agrippa/core";
@@ -78,7 +79,10 @@ describe.skipIf(!dbUp)("inbound webhook triggers", () => {
       [TRIGGER_TIMESTAMP_HEADER]: ts,
       [TRIGGER_SIGNATURE_HEADER]: sig,
     };
-    if (opts.deliveryId) headers[TRIGGER_DELIVERY_ID_HEADER] = opts.deliveryId;
+    // `!== undefined`, not truthiness: an EMPTY delivery id is precisely the
+    // case worth testing, and `if (opts.deliveryId)` silently dropped it —
+    // which is why the bug it covers survived two review rounds
+    if (opts.deliveryId !== undefined) headers[TRIGGER_DELIVERY_ID_HEADER] = opts.deliveryId;
     return app.request(`/api/triggers/${token}`, { method: "POST", headers, body: raw });
   };
 
@@ -780,5 +784,83 @@ describe.skipIf(!dbUp)("inbound webhook triggers", () => {
     );
     expect(retried.status).toBe(200);
     expect(enqueued.filter((id) => id === deliveryId).length).toBeGreaterThan(1);
+  });
+
+  // ── review round 3 regressions ─────────────────────────────────────────────
+
+  it("treats a blank delivery id as absent rather than as one shared key", async () => {
+    // `Headers.get` returns "" for a present-but-empty header, and "" is not
+    // null — so the partial dedupe index stored and matched it. Every request
+    // from the endpoint collapsed onto ONE delivery, and once that row
+    // succeeded every later webhook was answered `200 accepted` and ran
+    // nothing at all. A templating bug resolving empty is all it took.
+    const trigger = await createTrigger();
+    const first = await send(trigger.token as string, { event: "a" }, { deliveryId: "" });
+    const second = await send(trigger.token as string, { event: "b" }, { deliveryId: "   " });
+
+    expect([first.status, second.status]).toEqual([202, 202]);
+    const a = await jsonOf<{ deliveryId: string }>(first);
+    const b = await jsonOf<{ deliveryId: string }>(second);
+    expect(a.deliveryId).not.toBe(b.deliveryId);
+
+    const rows = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.endpointId, trigger.id));
+    expect(rows.length).toBe(2);
+    expect(rows.every((r) => r.externalId === null)).toBe(true);
+  });
+
+  it("rejects an over-long delivery id instead of truncating it into a collision", async () => {
+    // truncation rewrites the sender's idempotency key into a different one,
+    // so two distinct events sharing a prefix silently became one delivery —
+    // the second's payload discarded behind `200 {accepted: true}`
+    const trigger = await createTrigger();
+    const long = `evt-${"x".repeat(TRIGGER_DELIVERY_ID_MAX_LENGTH)}`;
+    const res = await send(trigger.token as string, { event: "a" }, { deliveryId: long });
+    expect(res.status).toBe(400);
+
+    // and nothing was stored under a rewritten key
+    const rows = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.endpointId, trigger.id));
+    expect(rows.length).toBe(0);
+  });
+
+  it("acknowledges the sender without waiting for the queue", async () => {
+    // enqueueAfterCommit bounds failure, never latency, and pg-boss's pool
+    // waits indefinitely for a connection. Awaiting it meant a stalled
+    // database held the ack open until Bun's idleTimeout killed the socket —
+    // a connection reset, which is the most retry-triggering answer there is,
+    // and without a delivery id that retry produces a second run.
+    const stalled = createApp({
+      db,
+      queue: makeFakeQueue({ enqueueTriggerDelivery: () => new Promise<void>(() => {}) }),
+    });
+    const trigger = await createTrigger();
+    const raw = JSON.stringify({ event: "stalled" });
+    const ts = String(Math.floor(Date.now() / 1000));
+    const res = await Promise.race([
+      stalled.request(`/api/triggers/${trigger.token}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [TRIGGER_TIMESTAMP_HEADER]: ts,
+          [TRIGGER_SIGNATURE_HEADER]: `v1=${createHmac("sha256", SECRET)
+            .update(`${ts}.${raw}`)
+            .digest("hex")}`,
+        },
+        body: raw,
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("ack blocked")), 2_000)),
+    ]);
+    expect(res.status).toBe(202);
+    // the row is durable, so the delivery sweeper is what completes it
+    const [row] = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.endpointId, trigger.id));
+    expect(row?.status).toBe("pending");
   });
 });

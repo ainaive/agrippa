@@ -1,4 +1,4 @@
-import { type Db, type DbOrTx, runtimes, workerHeartbeats } from "@agrippa/db";
+import { type DbOrTx, runtimes, workerHeartbeats } from "@agrippa/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 /** Advertisements older than this are a worker that no longer runs that config. */

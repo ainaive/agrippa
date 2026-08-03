@@ -26,6 +26,15 @@ import {
 
 const dbUp = await postgresAvailable();
 
+/**
+ * A distinct key per firing, which is what the worker passes: pg-boss mints a
+ * new job id per cron tick and preserves it across a retry. Tests that assert
+ * a *policy* want distinct keys; the redelivery test below deliberately reuses
+ * one, because reusing it is exactly what a redelivery does.
+ */
+let fireKeySeq = 0;
+const fireKey = () => `test-fire-${++fireKeySeq}`;
+
 type ScheduleRow = {
   id: string;
   name: string;
@@ -203,7 +212,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
       params: { ...params, dateRange: "{{lastWeekStart}}..{{lastWeekEnd}}" },
       timezone: "Asia/Shanghai",
     });
-    expect(await fireSchedule(db, queue, row.id)).toMatchObject({ kind: "submitted" });
+    expect(await fireSchedule(db, queue, row.id, fireKey())).toMatchObject({ kind: "submitted" });
 
     const [run] = await db
       .select()
@@ -228,7 +237,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
 
   it("submits a run attributed to its owner", async () => {
     const row = await createSchedule();
-    const outcome = await fireSchedule(db, queue, row.id);
+    const outcome = await fireSchedule(db, queue, row.id, fireKey());
     expect(outcome.kind).toBe("submitted");
 
     const after = await rowOf(row.id);
@@ -246,23 +255,23 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
   it("honors each concurrency policy against an unfinished previous run", async () => {
     // skip: the in-flight run is left alone and nothing new is submitted
     const skip = await createSchedule({ concurrencyPolicy: "skip" });
-    await fireSchedule(db, queue, skip.id);
+    await fireSchedule(db, queue, skip.id, fireKey());
     const firstRunId = (await rowOf(skip.id))?.lastRunId as string;
-    expect((await fireSchedule(db, queue, skip.id)).kind).toBe("skipped");
+    expect((await fireSchedule(db, queue, skip.id, fireKey())).kind).toBe("skipped");
     expect((await rowOf(skip.id))?.lastRunId).toBe(firstRunId);
 
     // queue: submits regardless, and the schedule now points at the new run
     const queued = await createSchedule({ concurrencyPolicy: "queue" });
-    await fireSchedule(db, queue, queued.id);
+    await fireSchedule(db, queue, queued.id, fireKey());
     const queuedFirst = (await rowOf(queued.id))?.lastRunId as string;
-    expect((await fireSchedule(db, queue, queued.id)).kind).toBe("submitted");
+    expect((await fireSchedule(db, queue, queued.id, fireKey())).kind).toBe("submitted");
     expect((await rowOf(queued.id))?.lastRunId).not.toBe(queuedFirst);
 
     // replace: the previous run is cancelled before the new one is submitted
     const replace = await createSchedule({ concurrencyPolicy: "replace" });
-    await fireSchedule(db, queue, replace.id);
+    await fireSchedule(db, queue, replace.id, fireKey());
     const replaced = (await rowOf(replace.id))?.lastRunId as string;
-    expect((await fireSchedule(db, queue, replace.id)).kind).toBe("submitted");
+    expect((await fireSchedule(db, queue, replace.id, fireKey())).kind).toBe("submitted");
     const [old] = await db.select().from(runs).where(eq(runs.id, replaced));
     expect(old?.status).toBe("cancelled");
   });
@@ -291,30 +300,145 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     await reconcileScheduleCalendar(db, view);
     calendar.delete(row.id);
 
-    expect(await reconcileScheduleCalendar(db, view)).toEqual({
+    expect(await reconcileScheduleCalendar(db, view)).toMatchObject({
       registered: 1,
       unregistered: 0,
+      failed: [],
     });
     expect(calendar.get(row.id)?.cron).toBe("0 9 * * 1");
 
     // an edit whose re-registration was lost converges too
     await db.update(taskSchedules).set({ cron: "0 17 * * 5" }).where(eq(taskSchedules.id, row.id));
-    expect(await reconcileScheduleCalendar(db, view)).toEqual({
+    expect(await reconcileScheduleCalendar(db, view)).toMatchObject({
       registered: 1,
       unregistered: 0,
+      failed: [],
     });
     expect(calendar.get(row.id)?.cron).toBe("0 17 * * 5");
 
     // steady state writes nothing
-    expect(await reconcileScheduleCalendar(db, view)).toEqual({
+    expect(await reconcileScheduleCalendar(db, view)).toMatchObject({
       registered: 0,
       unregistered: 0,
+      failed: [],
     });
 
     // and an orphaned entry whose row is gone is removed — nothing else could
     calendar.set("ghost", { key: "ghost", cron: "* * * * *", timezone: "UTC" });
     expect(await reconcileScheduleCalendar(db, view)).toMatchObject({ unregistered: 1 });
     expect(calendar.has("ghost")).toBe(false);
+  });
+
+  // ── review round 3 regressions ─────────────────────────────────────────────
+
+  it("treats a redelivered job as one firing, not two", async () => {
+    // A worker that dies after the transaction commits but before pg-boss's
+    // completion write leaves the job `active`; the supervisor re-delivers it
+    // ~15 minutes later with the SAME job id. `queue` used to submit again
+    // unconditionally, and `skip` only held while the previous run was still
+    // running — which after 15 minutes it usually is not.
+    const row = await createSchedule({ concurrencyPolicy: "queue" });
+    const key = fireKey();
+
+    expect(await fireSchedule(db, queue, row.id, key)).toMatchObject({ kind: "submitted" });
+    const firstRunId = (await rowOf(row.id))?.lastRunId as string;
+    // the run reaches a terminal status, exactly as it would have by the time
+    // the redelivery lands — this is what used to defeat `skip`
+    await db.update(runs).set({ status: "succeeded" }).where(eq(runs.id, firstRunId));
+
+    expect(await fireSchedule(db, queue, row.id, key)).toEqual({
+      kind: "skipped",
+      reason: "already_fired",
+    });
+    const after = await rowOf(row.id);
+    expect(after?.lastRunId).toBe(firstRunId);
+    // not a failure: announcing one would page the project about the system
+    // refusing to charge twice
+    expect(after?.lastError).toBeNull();
+    const [failure] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.eventType, "schedule.failed"));
+    expect(failure).toBeUndefined();
+
+    // a genuinely new occurrence still fires
+    expect(await fireSchedule(db, queue, row.id, fireKey())).toMatchObject({ kind: "submitted" });
+    expect((await rowOf(row.id))?.lastRunId).not.toBe(firstRunId);
+  });
+
+  it("does not undo a schedule created or edited while it is reconciling", async () => {
+    // The rows and the calendar live in different stores with no transaction
+    // spanning them, so there is always a window between the two reads. Every
+    // writer commits its row first, so reading the CALENDAR first makes the
+    // rows snapshot the fresher of the two and every interleaving benign.
+    const calendar = new Map<string, { key: string; cron: string; timezone: string }>();
+    let onList: (() => Promise<void>) | null = null;
+    const view = {
+      list: async () => {
+        const entries = [...calendar.values()];
+        // commit an API mutation in the window between the two reads
+        const hook = onList;
+        onList = null;
+        await hook?.();
+        return entries;
+      },
+      register: async (id: string, cron: string, timezone: string) => {
+        calendar.set(id, { key: id, cron, timezone });
+      },
+      unregister: async (id: string) => {
+        calendar.delete(id);
+      },
+    };
+    await reconcileScheduleCalendar(db, view);
+
+    // a schedule created in the window keeps the entry its creation registered
+    let created: ScheduleRow | undefined;
+    onList = async () => {
+      created = await createSchedule({ cron: "0 8 * * 2" });
+      calendar.set(created.id, { key: created.id, cron: "0 8 * * 2", timezone: "Asia/Shanghai" });
+    };
+    await reconcileScheduleCalendar(db, view);
+    expect(calendar.get(created?.id as string)?.cron).toBe("0 8 * * 2");
+
+    // an edit committed in the window converges onto the NEW cron; read the
+    // other way round the reconciler restores the old one and the schedule
+    // fires at a time the UI says it does not
+    const edited = await createSchedule({ cron: "0 9 * * 1" });
+    calendar.set(edited.id, { key: edited.id, cron: "0 9 * * 1", timezone: "Asia/Shanghai" });
+    onList = async () => {
+      await admin.request(`/api/v1/projects/${projectId}/schedules/${edited.id}`, {
+        method: "PATCH",
+        json: { cron: "30 6 * * 3" },
+      });
+      calendar.set(edited.id, { key: edited.id, cron: "30 6 * * 3", timezone: "Asia/Shanghai" });
+    };
+    await reconcileScheduleCalendar(db, view);
+    expect(calendar.get(edited.id)?.cron).toBe("30 6 * * 3");
+  });
+
+  it("names the schedule it could not repair instead of swallowing it", async () => {
+    // one unrepairable schedule must not stop the others being repaired — but
+    // tolerance that reports nothing is indistinguishable from success, and
+    // the schedule stays unregistered while the drift line reads "+0/-0"
+    const broken = await createSchedule({ cron: "0 7 * * 4" });
+    const healthy = await createSchedule({ cron: "0 8 * * 4" });
+    const calendar = new Map<string, { key: string; cron: string; timezone: string }>();
+    const view = {
+      list: async () => [...calendar.values()],
+      register: async (id: string, cron: string, timezone: string) => {
+        if (id === broken.id) throw new Error("calendar unavailable");
+        calendar.set(id, { key: id, cron, timezone });
+      },
+      unregister: async (id: string) => {
+        calendar.delete(id);
+      },
+    };
+
+    const result = await reconcileScheduleCalendar(db, view);
+    expect(result.failed).toContainEqual({ id: broken.id, error: "calendar unavailable" });
+    expect(calendar.has(healthy.id)).toBe(true);
+    // and it reaches the amber line the admin already reads on the row
+    expect((await rowOf(broken.id))?.lastError).toContain("calendar unavailable");
   });
 
   it("rolls the mutation back when its audit row cannot be written", async () => {
@@ -371,7 +495,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
         ),
       );
 
-    const outcome = await fireSchedule(db, queue, row.id);
+    const outcome = await fireSchedule(db, queue, row.id, fireKey());
     expect(outcome).toEqual({ kind: "disabled", reason: "owner_lost_access" });
 
     const after = await rowOf(row.id);
@@ -411,7 +535,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     );
     await db.update(projects).set({ status: "archived" }).where(eq(projects.id, other));
 
-    expect(await fireSchedule(db, queue, row.id)).toEqual({
+    expect(await fireSchedule(db, queue, row.id, fireKey())).toEqual({
       kind: "disabled",
       reason: "project_archived",
     });
@@ -421,7 +545,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
   it("disables when its task type is gone", async () => {
     const row = await createSchedule();
     await db.update(taskTypes).set({ enabled: false }).where(eq(taskTypes.id, taskTypeId));
-    expect(await fireSchedule(db, queue, row.id)).toEqual({
+    expect(await fireSchedule(db, queue, row.id, fireKey())).toEqual({
       kind: "disabled",
       reason: "task_type_gone",
     });
@@ -453,7 +577,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
       outputTokens: 100,
     });
 
-    const outcome = await fireSchedule(db, queue, row.id);
+    const outcome = await fireSchedule(db, queue, row.id, fireKey());
     expect(outcome.kind).toBe("failed");
 
     const after = await rowOf(row.id);
@@ -515,7 +639,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
        check (event_type <> 'schedule.disabled') not valid`,
     );
     try {
-      await expect(fireSchedule(db, queue, row.id)).rejects.toThrow();
+      await expect(fireSchedule(db, queue, row.id, fireKey())).rejects.toThrow();
       const [during] = await db.select().from(taskSchedules).where(eq(taskSchedules.id, row.id));
       expect(during?.enabled).toBe(true); // rolled back with the notification
     } finally {
@@ -525,7 +649,7 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     }
 
     // the retry now completes both halves together
-    expect(await fireSchedule(db, queue, row.id)).toEqual({
+    expect(await fireSchedule(db, queue, row.id, fireKey())).toEqual({
       kind: "disabled",
       reason: "owner_lost_access",
     });
@@ -544,7 +668,10 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
       method: "PATCH",
       json: { enabled: false },
     });
-    expect(await fireSchedule(db, queue, row.id)).toEqual({ kind: "skipped", reason: "disabled" });
+    expect(await fireSchedule(db, queue, row.id, fireKey())).toEqual({
+      kind: "skipped",
+      reason: "disabled",
+    });
 
     await admin.request(`/api/v1/projects/${projectId}/schedules/${row.id}`, {
       method: "PATCH",

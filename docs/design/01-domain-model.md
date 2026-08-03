@@ -217,6 +217,10 @@ runs      (id pk, task_id fk,
            usage_totals jsonb,
            workspace_ref text, error jsonb,
            cancel_requested boolean not null default false,
+           origin_key text null, unique (origin_key) where not null,
+                                                              -- one unattended FIRING: 'schedule:<job id>'
+                                                              -- or 'trigger:<delivery id>'; NULL when a
+                                                              -- human submitted (see docs/design/04)
            queued_at, started_at, finished_at, created_by fk)
 
 run_steps (id pk, run_id fk, phase_id text, step_id text,
