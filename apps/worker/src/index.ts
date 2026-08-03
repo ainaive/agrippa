@@ -306,15 +306,26 @@ try {
       enabled: taskSchedules.enabled,
     })
     .from(taskSchedules);
+  let reconciled = 0;
   for (const row of rows) {
-    // Both directions. Registering only the enabled ones leaves a cron entry
-    // behind whenever a schedule was disabled while its unregister failed —
-    // and nothing else ever removes it, so it wakes a worker forever to be
-    // skipped. Reconciliation means converging, not just adding.
-    if (row.enabled) await queue.registerSchedule(row.id, row.cron, row.timezone);
-    else await queue.unregisterSchedule(row.id);
+    // Per row, for the reason the sweeper is per stage: this runs only at boot,
+    // so a single failing schedule aborting the loop would leave an arbitrary
+    // remainder unreconciled for the entire life of the process, with nothing
+    // to retry it — and row order is unspecified, so which ones is a lottery.
+    try {
+      // Both directions. Registering only the enabled ones leaves a cron entry
+      // behind whenever a schedule was disabled while its unregister failed —
+      // and nothing else ever removes it, so it wakes a worker forever to be
+      // skipped. Reconciliation means converging, not just adding.
+      if (row.enabled) await queue.registerSchedule(row.id, row.cron, row.timezone);
+      else await queue.unregisterSchedule(row.id);
+      reconciled += 1;
+    } catch (err) {
+      deps.logger.warn(`schedule ${row.id}: reconciliation failed`, { err: String(err) });
+    }
   }
-  deps.logger.info(`reconciled ${rows.length} schedule(s)`);
+  // the count is what actually converged, not what was considered
+  deps.logger.info(`reconciled ${reconciled}/${rows.length} schedule(s)`);
 } catch (err) {
   deps.logger.warn("schedule reconciliation failed", { err: String(err) });
 }

@@ -452,6 +452,33 @@ describe.skipIf(!dbUp)("inbound webhook triggers", () => {
     expect(enqueued).toContain(deliveryId);
   });
 
+  it("measures attempt age, not row age, so an in-flight delivery is left alone", async () => {
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    // an old row whose attempt is CURRENT: a submit in progress, or one that
+    // just retried. Sweeping on row age would re-enqueue it every tick and
+    // could stamp it failed underneath the attempt that is still running.
+    await db
+      .update(triggerDeliveries)
+      .set({
+        createdAt: new Date(Date.now() - 60 * 60_000),
+        lastAttemptAt: new Date(),
+        attempts: 8,
+      })
+      .where(eq(triggerDeliveries.id, deliveryId));
+    enqueued.length = 0;
+
+    await sweepTriggerDeliveries(db, queue);
+    expect(enqueued).not.toContain(deliveryId);
+    const [row] = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.id, deliveryId));
+    expect(row?.status).toBe("pending"); // not stamped failed mid-flight
+  });
+
   it("fails a delivery that has burned its attempts, so Retry becomes reachable", async () => {
     const t = await createTrigger();
     const { deliveryId } = await jsonOf<{ deliveryId: string }>(
@@ -459,7 +486,11 @@ describe.skipIf(!dbUp)("inbound webhook triggers", () => {
     );
     await db
       .update(triggerDeliveries)
-      .set({ attempts: 8, createdAt: new Date(Date.now() - 5 * 60_000) })
+      .set({
+        attempts: 8,
+        createdAt: new Date(Date.now() - 5 * 60_000),
+        lastAttemptAt: new Date(Date.now() - 5 * 60_000),
+      })
       .where(eq(triggerDeliveries.id, deliveryId));
 
     await sweepTriggerDeliveries(db, queue);

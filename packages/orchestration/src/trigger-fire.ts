@@ -5,7 +5,7 @@ import {
   type TriggerDisabledReason,
 } from "@agrippa/core";
 import { type Db, triggerDeliveries, triggerEndpoints } from "@agrippa/db";
-import { and, eq, lt, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
 import {
@@ -171,8 +171,8 @@ export async function fireTrigger(
   }
 }
 
-/** A delivery pending longer than this lost its job and needs re-enqueueing. */
-const STALE_PENDING = sql`now() - interval '60 seconds'`;
+/** A delivery untouched this long lost its job and needs re-enqueueing. */
+const STALE_AFTER = sql`now() - interval '60 seconds'`;
 /** Give up after this many attempts rather than retrying a doomed row forever. */
 const MAX_SWEPT_ATTEMPTS = 8;
 /** Bound one tick's work; the next tick takes the rest. */
@@ -192,6 +192,14 @@ const STALE_BATCH = 100;
  * nothing to backfill here, because the request itself creates the row.
  */
 export async function sweepTriggerDeliveries(db: Db, queue: RunQueue): Promise<void> {
+  // Both statements measure the age of the last ATTEMPT, not of the row.
+  // Row age is the wrong clock: a delivery created hours ago and re-attempted
+  // a second ago is not stale, and treating it as such re-enqueues it on every
+  // tick and — worse, below — lets the exhaustion update stamp `failed` on a
+  // row whose submit is still running, which the success path then overwrites.
+  // `coalesce` covers the never-claimed row, whose creation IS its clock.
+  const untouched = sql`coalesce(${triggerDeliveries.lastAttemptAt}, ${triggerDeliveries.createdAt}) < ${STALE_AFTER}`;
+
   // a row that has burned its attempts is failed, not pending — that both
   // stops the churn and puts Retry in front of the operator in the UI
   await db
@@ -204,15 +212,14 @@ export async function sweepTriggerDeliveries(db: Db, queue: RunQueue): Promise<v
       and(
         eq(triggerDeliveries.status, "pending"),
         sql`${triggerDeliveries.attempts} >= ${MAX_SWEPT_ATTEMPTS}`,
+        untouched,
       ),
     );
 
   const stale = await db
     .select({ id: triggerDeliveries.id })
     .from(triggerDeliveries)
-    .where(
-      and(eq(triggerDeliveries.status, "pending"), lt(triggerDeliveries.createdAt, STALE_PENDING)),
-    )
+    .where(and(eq(triggerDeliveries.status, "pending"), untouched))
     .orderBy(triggerDeliveries.createdAt)
     .limit(STALE_BATCH);
   for (const row of stale) {
