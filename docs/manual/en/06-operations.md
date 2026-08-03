@@ -70,7 +70,8 @@ Documented in `infra/env/.env.example`; the full set:
 | `REDIS_URL` | api, worker | Redis for pubsub; omit to fall back to DB polling |
 | `AGRIPPA_SECRET_KEY` | api, worker | **Required.** 32-byte base64 key encrypting stored credentials. Losing it orphans every stored token |
 | `BETTER_AUTH_SECRET` | api | **Required.** Session signing secret |
-| `AGRIPPA_BASE_URL` | api | Public URL of the instance |
+| `AGRIPPA_BASE_URL` | api | Public URL of the instance. Must match the browser's origin exactly — scheme, host and port |
+| `AGRIPPA_HSTS_MAX_AGE` | api | `Strict-Transport-Security` lifetime in seconds (default 31536000); sent only when the proxy forwards `X-Forwarded-Proto: https` |
 | `ANTHROPIC_API_KEY` | worker | Claude executor credential — the deployment-wide fallback; a project's own provider credential (Settings → Providers) overrides it for that provider |
 | `OPENAI_API_KEY` · `CODEX_API_KEY` | worker | Same, for the Codex executor's `openai` provider. Both optional: a keyless worker still registers `codex-cli`, and a project credential always wins |
 | `AGRIPPA_EXECUTOR` | api | Default executor for slots that don't declare one: `claude-agent-sdk`, `codex-cli`, or `fake` (token-free demo) |
@@ -252,7 +253,20 @@ Nothing else changes: same images, same env file, same data. Only the resource n
 
 When upgrading to the release that introduced platform-owned Git snapshots (ADR-0012), first drain active **repository-backed** runs. Older checkouts do not contain the trusted platform gitdir and deliberately fail closed as `workspace_lost` on a new worker; non-repository runs are unaffected. Later upgrades retain normal step-granular resume behavior.
 
-Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (SSE) — e.g. `proxy_buffering off;` in nginx — or live progress will arrive in bursts. The stream emits a comment frame every 15 s so an idle run doesn't look like a dead connection; tune with `AGRIPPA_SSE_KEEPALIVE_MS` if an intermediary reaps faster than that.
+Reverse proxy note: **disable response buffering** for `/api/v1/runs/*/events` (SSE) — e.g. `proxy_buffering off;` in nginx — or live progress will arrive in bursts. The stream emits a comment frame every 15 s so an idle run doesn't look like a dead connection; tune with `AGRIPPA_SSE_KEEPALIVE_MS` if an intermediary reaps faster than that. Forward `X-Forwarded-Proto` too — it is what tells the api a request arrived over TLS, and it gates the HSTS header.
+
+### Serving from a CN host: HTTPS is required, not just recommended
+
+If `https://your-host:3000/` works but `http://your-host:3000/` does not, your domain is not blocked — plain HTTP to it is. Confirm with `curl -sv http://your-host:3000/healthz`: a GB2312 page titled **非法阻断** that frames a provider error server is the fingerprint. Mainland-China middleboxes intercept HTTP naming a domain without an ICP filing (备案), reading that name from the **cleartext `Host` header**. TLS encrypts that header and puts only SNI on the wire, so HTTPS passes on the very same host and port.
+
+The injected page is what makes the diagnosis certain: the request never reached your server, so nothing in your own nginx config explains it — not even a TLS-only `listen 3000 ssl`, which would fail with *"The plain HTTP request was sent to HTTPS port"* if a request ever got that far.
+
+Two consequences worth internalising:
+
+- **Do not "fix" this by switching to a bare IP address.** Plain HTTP to an IP is subject to the same filtering, so it may not even help — and it costs you real things: an IP origin is not a [secure context], so the admin "copy" buttons (invite link, and the daemon runtime token you only ever see once) stop working; better-auth drops the cookie `Secure` flag, putting sessions and `agrd_`/`agr_` tokens in cleartext; and Feishu/DingTalk reject IP-literal HTTP URLs in card buttons, breaking run deep links.
+- **A redirect cannot help.** The request is answered upstream, so it never reaches the api and never gets a `301` back. That is why the api sends `Strict-Transport-Security` instead: once a browser has loaded the site over HTTPS, it rewrites any `http://` URL for that host — bookmark, pasted link, typed address — to `https://` on its own, before sending anything. Tune the lifetime with `AGRIPPA_HSTS_MAX_AGE`; `0` clears a pin browsers already hold, which is your way back to plain HTTP if you ever need it.
+
+[secure context]: https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
 
 ## Troubleshooting
 

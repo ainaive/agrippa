@@ -69,7 +69,8 @@ docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env 
 | `REDIS_URL` | api、worker | 事件分发用 Redis；不设则回退为数据库轮询 |
 | `AGRIPPA_SECRET_KEY` | api、worker | **必填。**加密存储凭证的 32 字节 base64 密钥。丢失将使全部已存令牌不可恢复 |
 | `BETTER_AUTH_SECRET` | api | **必填。**会话签名密钥 |
-| `AGRIPPA_BASE_URL` | api | 实例的公开地址 |
+| `AGRIPPA_BASE_URL` | api | 实例的公开地址。必须与浏览器实际使用的源完全一致——协议、主机、端口都要对上 |
+| `AGRIPPA_HSTS_MAX_AGE` | api | `Strict-Transport-Security` 的有效期，单位秒（默认 31536000）；仅当代理转发了 `X-Forwarded-Proto: https` 时才下发 |
 | `ANTHROPIC_API_KEY` | worker | Claude 执行器凭证——部署级回退；项目自己的服务商凭证（设置 → 模型服务商）会覆盖对应服务商的该密钥 |
 | `OPENAI_API_KEY`、`CODEX_API_KEY` | worker | 同上，用于 Codex 执行器的 `openai` 服务商。二者均可留空：没有密钥的 worker 仍会注册 `codex-cli`，且项目凭证始终优先 |
 | `AGRIPPA_EXECUTOR` | api | 未声明执行器的代理位所使用的默认值：`claude-agent-sdk`、`codex-cli` 或 `fake`（零 Token 演示） |
@@ -248,7 +249,20 @@ docker volume rm infra_pgdata infra_artifacts infra_workspaces
 
 升级到首次引入平台自有 Git 快照（ADR-0012）的版本前，请先排空仍在进行的**仓库型**执行。旧工作区没有可信的平台 gitdir，新 worker 恢复时会按设计以 `workspace_lost` 失败关闭；非仓库型执行不受影响。后续升级仍保持正常的步骤粒度续跑行为。
 
-反向代理注意：对 `/api/v1/runs/*/events`（SSE）**关闭响应缓冲**——如 nginx 的 `proxy_buffering off;`——否则实时进度会成批到达。该流每 15 秒发送一个注释帧，使空闲的执行不会被中间层当成断连回收；若某个中间层的超时更激进，可用 `AGRIPPA_SSE_KEEPALIVE_MS` 调整。
+反向代理注意：对 `/api/v1/runs/*/events`（SSE）**关闭响应缓冲**——如 nginx 的 `proxy_buffering off;`——否则实时进度会成批到达。该流每 15 秒发送一个注释帧，使空闲的执行不会被中间层当成断连回收；若某个中间层的超时更激进，可用 `AGRIPPA_SSE_KEEPALIVE_MS` 调整。另外请一并转发 `X-Forwarded-Proto`——api 靠它判断请求是否经由 TLS 到达，HSTS 响应头也以此为开关。
+
+### 部署在国内主机：HTTPS 是必需项，而非建议项
+
+如果 `https://your-host:3000/` 正常、`http://your-host:3000/` 却不通，那么被拦的不是你的域名，而是**到该域名的明文 HTTP**。用 `curl -sv http://your-host:3000/healthz` 确认：返回一个标题为 **非法阻断**、内嵌运营商错误页的 GB2312 页面，就是它的特征。国内的中间设备会拦截指向未备案域名的 HTTP 请求并直接代答，而域名正是从**明文的 `Host` 头**里读出来的；TLS 把这个头加密了，链路上只剩 SNI，所以同一台主机、同一个端口上的 HTTPS 照常可用。
+
+这个被注入的页面正是判断依据：请求根本没到你的服务器，因此问题与你自己的 nginx 配置无关——哪怕该端口是 `listen 3000 ssl`（只收 TLS）也不是原因，否则报的会是 *"The plain HTTP request was sent to HTTPS port"*。
+
+有两点值得记住：
+
+- **不要改用裸 IP 来"绕开"它。** 到 IP 的明文 HTTP 同样在过滤范围内，未必能解决问题，代价却是实打实的：IP 源不是[安全上下文]，管理后台的"复制"按钮会失效（邀请链接，以及只显示一次的 daemon 运行时令牌）；better-auth 会去掉 Cookie 的 `Secure` 标记，把会话和 `agrd_`/`agr_` 令牌暴露在明文链路上；飞书和钉钉还会拒绝卡片按钮里的 IP 字面量 HTTP 链接，导致执行详情的跳转失效。
+- **重定向救不了这种情况。** 请求在上游就被代答，根本到不了 api，也就无从返回 `301`。api 因此改为下发 `Strict-Transport-Security`：浏览器只要用 HTTPS 打开过一次，之后遇到该主机的任何 `http://` 地址——书签、粘贴的链接、手输的地址——都会在本地改写成 `https://` 再发出。有效期用 `AGRIPPA_HSTS_MAX_AGE` 调整；填 `0` 会清除浏览器已缓存的记录，这是日后需要退回明文 HTTP 时的退路。
+
+[安全上下文]: https://developer.mozilla.org/zh-CN/docs/Web/Security/Secure_Contexts
 
 ## 故障排查
 

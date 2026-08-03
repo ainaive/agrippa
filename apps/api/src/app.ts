@@ -21,6 +21,22 @@ import { registryRoutes } from "./routes/registry";
 import { runtimeRoutes } from "./routes/runtimes";
 import { templateRoutes, templateValidateRoute } from "./routes/templates";
 
+const HSTS_DEFAULT_MAX_AGE = 31_536_000; // 1 year
+
+/**
+ * How long browsers should remember to reach this instance over HTTPS only.
+ * `0` is meaningful and supported: it emits `max-age=0`, which *clears* a pin
+ * already cached by a browser — the rollback path for an operator returning to
+ * plain HTTP. Anything unparseable falls back to the default rather than
+ * silently disabling the header.
+ */
+function hstsMaxAge(): number {
+  const raw = process.env.AGRIPPA_HSTS_MAX_AGE;
+  if (raw === undefined || raw.trim() === "") return HSTS_DEFAULT_MAX_AGE;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : HSTS_DEFAULT_MAX_AGE;
+}
+
 export function createApp(deps: {
   db: Db;
   auth?: Auth;
@@ -29,6 +45,7 @@ export function createApp(deps: {
 }) {
   const auth = deps.auth ?? createAuth(deps.db);
   const app = new Hono<AppEnv>();
+  const maxAge = hstsMaxAge();
 
   app.use("*", async (c, next) => {
     c.set("db", deps.db);
@@ -40,6 +57,18 @@ export function createApp(deps: {
     const header = c.req.header("accept-language") ?? "";
     c.set("locale", lang ?? (header.toLowerCase().startsWith("zh") ? "zh-CN" : "en"));
     await next();
+    // HSTS, only for requests the proxy tells us arrived over TLS. Some ISPs
+    // (CN, for a domain without an ICP filing) reset plain HTTP by inspecting
+    // the cleartext Host header, so an http:// URL to such an instance is a
+    // dead end no redirect can rescue — the request never reaches us. This
+    // header is the fix that works from the other side: the browser rewrites
+    // http:// to https:// itself, before anything goes on the wire.
+    // Set after next() so it lands on every response shape, including the raw
+    // ones better-auth and serveStatic return (this is what hono's own
+    // secureHeaders middleware does).
+    if (c.req.header("x-forwarded-proto") === "https") {
+      c.res.headers.set("Strict-Transport-Security", `max-age=${maxAge}`);
+    }
   });
 
   app.get("/healthz", async (c) => {
