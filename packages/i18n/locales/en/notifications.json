@@ -27,6 +27,14 @@
     "title": "Runtime offline",
     "body": "The remote runtime “{{runtimeName}}” executing run #{{runNumber}} “{{taskTitle}}” in {{projectName}} has stopped reporting."
   },
+  "scheduleDisabled": {
+    "title": "Schedule stopped",
+    "body": "The schedule “{{scheduleName}}” in {{projectName}} was disabled and will not run again: {{reason}}."
+  },
+  "scheduleFailed": {
+    "title": "Schedule could not run",
+    "body": "The schedule “{{scheduleName}}” in {{projectName}} produced no run this time: {{error}}. It stays enabled and will try again."
+  },
   "test": {
     "title": "Test notification",
     "body": "This is a test notification from Agrippa for project {{projectName}}."

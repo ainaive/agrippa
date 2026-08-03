@@ -2,6 +2,7 @@ import {
   type ApprovalExpirePayload,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
+  QUEUE_SCHEDULE_FIRE,
   type RunQueue,
   requiredExecutorIds,
   runExecuteQueueName,
@@ -70,6 +71,7 @@ export async function createRunQueue(
     await boss.deleteQueue(QUEUE_NOTIFICATION_DELIVER);
   }
   await boss.createQueue(QUEUE_NOTIFICATION_DELIVER, { policy: "exclusive" });
+  await boss.createQueue(QUEUE_SCHEDULE_FIRE);
 
   return {
     boss,
@@ -93,6 +95,21 @@ export async function createRunQueue(
         { singletonKey: payload.approvalId },
         new Date(atMs),
       );
+    },
+    async registerSchedule(scheduleId: string, cron: string, timezone: string): Promise<void> {
+      // `key` scopes the entry to this schedule, so re-registering after an
+      // edit replaces its calendar rather than adding a second one; pg-boss
+      // owns the timezone, and with it the DST edges we would otherwise have
+      // to reason about ourselves.
+      await boss.schedule(
+        QUEUE_SCHEDULE_FIRE,
+        cron,
+        { scheduleId },
+        { tz: timezone, key: scheduleId },
+      );
+    },
+    async unregisterSchedule(scheduleId: string): Promise<void> {
+      await boss.unschedule(QUEUE_SCHEDULE_FIRE, scheduleId);
     },
     async enqueueNotificationDelivery(deliveryId: string): Promise<void> {
       await boss.send(

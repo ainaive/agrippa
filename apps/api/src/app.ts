@@ -20,6 +20,7 @@ import { notificationRoutes } from "./routes/notifications";
 import { projectRoutes } from "./routes/projects";
 import { registryRoutes } from "./routes/registry";
 import { runtimeRoutes } from "./routes/runtimes";
+import { scheduleRoutes } from "./routes/schedules";
 import { templateRoutes, templateValidateRoute } from "./routes/templates";
 
 const HSTS_DEFAULT_MAX_AGE = 31_536_000; // 1 year
@@ -117,6 +118,7 @@ export function createApp(deps: {
   v1.route("/projects", projectRoutes);
   v1.route("/projects", notificationRoutes);
   v1.route("/projects", apiKeyRoutes);
+  v1.route("/projects", scheduleRoutes);
   v1.route("/invitations", invitationRoutes);
   v1.route("/", executionRoutes);
   v1.route("/", governanceRoutes);

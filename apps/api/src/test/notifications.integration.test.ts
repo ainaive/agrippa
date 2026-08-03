@@ -16,7 +16,14 @@ import {
 import { eq, sql } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
-import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
+import {
+  freshTestDb,
+  jsonOf,
+  makeFakeQueue,
+  postgresAvailable,
+  signUp,
+  type TestClient,
+} from "./helpers";
 
 const dbUp = await postgresAvailable();
 
@@ -31,13 +38,11 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
   let filteredEndpointId: string;
   const enqueued: string[] = [];
 
-  const fakeQueue: RunQueue = {
-    enqueueRun: async () => {},
-    enqueueApprovalExpiry: async () => {},
+  const fakeQueue: RunQueue = makeFakeQueue({
     enqueueNotificationDelivery: async (id) => {
       enqueued.push(id);
     },
-  };
+  });
 
   beforeAll(async () => {
     db = await freshTestDb();

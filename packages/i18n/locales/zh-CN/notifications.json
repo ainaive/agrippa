@@ -27,6 +27,14 @@
     "title": "运行时离线",
     "body": "正在执行 {{projectName}} 中任务 #{{runNumber}}「{{taskTitle}}」的远程运行时「{{runtimeName}}」已停止上报。"
   },
+  "scheduleDisabled": {
+    "title": "定时计划已停用",
+    "body": "{{projectName}} 中的定时计划「{{scheduleName}}」已被停用，不会再触发：{{reason}}。"
+  },
+  "scheduleFailed": {
+    "title": "定时计划未能执行",
+    "body": "{{projectName}} 中的定时计划「{{scheduleName}}」本次未产生执行：{{error}}。计划仍处于启用状态，下次会再次尝试。"
+  },
   "test": {
     "title": "测试通知",
     "body": "这是 Agrippa 为项目 {{projectName}} 发送的测试通知。"

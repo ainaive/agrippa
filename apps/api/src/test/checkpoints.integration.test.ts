@@ -27,7 +27,14 @@ import {
 import { and, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
-import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
+import {
+  freshTestDb,
+  jsonOf,
+  makeFakeQueue,
+  postgresAvailable,
+  signUp,
+  type TestClient,
+} from "./helpers";
 
 const dbUp = await postgresAvailable();
 
@@ -174,11 +181,7 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
   const bus = new InProcessEventBus();
   const scm = new FakeScmService();
 
-  const fakeQueue: RunQueue = {
-    enqueueRun: async () => {},
-    enqueueApprovalExpiry: async () => {},
-    enqueueNotificationDelivery: async () => {},
-  };
+  const fakeQueue: RunQueue = makeFakeQueue();
 
   const engineDeps = (): EngineDeps => ({
     db,

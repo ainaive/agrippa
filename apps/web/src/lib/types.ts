@@ -365,3 +365,23 @@ export type ApiKeyRow = {
 };
 
 export type ApiKeyCreated = ApiKeyRow & { key: string };
+
+export type ScheduleRow = {
+  id: string;
+  name: string;
+  taskTypeId: string;
+  params: Record<string, unknown>;
+  agentOverrides: Record<string, { executorId?: string; faberId?: string }>;
+  cron: string;
+  timezone: string;
+  concurrencyPolicy: "skip" | "queue" | "replace";
+  enabled: boolean;
+  /** Set when the platform stopped it; null when a human paused it. */
+  disabledReason: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  lastFiredAt: string | null;
+  lastRunId: string | null;
+  createdBy: string;
+  createdAt: string;
+};

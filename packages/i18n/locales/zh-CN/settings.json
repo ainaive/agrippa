@@ -4,6 +4,7 @@
     "members": "成员",
     "resources": "资源",
     "repos": "代码仓库",
+    "schedules": "定时计划",
     "apiKeys": "API 密钥",
     "quota": "配额",
     "notifications": "通知"
@@ -116,6 +117,8 @@
       "run_failed": "执行失败",
       "run_cancelled": "执行取消",
       "run_timed_out": "执行超时",
+      "schedule_disabled": "定时计划已停用",
+      "schedule_failed": "定时计划未能执行",
       "notification_test": "测试"
     },
     "add": "添加端点",
@@ -163,5 +166,43 @@
     "revokeHint": "使用该密钥的程序将立即停止工作，且无法恢复。",
     "revoked": "API 密钥已撤销",
     "revokedBadge": "已撤销"
+  },
+  "schedules": {
+    "title": "定时计划",
+    "hint": "按周期自动提交任务。计划以创建者的身份执行，权限与本人当前完全一致——若其失去本项目的访问权限，计划会停止并通知你。",
+    "addTitle": "创建计划",
+    "name": "名称",
+    "taskType": "任务类型",
+    "taskTypePlaceholder": "选择任务类型",
+    "cron": "Cron 表达式",
+    "cronHint": "五个字段：分 时 日 月 周。「0 9 * * 1」表示每周一 09:00。",
+    "timezone": "时区",
+    "policy": "上次执行尚未结束时",
+    "policies": {
+      "skip": "跳过",
+      "queue": "排队",
+      "replace": "替换"
+    },
+    "policyHints": {
+      "skip": "本次不提交——迟一点的报告好过两份重叠的报告。",
+      "queue": "照常提交，让执行排队进行。",
+      "replace": "先取消上一次执行，再提交新的。"
+    },
+    "create": "创建计划",
+    "created": "计划已创建",
+    "empty": "暂无定时计划",
+    "lastFired": "最近执行于 {{time}}",
+    "neverFired": "尚未执行",
+    "lastError": "上次尝试失败：{{error}}",
+    "toggle": "启用",
+    "remove": "删除",
+    "removeConfirm": "删除「{{name}}」？",
+    "removeHint": "计划将立即停止，已产生的执行记录会保留。",
+    "removed": "计划已删除",
+    "reasons": {
+      "owner_lost_access": "已停用：创建者不再拥有本项目的访问权限。",
+      "project_archived": "已停用：本项目已归档。",
+      "task_type_gone": "已停用：对应的任务类型已不可用。"
+    }
   }
 }

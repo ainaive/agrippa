@@ -216,6 +216,40 @@ export async function sweepRunLeases(
   return { expired, orphaned: orphanedRows.map((r) => r.id) };
 }
 
+/**
+ * Ask for a run to stop, whatever state it is in.
+ *
+ * Cancellation is cooperative for a RUNNING run: the engine checks the flag at
+ * the next step boundary, so a hard finalize here would race an executor
+ * mid-invocation and strand its usage accounting. But a queued or
+ * waiting_approval run has no worker holding it — nobody would ever observe the
+ * flag — so those finalize directly, under the same CAS that protects against a
+ * worker picking the run up in the same instant.
+ *
+ * Returns the finalize result when it finalized, or `flagged` when the run was
+ * left to stop itself. Callers own the side effects the two cases need: the API
+ * publishes to SSE and re-enqueues a lost CAS; the schedule handler needs
+ * neither, because its next act is to submit a replacement run.
+ */
+export async function requestRunCancellation(
+  db: Db,
+  run: { id: string; status: RunStatus },
+  error: { code: string; message: string },
+): Promise<FinalizeResult | { outcome: "flagged" }> {
+  await db.update(runs).set({ cancelRequested: true }).where(eq(runs.id, run.id));
+  if (run.status !== "queued" && run.status !== "waiting_approval") {
+    return { outcome: "flagged" };
+  }
+  return finalizeRun(db, {
+    runId: run.id,
+    from: run.status,
+    to: "cancelled",
+    error,
+    usageTotals: {},
+    eventPayload: { error },
+  });
+}
+
 export type FinalizeRunInput = {
   runId: string;
   from: RunStatus;

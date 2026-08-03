@@ -17,6 +17,7 @@ export * from "./remote/remote-workspace";
 export * from "./remote/routing";
 export * from "./resolve";
 export * from "./run-plan";
+export * from "./schedule-fire";
 export * from "./seed-builtins";
 export * from "./submit";
 export * from "./template-schema";

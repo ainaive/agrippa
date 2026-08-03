@@ -5,7 +5,14 @@ import { InProcessEventBus } from "@agrippa/orchestration";
 import { sql } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
-import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
+import {
+  freshTestDb,
+  jsonOf,
+  makeFakeQueue,
+  postgresAvailable,
+  signUp,
+  type TestClient,
+} from "./helpers";
 
 const dbUp = await postgresAvailable();
 
@@ -23,11 +30,7 @@ describe.skipIf(!dbUp)("fleet workers endpoint", () => {
   let admin: TestClient;
   let member: TestClient;
 
-  const fakeQueue: RunQueue = {
-    enqueueRun: async () => {},
-    enqueueApprovalExpiry: async () => {},
-    enqueueNotificationDelivery: async () => {},
-  };
+  const fakeQueue: RunQueue = makeFakeQueue();
 
   beforeAll(async () => {
     db = await freshTestDb();

@@ -6,8 +6,17 @@ import {
   type NotificationDeliverPayload,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
+  QUEUE_SCHEDULE_FIRE,
+  type ScheduleFirePayload,
 } from "@agrippa/core";
-import { awaitSchema, createDb, notificationDeliveries, runs, runtimes } from "@agrippa/db";
+import {
+  awaitSchema,
+  createDb,
+  notificationDeliveries,
+  runs,
+  runtimes,
+  taskSchedules,
+} from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
@@ -20,6 +29,7 @@ import {
   type EngineDeps,
   FakeScmService,
   findStrandedCheckpointRuns,
+  fireSchedule,
   InProcessEventBus,
   liveCentralWorkerSets,
   RedisEventBus,
@@ -257,7 +267,33 @@ await queue.boss.work(
   },
 );
 
-// every consumer above is live — the two boss.work() calls returned and the
+await queue.boss.work(QUEUE_SCHEDULE_FIRE, async (jobs: Job<ScheduleFirePayload>[]) => {
+  for (const job of jobs) {
+    // fireSchedule never throws for a schedule-level problem: it records the
+    // outcome on the row and announces it. A throw here would mean an
+    // infrastructure fault, which pg-boss should retry.
+    const outcome = await fireSchedule(db, queue, job.data.scheduleId);
+    deps.logger.info(`schedule ${job.data.scheduleId} fired`, { outcome: outcome.kind });
+  }
+});
+
+// Reconcile pg-boss's cron calendar with the schedule rows. The two are
+// written separately (row first, registration second), so a crash in between —
+// or a database restored from a backup taken mid-edit — can leave a schedule
+// that never fires, which is invisible by nature. Re-registering every enabled
+// schedule at boot is idempotent (`key` replaces the entry) and cheap.
+try {
+  const enabled = await db
+    .select({ id: taskSchedules.id, cron: taskSchedules.cron, timezone: taskSchedules.timezone })
+    .from(taskSchedules)
+    .where(eq(taskSchedules.enabled, true));
+  for (const row of enabled) await queue.registerSchedule(row.id, row.cron, row.timezone);
+  deps.logger.info(`reconciled ${enabled.length} schedule(s)`);
+} catch (err) {
+  deps.logger.warn("schedule reconciliation failed", { err: String(err) });
+}
+
+// every consumer above is live — the boss.work() calls returned and the
 // run fetch loop is ticking — which is the signal deploy verification counts
 // (issue #15)
 await markConsumersReady(db, containerId);

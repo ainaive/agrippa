@@ -4,6 +4,7 @@
     "members": "Members",
     "resources": "Resources",
     "repos": "Repositories",
+    "schedules": "Schedules",
     "apiKeys": "API keys",
     "quota": "Quota",
     "notifications": "Notifications"
@@ -116,6 +117,8 @@
       "run_failed": "Run failed",
       "run_cancelled": "Run cancelled",
       "run_timed_out": "Run timed out",
+      "schedule_disabled": "Schedule stopped",
+      "schedule_failed": "Schedule could not run",
       "notification_test": "Test"
     },
     "add": "Add endpoint",
@@ -163,5 +166,43 @@
     "revokeHint": "Anything using this key stops working immediately. This cannot be undone.",
     "revoked": "API key revoked",
     "revokedBadge": "Revoked"
+  },
+  "schedules": {
+    "title": "Schedules",
+    "hint": "Submit a task on a recurring schedule. A schedule runs as the person who created it and can only do what they can do right now — if they lose access to this project, it stops and tells you.",
+    "addTitle": "Create a schedule",
+    "name": "Name",
+    "taskType": "Task type",
+    "taskTypePlaceholder": "Pick a task type",
+    "cron": "Cron expression",
+    "cronHint": "Five fields: minute hour day-of-month month day-of-week. “0 9 * * 1” is Mondays at 09:00.",
+    "timezone": "Timezone",
+    "policy": "When the previous run is still going",
+    "policies": {
+      "skip": "Skip",
+      "queue": "Queue",
+      "replace": "Replace"
+    },
+    "policyHints": {
+      "skip": "Do nothing this time — one late report beats two overlapping ones.",
+      "queue": "Submit anyway and let the runs queue up.",
+      "replace": "Cancel the previous run, then submit."
+    },
+    "create": "Create schedule",
+    "created": "Schedule created",
+    "empty": "No schedules yet",
+    "lastFired": "last ran {{time}}",
+    "neverFired": "never run",
+    "lastError": "Last attempt failed: {{error}}",
+    "toggle": "Enabled",
+    "remove": "Delete",
+    "removeConfirm": "Delete “{{name}}”?",
+    "removeHint": "The schedule stops immediately. Runs it already produced are kept.",
+    "removed": "Schedule deleted",
+    "reasons": {
+      "owner_lost_access": "Stopped: its owner no longer has access to this project.",
+      "project_archived": "Stopped: this project is archived.",
+      "task_type_gone": "Stopped: its task type is no longer available."
+    }
   }
 }

@@ -4,9 +4,14 @@ export const NOTIFICATION_ENDPOINT_KINDS = ["generic", "feishu", "dingtalk"] as 
 export type NotificationEndpointKind = (typeof NOTIFICATION_ENDPOINT_KINDS)[number];
 
 /**
- * The run_events types that produce deliveries. Everything here is written
- * transactionally by the run lifecycle, so deliveries derived from these rows
- * inherit exactly-once semantics from the `(endpoint, event)` dedupe key.
+ * The event types that produce deliveries.
+ *
+ * Most are `run_events` rows written transactionally by the run lifecycle, so
+ * deliveries derived from them inherit exactly-once semantics from the
+ * `(endpoint, event)` dedupe key. The `schedule.*` pair is the exception: a
+ * schedule that never fired has no run to hang an event on, so those are
+ * delivered directly (the run-less shape test sends already use) and carry
+ * their own dedupe.
  */
 export const NOTIFIABLE_EVENT_TYPES = [
   "checkpoint.required",
@@ -18,6 +23,12 @@ export const NOTIFIABLE_EVENT_TYPES = [
   // appended to affected RUNNING runs when their pinned remote runtime goes
   // silent (ADR-0017); the fleet sweeper writes it with offline dedupe
   "runtime.offline",
+  // a schedule stopped for good and needs a human — the loud half of the
+  // reason schedules disable rather than skip
+  "schedule.disabled",
+  // a firing produced no run but the schedule lives on (quota, config); noisy
+  // to ignore, so it is filterable separately from the terminal case
+  "schedule.failed",
 ] as const;
 export type NotifiableEventType = (typeof NOTIFIABLE_EVENT_TYPES)[number];
 

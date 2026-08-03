@@ -16,7 +16,14 @@ import { InProcessEventBus } from "@agrippa/orchestration";
 import { eq, sql } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
-import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
+import {
+  freshTestDb,
+  jsonOf,
+  makeFakeQueue,
+  postgresAvailable,
+  signUp,
+  type TestClient,
+} from "./helpers";
 
 const dbUp = await postgresAvailable();
 
@@ -40,11 +47,7 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
   let runtimeId: string;
   let token: string;
 
-  const fakeQueue: RunQueue = {
-    enqueueRun: async () => {},
-    enqueueApprovalExpiry: async () => {},
-    enqueueNotificationDelivery: async () => {},
-  };
+  const fakeQueue: RunQueue = makeFakeQueue();
 
   const daemonRequest = (path: string, body: unknown, auth = token) =>
     app.request(`/api/daemon${path}`, {
@@ -174,11 +177,7 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
   let runId: string;
   let stepCounter = 0;
 
-  const fakeQueue: RunQueue = {
-    enqueueRun: async () => {},
-    enqueueApprovalExpiry: async () => {},
-    enqueueNotificationDelivery: async () => {},
-  };
+  const fakeQueue: RunQueue = makeFakeQueue();
 
   const daemonPost = (path: string, body: unknown, auth = token) =>
     app.request(`/api/daemon${path}`, {

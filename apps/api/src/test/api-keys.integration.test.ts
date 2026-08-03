@@ -4,7 +4,14 @@ import { apiKeys, auditLogs, projectMembers } from "@agrippa/db";
 import { and, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
-import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
+import {
+  freshTestDb,
+  jsonOf,
+  makeFakeQueue,
+  postgresAvailable,
+  signUp,
+  type TestClient,
+} from "./helpers";
 
 const dbUp = await postgresAvailable();
 
@@ -29,11 +36,7 @@ describe.skipIf(!dbUp)("project API keys (Bearer agr_…)", () => {
   let otherProjectId: string;
   let taskTypeId: string;
 
-  const fakeQueue: RunQueue = {
-    enqueueRun: async () => {},
-    enqueueApprovalExpiry: async () => {},
-    enqueueNotificationDelivery: async () => {},
-  };
+  const fakeQueue: RunQueue = makeFakeQueue();
 
   /** A request authenticated by an API key rather than a session cookie. */
   const withKey = (key: string, path: string, init: RequestInit & { json?: unknown } = {}) => {

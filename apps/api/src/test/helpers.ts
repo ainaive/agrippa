@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
+import type { RunQueue } from "@agrippa/core";
 import { accounts, createDb, type Db, migrateDb, orgs, seed, users, uuidv7 } from "@agrippa/db";
 import { seedBuiltinTemplates } from "@agrippa/orchestration";
 import { hashPassword } from "better-auth/crypto";
@@ -121,4 +122,20 @@ export async function signUp(app: App, name: string, email: string): Promise<Tes
 /** Typed JSON body accessor — Bun types Response.json() as unknown. */
 export async function jsonOf<T = Record<string, unknown>>(res: Response): Promise<T> {
   return (await res.json()) as T;
+}
+
+/**
+ * A no-op RunQueue for suites that exercise handlers rather than the queue.
+ * Overrides let a suite observe just the call it cares about; defining the
+ * full shape once means adding a queue method doesn't touch every fixture.
+ */
+export function makeFakeQueue(overrides: Partial<RunQueue> = {}): RunQueue {
+  return {
+    enqueueRun: async () => {},
+    enqueueApprovalExpiry: async () => {},
+    enqueueNotificationDelivery: async () => {},
+    registerSchedule: async () => {},
+    unregisterSchedule: async () => {},
+    ...overrides,
+  };
 }

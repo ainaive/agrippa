@@ -3,6 +3,7 @@ import { API_KEY_SCOPES } from "./api-keys";
 import { PROJECT_ROLES } from "./domain";
 import { LOCALES } from "./i18n";
 import { NOTIFIABLE_EVENT_TYPES, NOTIFICATION_ENDPOINT_KINDS } from "./notifications";
+import { SCHEDULE_CONCURRENCY_POLICIES, validateCron, validateTimezone } from "./schedules";
 
 export const slugSchema = z
   .string()
@@ -297,6 +298,46 @@ export const grantsPutSchema = z.array(
 export const runtimeCreateSchema = z.object({
   name: z.string().min(1).max(100),
 });
+
+const cronField = z.string().refine((v) => validateCron(v) === null, {
+  error: (issue) => validateCron(String(issue.input)) ?? "invalid cron",
+});
+const timezoneField = z.string().refine((v) => validateTimezone(v) === null, {
+  error: "not a valid IANA timezone",
+});
+
+export const scheduleCreateSchema = z.object({
+  name: z.string().min(1).max(200),
+  taskTypeId: z.uuid(),
+  params: z.record(z.string(), z.unknown()).default({}),
+  agents: z
+    .record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    )
+    .default({}),
+  cron: cronField,
+  timezone: timezoneField.default("UTC"),
+  concurrencyPolicy: z.enum(SCHEDULE_CONCURRENCY_POLICIES).default("skip"),
+});
+export type ScheduleCreateInput = z.infer<typeof scheduleCreateSchema>;
+
+export const scheduleUpdateSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    params: z.record(z.string(), z.unknown()),
+    agents: z.record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    ),
+    cron: cronField,
+    timezone: timezoneField,
+    concurrencyPolicy: z.enum(SCHEDULE_CONCURRENCY_POLICIES),
+    /** Re-enabling clears `disabledReason`; the owner is re-checked at the next firing. */
+    enabled: z.boolean(),
+  })
+  .partial();
+export type ScheduleUpdateInput = z.infer<typeof scheduleUpdateSchema>;
 
 export const apiKeyCreateSchema = z.object({
   name: z.string().min(1).max(100),

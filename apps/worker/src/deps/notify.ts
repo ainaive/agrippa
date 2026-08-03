@@ -69,6 +69,8 @@ const MESSAGE_KEYS: Record<string, keyof NotificationCatalog> = {
   "run.cancelled": "runCancelled",
   "run.timed_out": "runTimedOut",
   "runtime.offline": "runtimeOffline",
+  "schedule.disabled": "scheduleDisabled",
+  "schedule.failed": "scheduleFailed",
   "notification.test": "test",
 };
 
@@ -88,7 +90,11 @@ export function renderMessage(ctx: NotificationContext): { title: string; body: 
     projectName: ctx.project.name,
     checkpointTitle: pickLocale(ctx.eventPayload.title as LocalizedText | undefined, ctx.locale),
     runtimeName: String(ctx.eventPayload.runtimeName ?? ""),
-    error: error ? `${error.code ?? ""}${error.message ? `: ${error.message}` : ""}` : "",
+    scheduleName: String(ctx.eventPayload.scheduleName ?? ""),
+    reason: String(ctx.eventPayload.reason ?? ""),
+    error: error
+      ? `${error.code ?? ""}${error.message ? `: ${error.message}` : ""}`
+      : String(ctx.eventPayload.error ?? ""),
   };
   return { title: interpolate(entry.title, vars), body: interpolate(entry.body, vars) };
 }

@@ -1,9 +1,15 @@
-import { API_KEY_SCOPES, PROVIDER_CATALOG } from "@agrippa/core";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  API_KEY_SCOPES,
+  PROVIDER_CATALOG,
+  SCHEDULE_CONCURRENCY_POLICIES,
+  type ScheduleConcurrencyPolicy,
+} from "@agrippa/core";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   BellIcon,
+  CalendarClockIcon,
   CopyIcon,
   FolderCogIcon,
   GaugeIcon,
@@ -52,7 +58,9 @@ import type {
   ProviderCatalogRow,
   ProviderCredentialRow,
   Quota,
+  ScheduleRow,
   SkillRow,
+  TaskTypeSummary,
 } from "../lib/types";
 import { cn } from "../lib/utils";
 
@@ -781,6 +789,8 @@ const NOTIFY_EVENT_TYPES = [
   "run.failed",
   "run.cancelled",
   "run.timed_out",
+  "schedule.disabled",
+  "schedule.failed",
 ] as const;
 
 const eventTypeKey = (type: string) => type.replaceAll(".", "_");
@@ -1214,12 +1224,202 @@ function ApiKeysSection({ projectId }: { projectId: string }) {
   );
 }
 
+function SchedulesSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation(["settings", "common"]);
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [taskTypeId, setTaskTypeId] = useState("");
+  const [cron, setCron] = useState("0 9 * * 1");
+  const [timezone, setTimezone] = useState(
+    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  );
+  const [policy, setPolicy] = useState<ScheduleConcurrencyPolicy>("skip");
+
+  const schedules = useQuery({
+    queryKey: ["schedules", projectId],
+    queryFn: () => api<ScheduleRow[]>(`/projects/${projectId}/schedules`),
+  });
+  // the catalog has no list-all endpoint (it is browsed by scenario), so fan
+  // out the same way CatalogPage does rather than adding one for a picker
+  const scenarios = useQuery({
+    queryKey: ["scenarios"],
+    queryFn: () => api<Array<{ slug: string }>>("/scenarios"),
+  });
+  const taskTypeQueries = useQueries({
+    queries: (scenarios.data ?? []).map((scenario) => ({
+      queryKey: ["task-types", scenario.slug],
+      queryFn: () => api<TaskTypeSummary[]>(`/scenarios/${scenario.slug}/task-types`),
+    })),
+  });
+  const taskTypeOptions = taskTypeQueries.flatMap((q) => q.data ?? []);
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["schedules", projectId] });
+  const create = useMutation({
+    mutationFn: () =>
+      api(`/projects/${projectId}/schedules`, {
+        method: "POST",
+        // params stay empty here: a schedule's parameters come from the task
+        // form, which this section does not render — see the manual's note
+        json: { name: name.trim(), taskTypeId, cron, timezone, concurrencyPolicy: policy },
+      }),
+    onSuccess: () => {
+      setName("");
+      toast.success(t("settings:schedules.created"));
+      void refresh();
+    },
+    onError: toastApiError,
+  });
+  const update = useMutation({
+    mutationFn: (input: { id: string; body: Record<string, unknown> }) =>
+      api(`/projects/${projectId}/schedules/${input.id}`, { method: "PATCH", json: input.body }),
+    onSuccess: () => void refresh(),
+    onError: toastApiError,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api(`/projects/${projectId}/schedules/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success(t("settings:schedules.removed"));
+      void refresh();
+    },
+    onError: toastApiError,
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">{t("settings:schedules.title")}</h3>
+        <p className="text-xs text-muted-foreground">{t("settings:schedules.hint")}</p>
+      </div>
+
+      {schedules.data && schedules.data.length > 0 ? (
+        <div className="divide-y rounded-lg border">
+          {schedules.data.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0 flex-1">
+                <p className="truncate">
+                  <span className="font-medium">{row.name}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.cron} · {row.timezone}
+                  </span>
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {row.lastFiredAt
+                    ? t("settings:schedules.lastFired", { time: formatTime(row.lastFiredAt) })
+                    : t("settings:schedules.neverFired")}
+                </p>
+                {/* why it stopped is the point of disabling rather than skipping */}
+                {row.disabledReason ? (
+                  <p className="truncate text-xs text-destructive">
+                    {t(`settings:schedules.reasons.${row.disabledReason}`)}
+                  </p>
+                ) : null}
+                {row.lastError ? (
+                  <p className="truncate text-xs text-amber-600" title={row.lastError}>
+                    {t("settings:schedules.lastError", { error: row.lastError })}
+                  </p>
+                ) : null}
+              </div>
+              <Badge variant="outline">
+                {t(`settings:schedules.policies.${row.concurrencyPolicy}`)}
+              </Badge>
+              <Switch
+                checked={row.enabled}
+                aria-label={t("settings:schedules.toggle")}
+                onCheckedChange={(on) => update.mutate({ id: row.id, body: { enabled: on } })}
+              />
+              <ConfirmDialog
+                trigger={
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label={t("settings:schedules.remove")}
+                  >
+                    <XIcon />
+                  </Button>
+                }
+                title={t("settings:schedules.removeConfirm", { name: row.name })}
+                description={t("settings:schedules.removeHint")}
+                destructive
+                onConfirm={() => remove.mutate(row.id)}
+              />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title={t("settings:schedules.empty")} icon={CalendarClockIcon} />
+      )}
+
+      <div className="max-w-md space-y-3">
+        <h3 className="text-sm font-medium">{t("settings:schedules.addTitle")}</h3>
+        <div className="space-y-1">
+          <Label htmlFor="sched-name">{t("settings:schedules.name")}</Label>
+          <Input id="sched-name" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <Label>{t("settings:schedules.taskType")}</Label>
+          <Select value={taskTypeId} onValueChange={setTaskTypeId}>
+            <SelectTrigger>
+              <SelectValue placeholder={t("settings:schedules.taskTypePlaceholder")} />
+            </SelectTrigger>
+            <SelectContent>
+              {taskTypeOptions.map((tt) => (
+                <SelectItem key={tt.id} value={tt.id}>
+                  {lt(tt.nameI18n)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="sched-cron">{t("settings:schedules.cron")}</Label>
+          <Input
+            id="sched-cron"
+            value={cron}
+            onChange={(e) => setCron(e.target.value)}
+            className="font-mono"
+          />
+          <p className="text-xs text-muted-foreground">{t("settings:schedules.cronHint")}</p>
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="sched-tz">{t("settings:schedules.timezone")}</Label>
+          <Input id="sched-tz" value={timezone} onChange={(e) => setTimezone(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <Label>{t("settings:schedules.policy")}</Label>
+          <Select value={policy} onValueChange={(v) => setPolicy(v as ScheduleConcurrencyPolicy)}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SCHEDULE_CONCURRENCY_POLICIES.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {t(`settings:schedules.policies.${p}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {t(`settings:schedules.policyHints.${policy}`)}
+          </p>
+        </div>
+        <Button
+          disabled={create.isPending || !name.trim() || !taskTypeId || !cron.trim()}
+          onClick={() => create.mutate()}
+        >
+          {t("settings:schedules.create")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
   { key: "general", icon: FolderCogIcon },
   { key: "members", icon: UsersIcon },
   { key: "resources", icon: ShieldCheckIcon },
   { key: "repos", icon: GitBranchIcon },
   { key: "notifications", icon: BellIcon },
+  { key: "schedules", icon: CalendarClockIcon },
   { key: "apiKeys", icon: KeyRoundIcon },
   { key: "quota", icon: GaugeIcon },
 ];
@@ -1264,6 +1464,7 @@ export function SettingsPage() {
             {section === "resources" && <ResourcesSection projectId={projectId} />}
             {section === "repos" && <ReposSection projectId={projectId} />}
             {section === "notifications" && <NotificationsSection projectId={projectId} />}
+            {section === "schedules" && <SchedulesSection projectId={projectId} />}
             {section === "apiKeys" && <ApiKeysSection projectId={projectId} />}
             {section === "quota" && <QuotaSection projectId={projectId} />}
           </CardContent>

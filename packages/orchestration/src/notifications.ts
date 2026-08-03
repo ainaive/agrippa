@@ -101,6 +101,54 @@ export async function syncRunNotifications(
   return insertAndEnqueue(db, queue, values);
 }
 
+/**
+ * Deliver a project-level event that has no run behind it.
+ *
+ * Schedules need this: a firing that never produced a run has nothing to hang
+ * a `run_events` row on, and inventing a run to carry the news would put a
+ * fictional row in the timeline and the usage tables. Test sends already
+ * established the run-less delivery shape (`run_id`/`event_id` null), so this
+ * reuses it rather than widening the schema.
+ *
+ * The tradeoff that buys: with no `event_id`, the partial unique index does
+ * not apply, so these are not idempotent by construction the way run-derived
+ * deliveries are. Callers must therefore fire them once per transition — which
+ * is why a schedule sets `disabled` and notifies in the same step, and why
+ * `schedule.failed` is written per firing rather than per sweep.
+ */
+export async function notifyProjectEvent(
+  db: Db,
+  queue: RunQueue | null,
+  input: {
+    projectId: string;
+    eventType: NotifiableEventType;
+    payload: Record<string, unknown>;
+  },
+): Promise<string[]> {
+  const endpoints = await db
+    .select({
+      id: notificationEndpoints.id,
+      events: notificationEndpoints.events,
+    })
+    .from(notificationEndpoints)
+    .where(
+      and(
+        eq(notificationEndpoints.projectId, input.projectId),
+        eq(notificationEndpoints.enabled, true),
+      ),
+    );
+
+  const values: DeliveryValue[] = endpoints
+    .filter((endpoint) => matchesFilter(endpoint.events, input.eventType))
+    .map((endpoint) => ({
+      endpointId: endpoint.id,
+      projectId: input.projectId,
+      eventType: input.eventType,
+      payload: input.payload,
+    }));
+  return insertAndEnqueue(db, queue, values);
+}
+
 /** Sweep window: events older than this are never backfilled. */
 const SWEEP_WINDOW = sql`now() - interval '24 hours'`;
 /** A pending row untouched this long is re-enqueued (singleton key dedupes). */
