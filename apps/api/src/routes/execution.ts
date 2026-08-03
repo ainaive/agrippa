@@ -44,7 +44,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit, requestActor } from "../lib/audit";
 import { resolveRunPlan } from "../lib/run-plan";
-import { submitTask } from "../lib/submit";
+import { assertProjectAcceptsWork, submitTask } from "../lib/submit";
 import { assertQuotaHeadroom } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
@@ -330,6 +330,9 @@ export const executionRoutes = new Hono<AppEnv>()
       .where(eq(tasks.id, c.req.param("id")));
     if (!task) throw AppError.notFound("Task");
     await assertProjectRole(db, c.var.principal, task.projectId, "member");
+    // a retry is new work and consumes tokens like any run — an archived
+    // project refuses it for the same reason it refuses a submission
+    await assertProjectAcceptsWork(db, task.projectId);
 
     const [latest] = await db
       .select()

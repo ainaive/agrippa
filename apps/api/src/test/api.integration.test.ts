@@ -176,12 +176,33 @@ describe.skipIf(!dbUp)("api integration (auth, projects, RBAC)", () => {
     expect(putAsMember.status).toBe(403);
   });
 
-  it("archives a project", async () => {
+  it("archives a project, and the archived project then accepts no new work", async () => {
     const res = await alice.request(`/api/v1/projects/${projectId}`, { method: "DELETE" });
     expect(res.status).toBe(200);
     const project = await jsonOf<{ status: string }>(
       await alice.request(`/api/v1/projects/${projectId}`),
     );
     expect(project.status).toBe("archived");
+
+    // archiving used to write a status nobody read: the project merely
+    // vanished from the switcher, which stopped being enough once work can
+    // arrive without a human (API keys, schedules)
+    const types = await jsonOf<Array<{ id: string; slug: string }>>(
+      await alice.request("/api/v1/scenarios/project-management/task-types"),
+    );
+    const taskTypeId = types.find((t) => t.slug === "weekly-report")?.id as string;
+    const submit = await alice.request(`/api/v1/projects/${projectId}/tasks`, {
+      method: "POST",
+      json: {
+        taskTypeId,
+        title: "after archive",
+        params: { dateRange: "2026.07.27-2026.08.02", rawNotes: "x" },
+      },
+    });
+    expect(submit.status).toBe(409);
+    expect((await jsonOf<{ code: string }>(submit)).code).toBe("project_archived");
+
+    // reading history still works — archiving preserves, it does not hide
+    expect((await alice.request(`/api/v1/projects/${projectId}/tasks`)).status).toBe(200);
   });
 });

@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Archiving a project now actually stops new work.** `project.archive` has always written `projects.status = 'archived'`, and nothing anywhere read it — the only two references to the value in `apps/api` and `packages/orchestration` were the write itself. Both manuals nevertheless promised that archiving "stops accepting submissions"; in practice the project merely dropped out of the switcher's active list, and a submit or retry against it still succeeded. That was survivable while a human had to click Submit. It stops being survivable now that work can arrive unattended — an archived project is precisely the one nobody is watching, so runs would accumulate and burn quota unseen. Submit and retry now both answer `409 project_archived`; reading history is untouched, since archiving preserves rather than hides.
+
 ### Added
 
 - **Project API keys (`Authorization: Bearer agr_<key>`)** — the programmatic surface the `api_keys` table has been waiting for since the first migration (M2 Track T). Project admins issue and revoke keys under **Settings → API keys**; the plaintext is shown exactly once and only a sha256 hash plus a 12-char lookup prefix is stored. Verification reuses the daemon-token shape — prefix-indexed lookup, constant-time compare — now extracted into one `bearer-tokens` module that the `agrd_` runtime tokens and invitation tokens call as well, replacing three near-identical copies. Unknown, malformed, revoked, and expired keys all answer the same `401 api_key_invalid`, so probing cannot mine the difference.

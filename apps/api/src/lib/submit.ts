@@ -2,6 +2,7 @@ import { AppError, type RunQueue, type TaskSubmitInput } from "@agrippa/core";
 import {
   type Db,
   orchestrationTemplates,
+  projects,
   runs,
   tasks,
   taskTypes,
@@ -16,6 +17,27 @@ import { eq } from "drizzle-orm";
 import { type AuditActor, auditAs } from "./audit";
 import { resolveRunPlan } from "./run-plan";
 import { assertQuotaHeadroom } from "./usage";
+
+/**
+ * An archived project accepts no new work — not a submission, not a retry.
+ *
+ * Archiving has always written `projects.status` and, until now, nothing read
+ * it: the project merely vanished from the switcher, which was enough while a
+ * human had to click Submit. It stops being enough the moment work can arrive
+ * without a human (API keys, schedules), because an archived project is exactly
+ * the one nobody is looking at — runs would accumulate and burn quota unseen.
+ * Both manuals already promise this behavior; this is where it becomes true.
+ */
+export async function assertProjectAcceptsWork(db: Db, projectId: string): Promise<void> {
+  const [project] = await db
+    .select({ status: projects.status })
+    .from(projects)
+    .where(eq(projects.id, projectId));
+  if (!project) throw AppError.notFound("Project");
+  if (project.status !== "active") {
+    throw AppError.conflict("project_archived", "This project is archived and accepts no new work");
+  }
+}
 
 export type SubmitTaskArgs = {
   projectId: string;
@@ -46,6 +68,8 @@ export async function submitTask(
   args: SubmitTaskArgs,
 ): Promise<{ taskId: string; runId: string }> {
   const { projectId, actorUserId, actor, input } = args;
+
+  await assertProjectAcceptsWork(db, projectId);
 
   const [taskType] = await db.select().from(taskTypes).where(eq(taskTypes.id, input.taskTypeId));
   if (!taskType?.enabled) throw AppError.notFound("Task type");
