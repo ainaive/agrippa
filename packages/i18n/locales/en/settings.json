@@ -4,6 +4,7 @@
     "members": "Members",
     "resources": "Resources",
     "repos": "Repositories",
+    "apiKeys": "API keys",
     "quota": "Quota",
     "notifications": "Notifications"
   },
@@ -137,5 +138,30 @@
     },
     "retry": "Retry",
     "retried": "Delivery re-queued"
+  },
+  "apiKeys": {
+    "title": "API keys",
+    "hint": "Programmatic access to this project: submit tasks, read runs. Keys act as you, are bound to this project, and cannot reach administration.",
+    "addTitle": "Create a key",
+    "name": "Name",
+    "scopes": "Scopes",
+    "scopeHints": {
+      "tasks_write": "Submit, retry, and cancel",
+      "runs_read": "Read tasks, runs, and artifacts",
+      "resources_read": "Read the task catalog"
+    },
+    "create": "Create key",
+    "created": "API key created",
+    "keyOnce": "Copy the key for “{{name}}” now — it is shown only once.",
+    "copy": "Copy key",
+    "copied": "Key copied",
+    "empty": "No API keys yet",
+    "lastUsed": "last used {{time}}",
+    "neverUsed": "never used",
+    "revoke": "Revoke",
+    "revokeConfirm": "Revoke “{{name}}”?",
+    "revokeHint": "Anything using this key stops working immediately. This cannot be undone.",
+    "revoked": "API key revoked",
+    "revokedBadge": "Revoked"
   }
 }

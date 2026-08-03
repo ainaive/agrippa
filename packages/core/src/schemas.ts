@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { API_KEY_SCOPES } from "./api-keys";
 import { PROJECT_ROLES } from "./domain";
 import { LOCALES } from "./i18n";
 import { NOTIFIABLE_EVENT_TYPES, NOTIFICATION_ENDPOINT_KINDS } from "./notifications";
@@ -296,3 +297,12 @@ export const grantsPutSchema = z.array(
 export const runtimeCreateSchema = z.object({
   name: z.string().min(1).max(100),
 });
+
+export const apiKeyCreateSchema = z.object({
+  name: z.string().min(1).max(100),
+  /** At least one — a key that grants nothing is a footgun, not a default. */
+  scopes: z.array(z.enum(API_KEY_SCOPES)).min(1),
+  /** Omit for a non-expiring key. */
+  expiresDays: z.number().int().min(1).max(3650).optional(),
+});
+export type ApiKeyCreateInput = z.infer<typeof apiKeyCreateSchema>;

@@ -1,38 +1,33 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  hashToken,
+  type IssuedToken,
+  issueToken,
+  tokenMatches,
+  tokenPrefixOf,
+} from "./bearer-tokens";
 
 /**
  * Daemon runtime tokens (ADR-0017): `agrd_` + 32 random bytes base64url,
- * stored hash-only — the same generate/hash/constant-time-compare trio as
- * invitation tokens, and deliberately the same shape as `api_keys`
- * (prefix + hash) so Track T's bearer middleware can generalize from this.
+ * stored hash-only. The generate/hash/constant-time-compare trio itself lives
+ * in `bearer-tokens.ts`, shared with `agr_` project API keys and invitation
+ * tokens; this module is just the `agrd_` binding of it.
  */
-const TOKEN_BYTES = 32;
 export const RUNTIME_TOKEN_PREFIX = "agrd_";
-/** Chars of the issued token stored in clear for indexed lookup + UI display. */
-const DISPLAY_PREFIX_LENGTH = 12;
 
-export type IssuedRuntimeToken = { token: string; tokenPrefix: string; tokenHash: string };
+export type IssuedRuntimeToken = IssuedToken;
 
 export function issueRuntimeToken(): IssuedRuntimeToken {
-  const token = RUNTIME_TOKEN_PREFIX + randomBytes(TOKEN_BYTES).toString("base64url");
-  return {
-    token,
-    tokenPrefix: token.slice(0, DISPLAY_PREFIX_LENGTH),
-    tokenHash: hashRuntimeToken(token),
-  };
+  return issueToken(RUNTIME_TOKEN_PREFIX);
 }
 
 export function hashRuntimeToken(token: string): string {
-  return createHash("sha256").update(token).digest("base64");
+  return hashToken(token);
 }
 
 export function runtimeTokenPrefix(token: string): string {
-  return token.slice(0, DISPLAY_PREFIX_LENGTH);
+  return tokenPrefixOf(token);
 }
 
-/** Constant-time compare — defence in depth after the prefix-indexed lookup. */
 export function runtimeTokenMatches(token: string, storedHash: string): boolean {
-  const a = Buffer.from(hashRuntimeToken(token));
-  const b = Buffer.from(storedHash);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return tokenMatches(token, storedHash);
 }

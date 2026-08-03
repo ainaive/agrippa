@@ -349,3 +349,19 @@ export type NotificationDeliveryRow = {
   lastError: string | null;
   createdAt: string;
 };
+
+export type ApiKeyRow = {
+  id: string;
+  name: string;
+  /** First 12 chars of the issued key — the plaintext is shown only at creation. */
+  prefix: string;
+  scopes: string[];
+  projectId: string | null;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+};
+
+export type ApiKeyCreated = ApiKeyRow & { key: string };

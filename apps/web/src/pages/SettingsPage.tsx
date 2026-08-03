@@ -1,12 +1,14 @@
-import { PROVIDER_CATALOG } from "@agrippa/core";
+import { API_KEY_SCOPES, PROVIDER_CATALOG } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   BellIcon,
+  CopyIcon,
   FolderCogIcon,
   GaugeIcon,
   GitBranchIcon,
+  KeyRoundIcon,
   type LucideIcon,
   ShieldCheckIcon,
   UsersIcon,
@@ -19,6 +21,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -34,9 +37,11 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { clearLastProjectId } from "../features/lastProject";
 import { api } from "../lib/api";
-import { lt } from "../lib/format";
+import { formatTime, lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
 import type {
+  ApiKeyCreated,
+  ApiKeyRow,
   Faber,
   Grant,
   McpServerRow,
@@ -1053,12 +1058,169 @@ function NotificationsSection({ projectId }: { projectId: string }) {
   );
 }
 
+function ApiKeysSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation(["settings", "common"]);
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [scopes, setScopes] = useState<string[]>(["tasks:write", "runs:read"]);
+  // the plaintext exists only in this component's state, only until navigation
+  const [lastKey, setLastKey] = useState<ApiKeyCreated | null>(null);
+
+  const keys = useQuery({
+    queryKey: ["api-keys", projectId],
+    queryFn: () => api<ApiKeyRow[]>(`/projects/${projectId}/api-keys`),
+  });
+
+  const create = useMutation({
+    mutationFn: () =>
+      api<ApiKeyCreated>(`/projects/${projectId}/api-keys`, {
+        method: "POST",
+        json: { name: name.trim(), scopes },
+      }),
+    onSuccess: (created) => {
+      setLastKey(created);
+      setName("");
+      toast.success(t("settings:apiKeys.created"));
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", projectId] });
+    },
+    onError: toastApiError,
+  });
+
+  const revoke = useMutation({
+    mutationFn: (id: string) =>
+      api(`/projects/${projectId}/api-keys/${id}/revoke`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success(t("settings:apiKeys.revoked"));
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", projectId] });
+    },
+    onError: toastApiError,
+  });
+
+  const toggleScope = (scope: string, on: boolean) =>
+    setScopes((prev) => (on ? [...new Set([...prev, scope])] : prev.filter((s) => s !== scope)));
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">{t("settings:apiKeys.title")}</h3>
+        <p className="text-xs text-muted-foreground">{t("settings:apiKeys.hint")}</p>
+      </div>
+
+      {keys.data && keys.data.length > 0 ? (
+        <div className="divide-y rounded-lg border">
+          {keys.data.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0 flex-1">
+                <p className="truncate">
+                  <span className="font-medium">{row.name}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.prefix}…
+                  </span>
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {row.scopes.join(", ")}
+                  {" · "}
+                  {row.lastUsedAt
+                    ? t("settings:apiKeys.lastUsed", { time: formatTime(row.lastUsedAt) })
+                    : t("settings:apiKeys.neverUsed")}
+                </p>
+              </div>
+              {row.revokedAt ? (
+                <Badge variant="outline">{t("settings:apiKeys.revokedBadge")}</Badge>
+              ) : (
+                <ConfirmDialog
+                  trigger={
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={t("settings:apiKeys.revoke")}
+                    >
+                      <XIcon />
+                    </Button>
+                  }
+                  title={t("settings:apiKeys.revokeConfirm", { name: row.name })}
+                  description={t("settings:apiKeys.revokeHint")}
+                  onConfirm={() => revoke.mutate(row.id)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title={t("settings:apiKeys.empty")} icon={KeyRoundIcon} />
+      )}
+
+      {lastKey ? (
+        <div className="max-w-xl rounded-lg border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
+          <p className="font-medium">{t("settings:apiKeys.keyOnce", { name: lastKey.name })}</p>
+          <div className="mt-2 flex items-center gap-2">
+            <code className="flex-1 truncate rounded bg-muted/60 px-2 py-1 font-mono text-xs">
+              {lastKey.key}
+            </code>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={t("settings:apiKeys.copy")}
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(lastKey.key)
+                  .then(() => toast.success(t("settings:apiKeys.copied")));
+              }}
+            >
+              <CopyIcon />
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="max-w-md space-y-3">
+        <h3 className="text-sm font-medium">{t("settings:apiKeys.addTitle")}</h3>
+        <div className="space-y-1">
+          <Label htmlFor="apikey-name">{t("settings:apiKeys.name")}</Label>
+          <Input id="apikey-name" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <Label>{t("settings:apiKeys.scopes")}</Label>
+          <div className="flex flex-wrap gap-2">
+            {API_KEY_SCOPES.map((scope) => {
+              const active = scopes.includes(scope);
+              return (
+                <button
+                  key={scope}
+                  type="button"
+                  title={t(`settings:apiKeys.scopeHints.${scope.replace(":", "_")}`)}
+                  onClick={() => toggleScope(scope, !active)}
+                  className={cn(
+                    "rounded-full border px-2.5 py-0.5 font-mono text-xs",
+                    active
+                      ? "border-primary bg-primary/10 font-medium"
+                      : "text-muted-foreground hover:bg-muted/60",
+                  )}
+                >
+                  {scope}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <Button
+          disabled={create.isPending || !name.trim() || scopes.length === 0}
+          onClick={() => create.mutate()}
+        >
+          {t("settings:apiKeys.create")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
   { key: "general", icon: FolderCogIcon },
   { key: "members", icon: UsersIcon },
   { key: "resources", icon: ShieldCheckIcon },
   { key: "repos", icon: GitBranchIcon },
   { key: "notifications", icon: BellIcon },
+  { key: "apiKeys", icon: KeyRoundIcon },
   { key: "quota", icon: GaugeIcon },
 ];
 
@@ -1102,6 +1264,7 @@ export function SettingsPage() {
             {section === "resources" && <ResourcesSection projectId={projectId} />}
             {section === "repos" && <ReposSection projectId={projectId} />}
             {section === "notifications" && <NotificationsSection projectId={projectId} />}
+            {section === "apiKeys" && <ApiKeysSection projectId={projectId} />}
             {section === "quota" && <QuotaSection projectId={projectId} />}
           </CardContent>
         </Card>

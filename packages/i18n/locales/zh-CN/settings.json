@@ -4,6 +4,7 @@
     "members": "成员",
     "resources": "资源",
     "repos": "代码仓库",
+    "apiKeys": "API 密钥",
     "quota": "配额",
     "notifications": "通知"
   },
@@ -137,5 +138,30 @@
     },
     "retry": "重试",
     "retried": "投递已重新入队"
+  },
+  "apiKeys": {
+    "title": "API 密钥",
+    "hint": "对本项目的程序化访问：提交任务、读取运行记录。密钥以你的身份执行，绑定到本项目，且无法访问管理功能。",
+    "addTitle": "创建密钥",
+    "name": "名称",
+    "scopes": "权限范围",
+    "scopeHints": {
+      "tasks_write": "提交、重试与取消",
+      "runs_read": "读取任务、运行与产物",
+      "resources_read": "读取任务目录"
+    },
+    "create": "创建密钥",
+    "created": "API 密钥已创建",
+    "keyOnce": "请立即复制「{{name}}」的密钥——它只显示这一次。",
+    "copy": "复制密钥",
+    "copied": "密钥已复制",
+    "empty": "暂无 API 密钥",
+    "lastUsed": "最近使用于 {{time}}",
+    "neverUsed": "从未使用",
+    "revoke": "撤销",
+    "revokeConfirm": "撤销「{{name}}」？",
+    "revokeHint": "使用该密钥的程序将立即停止工作，且无法恢复。",
+    "revoked": "API 密钥已撤销",
+    "revokedBadge": "已撤销"
   }
 }

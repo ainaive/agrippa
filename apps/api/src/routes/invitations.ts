@@ -1,4 +1,3 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { AppError, acceptInviteSchema, invitationCreateSchema } from "@agrippa/core";
 import { accounts, auditLogs, type DbOrTx, invitations, users, uuidv7 } from "@agrippa/db";
 import { hashPassword } from "better-auth/crypto";
@@ -6,21 +5,11 @@ import { and, desc, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
+import { generateSecret as generateToken, hashesMatch, hashToken } from "../lib/bearer-tokens";
 import { validate } from "../lib/validate";
 import { requireOrgAdmin } from "../middleware/rbac";
 
-const TOKEN_BYTES = 32;
 const DEFAULT_EXPIRY_DAYS = 7;
-
-const generateToken = () => randomBytes(TOKEN_BYTES).toString("base64url");
-const hashToken = (token: string) => createHash("sha256").update(token).digest("base64");
-
-/** Constant-time compare for token hashes. */
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
 
 /**
  * Invitations are org-scoped and org_admin-gated. An invite token is stored
@@ -167,7 +156,7 @@ export const acceptInviteRoutes = new Hono<AppEnv>()
 
     // safety: a token mismatch shouldn't happen (we looked up by hash), but
     // keep the constant-time compare as a guard against future storage changes.
-    if (!safeEqual(inv.tokenHash, tokenHash))
+    if (!hashesMatch(inv.tokenHash, tokenHash))
       throw new AppError("invite_invalid", 404, "Invalid invite");
 
     const hash = await hashPassword(password);

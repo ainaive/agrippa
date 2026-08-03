@@ -8,6 +8,7 @@ import { type Auth, createAuth } from "./auth";
 import type { AppEnv } from "./context";
 import { requireSession } from "./middleware/auth";
 import { errorHandler } from "./middleware/error";
+import { apiKeyRoutes } from "./routes/api-keys";
 import { catalogRoutes } from "./routes/catalog";
 import { daemonRoutes } from "./routes/daemon";
 import { executionRoutes } from "./routes/execution";
@@ -115,6 +116,7 @@ export function createApp(deps: {
   v1.route("/templates", templateRoutes);
   v1.route("/projects", projectRoutes);
   v1.route("/projects", notificationRoutes);
+  v1.route("/projects", apiKeyRoutes);
   v1.route("/invitations", invitationRoutes);
   v1.route("/", executionRoutes);
   v1.route("/", governanceRoutes);

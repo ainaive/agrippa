@@ -42,7 +42,7 @@ import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
-import { audit, sessionActor } from "../lib/audit";
+import { audit, requestActor } from "../lib/audit";
 import { resolveRunPlan } from "../lib/run-plan";
 import { submitTask } from "../lib/submit";
 import { assertQuotaHeadroom } from "../lib/usage";
@@ -56,7 +56,7 @@ async function loadRunScoped(
 ) {
   const [run] = await c.var.db.select().from(runs).where(eq(runs.id, runId));
   if (!run) throw AppError.notFound("Run");
-  await assertProjectRole(c.var.db, c.var.user.id, run.projectId, min);
+  await assertProjectRole(c.var.db, c.var.principal, run.projectId, min);
   return run;
 }
 
@@ -271,7 +271,7 @@ export const executionRoutes = new Hono<AppEnv>()
         const { taskId, runId } = await submitTask(c.var.db, c.var.queue, {
           projectId: c.req.param("projectId"),
           actorUserId: c.var.user.id,
-          actor: sessionActor(c),
+          actor: requestActor(c),
           input: c.req.valid("json"),
         });
         return c.json({ taskId, runId }, 202);
@@ -307,7 +307,7 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(tasks)
       .where(eq(tasks.id, c.req.param("id")));
     if (!task) throw AppError.notFound("Task");
-    await assertProjectRole(c.var.db, c.var.user.id, task.projectId, "viewer");
+    await assertProjectRole(c.var.db, c.var.principal, task.projectId, "viewer");
     const taskRuns = await c.var.db
       .select({
         id: runs.id,
@@ -329,7 +329,7 @@ export const executionRoutes = new Hono<AppEnv>()
       .from(tasks)
       .where(eq(tasks.id, c.req.param("id")));
     if (!task) throw AppError.notFound("Task");
-    await assertProjectRole(db, c.var.user.id, task.projectId, "member");
+    await assertProjectRole(db, c.var.principal, task.projectId, "member");
 
     const [latest] = await db
       .select()
