@@ -11,7 +11,12 @@ import {
   taskTypes,
   tokenUsage,
 } from "@agrippa/db";
-import { fireSchedule, reconcileScheduleCalendar } from "@agrippa/orchestration";
+import {
+  DuplicateFiringError,
+  fireSchedule,
+  reconcileScheduleCalendar,
+  submitTaskIn,
+} from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
@@ -364,6 +369,108 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     // a genuinely new occurrence still fires
     expect(await fireSchedule(db, queue, row.id, fireKey())).toMatchObject({ kind: "submitted" });
     expect((await rowOf(row.id))?.lastRunId).not.toBe(firstRunId);
+  });
+
+  it("does not cancel the run its own redelivered firing created", async () => {
+    // The key check used to live in the submission, which is downstream of the
+    // concurrency policy — so `replace` reached its cancellation first, killed
+    // the run THIS firing had created, and only then discovered the duplicate
+    // and returned without putting anything back. The occurrence ended with a
+    // destroyed run and no replacement: worse than the double charge the key
+    // exists to prevent.
+    const row = await createSchedule({ concurrencyPolicy: "replace" });
+    const key = fireKey();
+
+    expect(await fireSchedule(db, queue, row.id, key)).toMatchObject({ kind: "submitted" });
+    const firstRunId = (await rowOf(row.id))?.lastRunId as string;
+
+    // the previous run is deliberately left ACTIVE — that is what arms `replace`
+    expect(await fireSchedule(db, queue, row.id, key)).toEqual({
+      kind: "skipped",
+      reason: "already_fired",
+    });
+
+    const [survivor] = await db.select().from(runs).where(eq(runs.id, firstRunId));
+    expect(survivor?.status).not.toBe("cancelled");
+    expect(survivor?.cancelRequested).toBe(false);
+    expect((await rowOf(row.id))?.lastRunId).toBe(firstRunId);
+  });
+
+  it("clears the calendar error once the repair lands", async () => {
+    // Loud-forever is the silence it replaced, arrived at from the other side:
+    // nothing else clears this column for a schedule that is not firing, so one
+    // transient blip used to mark it broken in the UI permanently.
+    const row = await createSchedule({ cron: "0 6 * * 6" });
+    let broken = true;
+    const calendar = new Map<string, { key: string; cron: string; timezone: string }>();
+    const view = {
+      list: async () => [...calendar.values()],
+      register: async (id: string, cron: string, timezone: string) => {
+        if (id === row.id && broken) throw new Error("calendar unavailable");
+        calendar.set(id, { key: id, cron, timezone });
+      },
+      unregister: async (id: string) => {
+        calendar.delete(id);
+      },
+    };
+
+    await reconcileScheduleCalendar(db, view);
+    expect((await rowOf(row.id))?.lastError).toContain("calendar unavailable");
+
+    broken = false;
+    const healed = await reconcileScheduleCalendar(db, view);
+    expect(healed.failed).toEqual([]);
+    expect((await rowOf(row.id))?.lastError).toBeNull();
+    expect((await rowOf(row.id))?.lastErrorAt).toBeNull();
+  });
+
+  it("says unregister when it was an unregister that failed", async () => {
+    // `failed` collects both verbs; reporting a teardown failure as a
+    // registration failure tells the admin the opposite of what happened
+    const row = await createSchedule({ cron: "0 6 * * 7" });
+    const calendar = new Map<string, { key: string; cron: string; timezone: string }>([
+      [row.id, { key: row.id, cron: "0 6 * * 7", timezone: "Asia/Shanghai" }],
+    ]);
+    const view = {
+      list: async () => [...calendar.values()],
+      register: async () => {},
+      unregister: async () => {
+        throw new Error("calendar unavailable");
+      },
+    };
+    await db.update(taskSchedules).set({ enabled: false }).where(eq(taskSchedules.id, row.id));
+
+    await reconcileScheduleCalendar(db, view);
+    expect((await rowOf(row.id))?.lastError).toContain("unregister failed");
+  });
+
+  it("surfaces a lost race as a duplicate firing, never a raw constraint error", async () => {
+    // Two invocations of one firing can genuinely overlap — pg-boss expires a
+    // job a live worker still holds and re-delivers it — so both pre-checks
+    // miss and one loses at the index. The loser must still speak the callers'
+    // language: a raw 23505 reaches fireSchedule's catch and pages the project,
+    // or fireTrigger's and reddens a delivery behind a run that succeeded.
+    const row = await createSchedule();
+    const args = {
+      projectId,
+      actorUserId: (await rowOf(row.id))?.createdBy as string,
+      actor: { orgId: (await rowOf(row.id))?.orgId as string },
+      input: { taskTypeId, title: "race", params },
+      originKey: `schedule:race-${Math.random()}`,
+    };
+    const settled = await Promise.allSettled([
+      db.transaction((tx) => submitTaskIn(tx, args)),
+      db.transaction((tx) => submitTaskIn(tx, args)),
+    ]);
+
+    const made = await db.select().from(runs).where(eq(runs.originKey, args.originKey));
+    expect(made.length).toBe(1);
+    for (const outcome of settled) {
+      if (outcome.status === "rejected") {
+        expect(outcome.reason).toBeInstanceOf(DuplicateFiringError);
+      }
+    }
+    expect(settled.filter((s) => s.status === "fulfilled").length).toBe(1);
   });
 
   it("does not undo a schedule created or edited while it is reconciling", async () => {

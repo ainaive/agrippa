@@ -221,6 +221,37 @@ describe.skipIf(!dbUp)("notification delivery bookkeeping (sync + sweep)", () =>
     expect(exhausted?.lastError).toBe("delivery attempts exhausted");
   });
 
+  it("leaves a delivery alone while its attempt is still in flight", async () => {
+    // Staleness is attempt age, not row age — the distinction the trigger
+    // sweeper was given in review round 1 and this, the function it was copied
+    // from, was not. Measured on createdAt alone, a delivery whose POST is in
+    // flight right now reads as stale: it is re-enqueued every tick through its
+    // backoff, and worse, the exhaustion update stamps it `failed` mid-request.
+    // The success path overwrites that back — but in the window the admin UI
+    // offers Retry, and a click re-sends a duplicate webhook to the customer.
+    const [row] = await db.select().from(notificationDeliveries).limit(1);
+    const id = row?.id as string;
+    await db
+      .update(notificationDeliveries)
+      .set({
+        status: "pending",
+        createdAt: sql`now() - interval '5 minutes'`, // old row…
+        lastAttemptAt: sql`now()`, // …claimed a moment ago
+        attempts: 8,
+      })
+      .where(eq(notificationDeliveries.id, id));
+
+    enqueued.length = 0;
+    await sweepNotificationDeliveries(db, fakeQueue);
+
+    const [after] = await db
+      .select()
+      .from(notificationDeliveries)
+      .where(eq(notificationDeliveries.id, id));
+    expect(after?.status).toBe("pending");
+    expect(enqueued).not.toContain(id);
+  });
+
   it("watermark: an endpoint added later never replays pre-activation events", async () => {
     const [late] = await db
       .insert(notificationEndpoints)

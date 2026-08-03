@@ -4,7 +4,7 @@ import {
   type RunQueue,
   type TriggerDisabledReason,
 } from "@agrippa/core";
-import { type Db, triggerDeliveries, triggerEndpoints } from "@agrippa/db";
+import { type Db, runs, triggerDeliveries, triggerEndpoints } from "@agrippa/db";
 import { and, eq, sql } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
@@ -129,6 +129,7 @@ export async function fireTrigger(
     return { kind: "disabled", reason: denied };
   }
 
+  const originKey = `trigger:${deliveryId}`;
   let submitted: { taskId: string; runId: string };
   try {
     // The run and the record that it happened commit together. Written
@@ -154,7 +155,7 @@ export async function fireTrigger(
         // property at the submission itself rather than through a neighbouring
         // write — one less thing that has to stay true for the guarantee to
         // hold, and it makes both unattended callers say it the same way.
-        originKey: `trigger:${deliveryId}`,
+        originKey,
       });
       await tx
         .update(triggerDeliveries)
@@ -178,6 +179,25 @@ export async function fireTrigger(
     // Either way the run exists: report it handled rather than announcing a
     // failure for work that succeeded.
     if (err instanceof DuplicateFiringError) {
+      // The run exists — make the delivery say so. Returning without a terminal
+      // status leaves the row `pending`, which the sweeper re-enqueues every 60s
+      // until its attempts exhaust and it lands `failed`: a red delivery for
+      // work that succeeded. The run id is re-read here because the transaction
+      // that would have returned it was rolled back by the index.
+      const [existing] = await db
+        .select({ id: runs.id, taskId: runs.taskId })
+        .from(runs)
+        .where(eq(runs.originKey, originKey));
+      await db
+        .update(triggerDeliveries)
+        .set({
+          status: "succeeded",
+          taskId: existing?.taskId ?? null,
+          runId: existing?.id ?? null,
+          lastError: null,
+          lastAttemptAt: new Date(),
+        })
+        .where(eq(triggerDeliveries.id, deliveryId));
       return { kind: "skipped", reason: "already_handled" };
     }
     const message =

@@ -202,7 +202,13 @@ export const triggerRoutes = new Hono<AppEnv>()
   // ── delivery log: payload inspection + replay ───────────────────────────────
 
   .get("/:projectId/triggers/deliveries", requireProjectRole("admin"), async (c) => {
-    const limit = Math.min(Number(c.req.query("limit") ?? 30), 100);
+    // `Number("abc")` is NaN and every comparison against it is false, so an
+    // unclamped Math.min passes NaN to `.limit()` and Postgres 500s. Same shape
+    // the notification delivery log uses.
+    const requested = Number(c.req.query("limit") ?? 30);
+    const limit = Number.isFinite(requested)
+      ? Math.min(Math.max(Math.trunc(requested), 1), 100)
+      : 30;
     const rows = await c.var.db
       .select({
         id: triggerDeliveries.id,

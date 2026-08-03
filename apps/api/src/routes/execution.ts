@@ -539,8 +539,14 @@ export const executionRoutes = new Hono<AppEnv>()
         };
       }
     }
+    // originKey stays server-side: it is a queue identity (a pg-boss job id, a
+    // delivery row id) that means nothing to a client, and shipping it through
+    // a `...run` spread would turn a column we may still want to repurpose —
+    // a client-supplied idempotency key would live here — into a compatibility
+    // surface nobody chose to declare.
+    const { originKey: _originKey, ...runView } = run;
     return c.json({
-      ...run,
+      ...runView,
       template,
       agents,
       checkpoints: checkpointRows.map(({ row, deciderName }) => ({ ...row, deciderName })),

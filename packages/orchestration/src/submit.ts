@@ -61,6 +61,52 @@ export type SubmitTaskArgs = {
 
 export type SubmittedTask = { taskId: string; runId: string };
 
+/** The partial unique index that enforces one run per unattended firing. */
+const ORIGIN_KEY_CONSTRAINT = "runs_origin_key_uq";
+
+/**
+ * Did this error come from two firings racing into the same key?
+ *
+ * The pre-check below catches every *sequential* redelivery, which is all of
+ * them in practice. This covers the one case it cannot: two invocations of the
+ * same firing genuinely concurrent — pg-boss expires a job still held by a
+ * live worker and re-delivers it, so both transactions pre-check, both miss,
+ * and one loses at the index. Without this the loser's raw
+ * `duplicate key value violates …` reaches `fireSchedule`'s catch, which pages
+ * the project with `schedule.failed`, or `fireTrigger`'s, which flips a
+ * delivery to `failed` **behind a run that succeeded** — and the `run_id IS
+ * NULL` guard on Retry then refuses to let an operator clear it.
+ *
+ * Matches on the constraint name so an unrelated 23505 is never swallowed;
+ * bun-sql reports SQLSTATE in `errno` (`code` is its own tag), and drizzle
+ * wraps, so both are checked down the cause chain.
+ */
+function isOriginKeyConflict(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e != null && depth < 4; depth += 1) {
+    const pg = e as { errno?: unknown; code?: unknown; constraint?: unknown; cause?: unknown };
+    const sqlstate = String(pg.errno ?? pg.code ?? "");
+    if (sqlstate === "23505" && String(pg.constraint ?? "").includes(ORIGIN_KEY_CONSTRAINT)) {
+      return true;
+    }
+    e = pg.cause;
+  }
+  return false;
+}
+
+/** Insert the run, translating the index's verdict into the caller's vocabulary. */
+async function insertRunOrRaiseDuplicate(
+  db: DbOrTx,
+  originKey: string | undefined,
+  values: typeof runs.$inferInsert,
+): Promise<Array<typeof runs.$inferSelect>> {
+  try {
+    return await db.insert(runs).values(values).returning();
+  } catch (err) {
+    if (originKey && isOriginKeyConflict(err)) throw new DuplicateFiringError(originKey, null);
+    throw err;
+  }
+}
+
 /**
  * This firing already produced a run; the caller should report success without
  * submitting again.
@@ -74,9 +120,10 @@ export type SubmittedTask = { taskId: string; runId: string };
 export class DuplicateFiringError extends Error {
   constructor(
     readonly originKey: string,
-    readonly runId: string,
+    /** Null when the index caught it — the aborted transaction cannot read it. */
+    readonly runId: string | null,
   ) {
-    super(`firing ${originKey} already produced run ${runId}`);
+    super(`firing ${originKey} already produced run ${runId ?? "(concurrently)"}`);
     this.name = "DuplicateFiringError";
   }
 }
@@ -167,23 +214,20 @@ export async function submitTaskIn(db: DbOrTx, args: SubmitTaskArgs): Promise<Su
     })
     .returning();
   if (!task) throw new Error("task insert failed");
-  const [run] = await db
-    .insert(runs)
-    .values({
-      taskId: task.id,
-      projectId,
-      number: 1,
-      templateVersionId: version.id,
-      faberId: agentResolution.primary.faberId,
-      executorId: agentResolution.primary.executorId,
-      agentBindings: agentResolution.bindings,
-      paramsSnapshot: parsed.data,
-      modelResolution: agentResolution.modelResolution,
-      resourceManifest,
-      originKey,
-      createdBy: actorUserId,
-    })
-    .returning();
+  const [run] = await insertRunOrRaiseDuplicate(db, originKey, {
+    taskId: task.id,
+    projectId,
+    number: 1,
+    templateVersionId: version.id,
+    faberId: agentResolution.primary.faberId,
+    executorId: agentResolution.primary.executorId,
+    agentBindings: agentResolution.bindings,
+    paramsSnapshot: parsed.data,
+    modelResolution: agentResolution.modelResolution,
+    resourceManifest,
+    originKey,
+    createdBy: actorUserId,
+  });
   if (!run) throw new Error("run insert failed");
   await db.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
   // with the mutation: a committed mutation without its audit row would break
@@ -208,11 +252,21 @@ export async function submitTask(
   args: SubmitTaskArgs,
 ): Promise<SubmittedTask> {
   const submitted = await db.transaction((tx) => submitTaskIn(tx, args));
-  // Post-commit: the worker's straggler sweep is the delivery guarantee, so a
-  // send failure must not surface as a submission failure — the run exists and
-  // will execute either way, and telling the caller otherwise invites a retry
-  // that creates a second one.
-  await enqueueAfterCommit(
+  // Post-commit, and deliberately NOT awaited. The worker's straggler sweep is
+  // the delivery guarantee, so a send failure must not surface as a submission
+  // failure — the run exists and will execute either way, and telling the
+  // caller otherwise invites a retry that creates a second one.
+  //
+  // Awaiting invites the same retry by a slower route: `enqueueAfterCommit`
+  // bounds failure but never latency, pg-boss's pool waits indefinitely for a
+  // connection, and this function is reached by `POST /projects/:id/tasks` —
+  // the first entry on the API-key allow-list. A stalled database would hold
+  // the response until Bun's idleTimeout killed the socket, and a machine
+  // client answers a connection reset with a retry. That retry has nothing to
+  // dedupe against: `originKey` is null for the human and API-key paths by
+  // design, so it would be a second task, a second run, and a second charge.
+  // Safe to leave un-awaited because `enqueueAfterCommit` cannot reject.
+  void enqueueAfterCommit(
     () => queue?.enqueueRun(submitted.runId) ?? Promise.resolve(),
     `run ${submitted.runId}`,
   );

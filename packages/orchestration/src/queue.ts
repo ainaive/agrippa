@@ -110,6 +110,11 @@ export async function createRunQueue(
   // the delivery semantics no longer have to carry the guarantee. Tightening
   // them here would also need the converge-by-recreate dance below, since
   // createQueue is upsert-blind to options.
+  //
+  // Do NOT give this queue a dead-letter queue without revisiting that: the
+  // redrive path re-creates a job with a NEW id, and the id is the firing's
+  // identity — a redriven job would mint a second `origin_key` and a second
+  // charged run for one cron occurrence.
   await boss.createQueue(QUEUE_SCHEDULE_FIRE);
   // trigger.fire needs the same treatment as the delivery queue, and for the
   // same reason: enqueueTriggerDelivery leans on singletonKey to keep a

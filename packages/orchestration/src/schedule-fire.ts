@@ -7,7 +7,7 @@ import {
   type ScheduleDisabledReason,
 } from "@agrippa/core";
 import { type Db, runs, taskSchedules } from "@agrippa/db";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
 import { requestRunCancellation } from "./engine/run-lifecycle";
@@ -17,6 +17,12 @@ import { DuplicateFiringError, submitTaskIn } from "./submit";
 
 /** Calendar keys are schedule ids; anything else cannot have a row. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Marks a `lastError` as the reconciler's rather than a firing's. The column
+ * is shared, and only the writer that put a message there may clear it.
+ */
+const CALENDAR_ERROR_PREFIX = "calendar ";
 
 export type ScheduleFireOutcome =
   | { kind: "submitted"; taskId: string; runId: string }
@@ -56,6 +62,9 @@ export type ScheduleFireOutcome =
  * unconditionally, `replace` cancels the run this very firing created and then
  * submits another, and `skip` only holds while the previous run is still
  * running — which, at a ~15 minute redelivery latency, it usually is not.
+ *
+ * The key is resolved at the very top, before the concurrency policy and
+ * before authority: those have side effects, and `replace`'s is destructive.
  */
 export async function fireSchedule(
   db: Db,
@@ -65,6 +74,22 @@ export async function fireSchedule(
 ): Promise<ScheduleFireOutcome> {
   const [schedule] = await db.select().from(taskSchedules).where(eq(taskSchedules.id, scheduleId));
   if (!schedule?.enabled) return { kind: "skipped", reason: "disabled" };
+
+  // Before ANY observable action, because everything below this line has one.
+  // A redelivery must change nothing, and discovering it at the submission —
+  // where the atomicity guard lives — is already too late: `replace` reaches
+  // its cancellation first and kills the run THIS firing created, then finds
+  // the duplicate and returns without putting anything back. The occurrence
+  // ends with a destroyed run and no replacement, which is worse than the
+  // double-charge the key exists to prevent. `submitTaskIn` still re-checks
+  // inside the transaction; that is what makes it atomic, this is what makes
+  // it harmless.
+  const originKey = `schedule:${fireKey}`;
+  const [alreadyFired] = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(eq(runs.originKey, originKey));
+  if (alreadyFired) return { kind: "skipped", reason: "already_fired" };
 
   const disable = async (reason: ScheduleDisabledReason): Promise<ScheduleFireOutcome> => {
     // Stopping and saying so commit together. Flipping `enabled` first and
@@ -189,7 +214,7 @@ export async function fireSchedule(
           params: applyScheduleTokens(schedule.params, firedAt, schedule.timezone),
           agents: schedule.agentOverrides,
         },
-        originKey: `schedule:${fireKey}`,
+        originKey,
       });
       await tx
         .update(taskSchedules)
@@ -291,6 +316,7 @@ export async function reconcileScheduleCalendar(
       cron: taskSchedules.cron,
       timezone: taskSchedules.timezone,
       enabled: taskSchedules.enabled,
+      lastError: taskSchedules.lastError, // to know whose message it is before clearing
     })
     .from(taskSchedules);
 
@@ -317,9 +343,21 @@ export async function reconcileScheduleCalendar(
   let registered = 0;
   let unregistered = 0;
   const failed: Array<{ id: string; error: string }> = [];
+  // only the subset that has a row — an orphan key has nothing to write to
+  const failedRows = new Map<string, string>();
+  const note = (id: string, verb: "register" | "unregister", err: unknown, hasRow: boolean) => {
+    const detail = err instanceof Error ? err.message : String(err);
+    failed.push({ id, error: detail });
+    // truncated because it is a display string, not an identity: a driver
+    // stack trace would otherwise render raw into a one-line amber banner
+    if (hasRow)
+      failedRows.set(id, `${CALENDAR_ERROR_PREFIX}${verb} failed: ${detail}`.slice(0, 500));
+  };
+
   for (const row of rows) {
     // isolated per row: this is a repair loop, and one unrepairable schedule
     // must not stop the others being repaired
+    let verb: "register" | "unregister" = "register";
     try {
       const entry = live.get(row.id);
       if (row.enabled) {
@@ -327,16 +365,23 @@ export async function reconcileScheduleCalendar(
           await calendar.register(row.id, row.cron, row.timezone);
           registered += 1;
         }
-      } else if (entry && (await safeToUnregister(row.id))) {
-        await calendar.unregister(row.id);
-        unregistered += 1;
+      } else if (entry) {
+        verb = "unregister";
+        if (await safeToUnregister(row.id)) {
+          await calendar.unregister(row.id);
+          unregistered += 1;
+        }
       }
       live.delete(row.id);
     } catch (err) {
       live.delete(row.id); // not an orphan; it has a row, just an unhappy one
-      failed.push({ id: row.id, error: err instanceof Error ? err.message : String(err) });
+      note(row.id, verb, err, true);
     }
   }
+
+  // counted before the loop drains it: `failed` can name an orphan, and a
+  // denominator that excluded them could print "of 3" above five failures
+  const orphans = live.size;
 
   // whatever is left in the calendar has no row in the snapshot — but the
   // snapshot is older than this loop, so confirm before tearing it out
@@ -347,7 +392,7 @@ export async function reconcileScheduleCalendar(
         unregistered += 1;
       }
     } catch (err) {
-      failed.push({ id: key, error: err instanceof Error ? err.message : String(err) });
+      note(key, "unregister", err, false);
     }
   }
 
@@ -356,12 +401,38 @@ export async function reconcileScheduleCalendar(
   // admin already looks — the same amber `lastError` a failed firing writes,
   // prefixed so the two stay distinguishable — and hand the list back so the
   // caller can log it with its own logger.
-  for (const { id, error } of failed) {
+  //
+  // `is distinct from` matters more than it looks: this runs every 60s on
+  // every replica, so an unguarded write would re-stamp an unchanged message
+  // N schedules × R workers times a minute — dead tuples on a read-mostly
+  // table, at exactly the moment a calendar-wide outage has made every
+  // schedule fail at once.
+  for (const [id, message] of failedRows) {
     await db
       .update(taskSchedules)
-      .set({ lastError: `calendar registration failed: ${error}`, lastErrorAt: new Date() })
-      .where(eq(taskSchedules.id, id))
+      .set({ lastError: message, lastErrorAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(eq(taskSchedules.id, id), sql`${taskSchedules.lastError} is distinct from ${message}`),
+      )
       .catch(() => {}); // the reporting path must not itself break the sweep
   }
-  return { considered: rows.length, registered, unregistered, failed };
+
+  // And clear it once the repair lands. Without this the first transient blip
+  // marks a schedule broken forever: a *disabled* one can never clear it (only
+  // a successful firing or a PATCH that happens to carry `enabled` does), and
+  // a weekly one carries the banner for a week after the tick that fixed it.
+  // Loud-forever decays into a banner nobody reads, which is the silence this
+  // was meant to replace, arrived at from the other side. Scoped by prefix so
+  // a real firing error is never cleared by a calendar repair.
+  const healed = rows
+    .filter((r) => r.lastError?.startsWith(CALENDAR_ERROR_PREFIX) && !failedRows.has(r.id))
+    .map((r) => r.id);
+  if (healed.length > 0) {
+    await db
+      .update(taskSchedules)
+      .set({ lastError: null, lastErrorAt: null, updatedAt: new Date() })
+      .where(inArray(taskSchedules.id, healed))
+      .catch(() => {});
+  }
+  return { considered: rows.length + orphans, registered, unregistered, failed };
 }

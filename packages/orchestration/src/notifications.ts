@@ -7,7 +7,7 @@ import {
   runEvents,
   runs,
 } from "@agrippa/db";
-import { and, eq, inArray, lt, notExists, sql } from "drizzle-orm";
+import { and, eq, inArray, notExists, sql } from "drizzle-orm";
 import { enqueueAfterCommit } from "./queue";
 
 /**
@@ -264,6 +264,17 @@ export async function sweepNotificationDeliveries(db: Db, queue: RunQueue): Prom
     }));
   await insertAndEnqueue(db, queue, values);
 
+  // Attempt age, not row age — the distinction `sweepTriggerDeliveries` was
+  // given in review round 1 and this, the function it was copied from, was not.
+  // Measured on `createdAt` alone, a delivery re-attempted a moment ago still
+  // reads as stale, so it is re-enqueued every tick throughout its backoff
+  // sequence; and worse, the exhaustion update below stamps `failed` on a row
+  // whose POST is still in flight. The success path then overwrites it back —
+  // but in that window the admin UI offers Retry, and a click re-sends a
+  // duplicate webhook to the customer's endpoint. `coalesce` covers the
+  // never-claimed row, whose creation IS its clock.
+  const untouched = sql`coalesce(${notificationDeliveries.lastAttemptAt}, ${notificationDeliveries.createdAt}) < ${STALE_PENDING}`;
+
   await db
     .update(notificationDeliveries)
     .set({
@@ -275,18 +286,14 @@ export async function sweepNotificationDeliveries(db: Db, queue: RunQueue): Prom
       and(
         eq(notificationDeliveries.status, "pending"),
         sql`${notificationDeliveries.attempts} >= ${MAX_SWEPT_ATTEMPTS}`,
+        untouched,
       ),
     );
 
   const stale = await db
     .select({ id: notificationDeliveries.id })
     .from(notificationDeliveries)
-    .where(
-      and(
-        eq(notificationDeliveries.status, "pending"),
-        lt(notificationDeliveries.createdAt, STALE_PENDING),
-      ),
-    )
+    .where(and(eq(notificationDeliveries.status, "pending"), untouched))
     .orderBy(notificationDeliveries.createdAt)
     .limit(STALE_BATCH);
   for (const row of stale) {

@@ -61,10 +61,14 @@ function parseDeliveryId(header: string | undefined): string | null {
   const trimmed = header?.trim();
   if (!trimmed) return null;
   if (trimmed.length > TRIGGER_DELIVERY_ID_MAX_LENGTH) {
+    // in `details`, not the message: the error handler prefers the localized
+    // string for a known code, so a message built here never reaches a client.
+    // The sender needs the header name and the ceiling to act on the rejection.
     throw new AppError(
       "trigger_delivery_id_too_long",
       400,
       `${TRIGGER_DELIVERY_ID_HEADER} must be at most ${TRIGGER_DELIVERY_ID_MAX_LENGTH} characters`,
+      { header: TRIGGER_DELIVERY_ID_HEADER, maxLength: TRIGGER_DELIVERY_ID_MAX_LENGTH },
     );
   }
   return trimmed;
