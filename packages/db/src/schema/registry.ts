@@ -207,20 +207,6 @@ export const providerCatalog = pgTable("provider_catalog", {
   createdAt: createdAtCol(),
 });
 
-// ── Executor registrations ────────────────────────────────────────────────────
-
-/**
- * Which executors this deployment's workers actually registered (codex, for
- * example, registers only when its CLI and auth are present). Workers upsert
- * at boot and heartbeat on the sweeper interval; the API treats recent rows
- * as the live set and rejects submissions that bind an unavailable executor —
- * the static core catalog says what CAN exist, this table says what DOES.
- */
-export const executorRegistrations = pgTable("executor_registrations", {
-  executorId: text("executor_id").primaryKey(),
-  registeredAt: tstz("registered_at").notNull().defaultNow(),
-});
-
 /** What one worker advertises for one executor it constructed at boot. */
 export type WorkerExecutorAd = {
   id: string;
@@ -230,9 +216,9 @@ export type WorkerExecutorAd = {
 
 /**
  * One row per worker container (hostname inside compose = container id) — the
- * first slice of the per-worker heartbeat row deferred past M1. Registrations
- * above are global per executor, so they cannot prove each replica came up;
- * this table can. `consumersReadyAt` is written only after boss.work() has
+ * first slice of the per-worker heartbeat row deferred past M1; since the M2
+ * post-merge cleanup it is also the ONLY source of executor availability
+ * (the global executor_registrations table is gone). `consumersReadyAt` is written only after boss.work() has
  * returned for every consumer, which is what deploy verification requires —
  * a worker that registers and then wedges in consumer setup never writes it.
  *

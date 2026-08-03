@@ -2,7 +2,6 @@ import {
   EXECUTOR_ID_PATTERN,
   executorSubsets,
   isExecutorId,
-  QUEUE_RUN_EXECUTE,
   runExecuteQueueName,
   runExecuteSubsetQueues,
 } from "@agrippa/core";
@@ -26,8 +25,7 @@ export type RunQueueLogger = { warn(message: string): void };
  *   decline — a sweeper-mediated steal loop that can starve the run. Sets no
  *   central worker covers always route remote, and ANY worker can host the
  *   engine for a remote run (RemoteExecutor proxies), so polling them broadly
- *   is safe;
- * - the legacy `run.execute` queue (deploy-skew fallback).
+ *   is safe.
  *
  * Daemon-supplied ids are untrusted input from another trust domain: ids must
  * be catalog members (registration enforces this too, but rows may predate
@@ -73,12 +71,10 @@ export function selectRunQueues(input: {
         input.logger.warn(
           `run queue set hit the ${MAX_TOTAL_QUEUES} cap — dropping the remainder; check runtime advertisements`,
         );
-        names.add(QUEUE_RUN_EXECUTE);
         return [...names];
       }
       names.add(runExecuteQueueName(subset));
     }
   }
-  names.add(QUEUE_RUN_EXECUTE);
   return [...names];
 }

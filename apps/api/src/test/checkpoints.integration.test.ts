@@ -2,7 +2,6 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
 import {
   checkpoints,
-  executorRegistrations,
   fabri,
   orchestrationTemplates,
   repoConnections,
@@ -319,13 +318,13 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
     expect(noProvider.status).toBe(400);
     expect((await jsonOf<{ code: string }>(noProvider)).code).toBe("model_unresolvable");
 
-    // with worker heartbeats present, an executor nobody registered (or whose
-    // registration is stale) is rejected before model resolution
-    await db.insert(executorRegistrations).values([
-      { executorId: "claude-agent-sdk", registeredAt: new Date() },
-      { executorId: "fake", registeredAt: new Date() },
-      { executorId: "codex-cli", registeredAt: new Date(Date.now() - 60 * 60 * 1000) }, // stale
-    ]);
+    // availability now derives from live worker heartbeats alone
+    // (executor_registrations is gone): codex is intentionally absent — a
+    // worker that stops heartbeating simply drops out of the union
+    await db.insert(workerHeartbeats).values({
+      containerId: "w-avail",
+      executors: [{ id: "claude-agent-sdk" }, { id: "fake" }],
+    });
     const unavailable = await member.request(`/api/v1/projects/${projectId}/tasks`, {
       method: "POST",
       json: {
@@ -364,11 +363,11 @@ describe.skipIf(!dbUp)("checkpoint interaction api (respond, comments, agent slo
   });
 
   it("rejects a run no single worker covers (executor-set routing gate)", async () => {
-    // Jobs route to ONE worker's executor-set queue, so union availability is
-    // not enough. Legacy registrations (seeded above) still carry 'fake' in
-    // the union — the per-slot check passes — but neither advertising worker
-    // has it, so the set {fake} fits no worker and the run could never be
-    // claimed.
+    // Jobs route to ONE worker's executor-set queue, so the run's whole set
+    // must fit a single live worker. Clear the availability fixture first:
+    // with only {claude} and {codex} workers live, a fake-requiring run has
+    // no host and could never be claimed.
+    await db.delete(workerHeartbeats);
     await db.insert(workerHeartbeats).values([
       { containerId: "w-cov-1", executors: [{ id: "claude-agent-sdk" }] },
       { containerId: "w-cov-2", executors: [{ id: "codex-cli" }] },

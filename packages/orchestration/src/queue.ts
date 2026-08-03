@@ -2,7 +2,6 @@ import {
   type ApprovalExpirePayload,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
-  QUEUE_RUN_EXECUTE,
   type RunQueue,
   requiredExecutorIds,
   runExecuteQueueName,
@@ -50,9 +49,8 @@ export async function createRunQueue(
   const boss = new PgBoss({ connectionString });
   boss.on("error", (err: Error) => console.error("[pg-boss]", err));
   await boss.start();
-  await boss.createQueue(QUEUE_RUN_EXECUTE);
   await boss.createQueue(QUEUE_APPROVAL_EXPIRE);
-  const createdQueues = new Set<string>([QUEUE_RUN_EXECUTE, QUEUE_APPROVAL_EXPIRE]);
+  const createdQueues = new Set<string>([QUEUE_APPROVAL_EXPIRE]);
   const ensureQueue = async (name: string): Promise<void> => {
     if (createdQueues.has(name)) return;
     await boss.createQueue(name);
@@ -78,7 +76,13 @@ export async function createRunQueue(
     stop: () => boss.stop({ graceful: true }),
     async enqueueRun(runId: string): Promise<void> {
       const executorIds = await opts.resolveRunExecutors(runId);
-      const name = executorIds.length > 0 ? runExecuteQueueName(executorIds) : QUEUE_RUN_EXECUTE;
+      // Post-M2-flush there is no legacy fallback queue: a run whose executor
+      // set cannot be derived has no consumer, so failing the enqueue loudly
+      // beats parking the job on a queue nobody polls.
+      if (executorIds.length === 0) {
+        throw new Error(`enqueueRun: cannot derive an executor set for run ${runId}`);
+      }
+      const name = runExecuteQueueName(executorIds);
       await ensureQueue(name);
       await boss.send(name, { runId }, { singletonKey: runId, retryLimit: 2, retryDelay: 5 });
     },

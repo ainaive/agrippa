@@ -1,4 +1,4 @@
-import { type Db, executorRegistrations, runtimes, workerHeartbeats } from "@agrippa/db";
+import { type Db, runtimes, workerHeartbeats } from "@agrippa/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 /** Advertisements older than this are a worker that no longer runs that config. */
@@ -21,12 +21,11 @@ export type LiveWorkerExecutors = {
 };
 
 /**
- * The deployment's live executor capability, from per-worker heartbeats. The
- * deployment-wide `executor_registrations` rows are unioned in as a fallback
- * until the table is dropped post-merge — during deploy skew an old worker
- * heartbeats without an advertisement, and its executors must not read as
- * vanished. With `orgId`, the org's live remote runtimes join both the union
- * and the coverage sets — a daemon-only executor is submittable (ADR-0017).
+ * The deployment's live executor capability, from per-worker heartbeats
+ * alone (the deployment-wide `executor_registrations` fallback is gone —
+ * every deployed worker advertises per-heartbeat now). With `orgId`, the
+ * org's live remote runtimes join both the union and the coverage sets — a
+ * daemon-only executor is submittable (ADR-0017).
  */
 export async function liveWorkerExecutors(
   db: Db,
@@ -36,10 +35,6 @@ export async function liveWorkerExecutors(
     .select({ executors: workerHeartbeats.executors })
     .from(workerHeartbeats)
     .where(gte(workerHeartbeats.heartbeatAt, liveWindow));
-  const legacy = await db
-    .select({ executorId: executorRegistrations.executorId })
-    .from(executorRegistrations)
-    .where(gte(executorRegistrations.registeredAt, liveWindow));
   const sets = workers.map((w) => (w.executors ?? []).map((e) => e.id));
   if (opts?.orgId) {
     const liveRuntimes = await db
@@ -55,7 +50,7 @@ export async function liveWorkerExecutors(
     sets.push(...liveRuntimes.map((r) => (r.executors ?? []).map((e) => e.id)));
   }
   return {
-    union: new Set([...sets.flat(), ...legacy.map((r) => r.executorId)]),
+    union: new Set(sets.flat()),
     sets,
   };
 }

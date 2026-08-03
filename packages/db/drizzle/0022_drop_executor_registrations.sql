@@ -1,0 +1,1 @@
+DROP TABLE "executor_registrations" CASCADE;

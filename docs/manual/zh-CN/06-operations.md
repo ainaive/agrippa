@@ -91,7 +91,7 @@ docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env 
 
 ## 执行器
 
-worker 会在启动时以及每 60 秒的心跳中，把自己真正能跑的执行器写入 `executor_registrations`；没有任何 worker 注册过的执行器，API 会直接拒绝提交。`claude-agent-sdk` 与 `fake` 总会注册。`codex-cli` 只有在 worker 的 `PATH` 上存在足够新、支持 `codex exec --ignore-user-config` / `--ignore-rules` 的 Codex CLI 时才会注册——worker 镜像会把它装在 `/opt/codex`，该检查不通过时镜像构建会直接失败。
+worker 会在每个容器自己的心跳行（`worker_heartbeats`，每 60 秒刷新）上通告自己真正能跑的执行器；没有任何在线 worker 通告的执行器，API 会直接拒绝提交——完整执行器集合无法被单个 worker 覆盖的任务同样会被拒绝。`claude-agent-sdk` 与 `fake` 总会注册。`codex-cli` 只有在 worker 的 `PATH` 上存在足够新、支持 `codex exec --ignore-user-config` / `--ignore-rules` 的 Codex CLI 时才会注册——worker 镜像会把它装在 `/opt/codex`，该检查不通过时镜像构建会直接失败。
 
 这一点很关键，因为**需求交付**把评审代理位绑定在了 `codex-cli` 上。每次部署后都应确认：
 
@@ -99,7 +99,7 @@ worker 会在启动时以及每 60 秒的心跳中，把自己真正能跑的执
 docker compose -p agrippa logs worker | grep -i codex
 docker compose -p agrippa exec worker codex --version
 docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
-  -c "select executor_id, registered_at from executor_registrations order by 1;"
+  -c "select container_id, executors, heartbeat_at from worker_heartbeats order by heartbeat_at desc;"
 ```
 
 即使执行器已注册，步骤解析到的服务商仍需要凭证。`openai` 与 `anthropic` 可用 worker 环境变量（如 `OPENAI_API_KEY`）；`dashscope` 以及组织自行注册的自定义服务商**只能用项目凭证**。注意 `dashscope` 根本无法支撑 `codex-cli` 代理位——它在目录中只提供 `anthropic` 线路协议，因为 Codex ≥ 0.122 移除了百炼 OpenAI 兼容模式所用的 chat 线路 API。这类代理位请改指向提供 `openai` 协议的服务商，或改用 `claude-agent-sdk`。

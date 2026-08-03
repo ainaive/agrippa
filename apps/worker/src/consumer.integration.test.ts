@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { QUEUE_RUN_EXECUTE, runExecuteQueueName, runExecuteSubsetQueues } from "@agrippa/core";
+import { runExecuteQueueName, runExecuteSubsetQueues } from "@agrippa/core";
 import { createDb } from "@agrippa/db";
 import { type BossQueue, createRunQueue } from "@agrippa/orchestration";
 import { sql } from "drizzle-orm";
@@ -76,12 +76,13 @@ describe.skipIf(!dbUp)("executor-set queue routing + fetch loop", () => {
     expect(row?.name).toBe(runExecuteQueueName([EXEC_A, EXEC_B]));
   });
 
-  it("an unknown run falls back to the legacy queue", async () => {
+  it("an unresolvable run fails the enqueue loudly (no legacy fallback queue)", async () => {
     const q = await setup();
     const runId = Bun.randomUUIDv7(); // no resolver entry → []
-    await q.enqueueRun(runId);
-    const row = await jobRow(runId);
-    expect(row?.name).toBe(QUEUE_RUN_EXECUTE);
+    // post-M2-flush nothing consumes `run.execute` — parking the job there
+    // would strand it silently, so the enqueue must throw instead
+    await expect(q.enqueueRun(runId)).rejects.toThrow(/cannot derive an executor set/);
+    expect(await jobRow(runId)).toBeUndefined();
   });
 
   it("a worker consumes only queues within its own executor set", async () => {

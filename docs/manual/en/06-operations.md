@@ -92,7 +92,7 @@ Documented in `infra/env/.env.example`; the full set:
 
 ## Executors
 
-Workers register the executors they can actually run, at boot and on a 60 s heartbeat, into `executor_registrations`; the API refuses to accept a submission for an executor no worker has. `claude-agent-sdk` and `fake` always register. `codex-cli` registers only if a Codex CLI new enough for `codex exec --ignore-user-config` / `--ignore-rules` is on the worker's `PATH` — the worker image installs one at `/opt/codex` and its build fails if that check doesn't pass.
+Workers advertise the executors they can actually run on their per-container heartbeat row (`worker_heartbeats`, refreshed every 60 s); the API refuses a submission for an executor no live worker advertises — and one whose full executor set fits no single worker. `claude-agent-sdk` and `fake` always register. `codex-cli` registers only if a Codex CLI new enough for `codex exec --ignore-user-config` / `--ignore-rules` is on the worker's `PATH` — the worker image installs one at `/opt/codex` and its build fails if that check doesn't pass.
 
 ## Remote runtime daemons (bring your own compute)
 
@@ -117,7 +117,7 @@ This matters because **Requirement Delivery** binds its reviewer slot to `codex-
 docker compose -p agrippa logs worker | grep -i codex
 docker compose -p agrippa exec worker codex --version
 docker compose -p agrippa exec -T postgres psql -U agrippa -d agrippa \
-  -c "select executor_id, registered_at from executor_registrations order by 1;"
+  -c "select container_id, executors, heartbeat_at from worker_heartbeats order by heartbeat_at desc;"
 ```
 
 A registered executor still needs a credential for the provider a step resolves to. `openai` takes worker env (`OPENAI_API_KEY`), so does `anthropic`; `dashscope` and org-registered custom providers are **project-credential only**. Note that `dashscope` cannot back a `codex-cli` slot at all — its catalog entry serves the `anthropic` wire protocol only, because Codex ≥ 0.122 dropped the chat wire API Bailian's OpenAI-compatible mode speaks. Point such a slot at a provider that serves the `openai` protocol, or at `claude-agent-sdk`.

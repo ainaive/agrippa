@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { QUEUE_RUN_EXECUTE, runExecuteQueueName } from "@agrippa/core";
+import { runExecuteQueueName } from "@agrippa/core";
 import { selectRunQueues } from "./run-queues";
 
 const collect = (): { warnings: string[]; logger: { warn: (m: string) => void } } => {
@@ -20,7 +20,6 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
     // the claude queue is the capable peer's to poll, not ours
     expect(names).not.toContain(runExecuteQueueName(["claude-agent-sdk"]));
     expect(names).toContain(runExecuteQueueName(["codex-cli"]));
-    expect(names).toContain(QUEUE_RUN_EXECUTE);
   });
 
   it("polls runtime sets no central worker covers (daemon-only executors)", () => {
@@ -107,8 +106,7 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
       logger,
       isAllowedId: () => true, // the catalog gate would empty these ads first
     });
-    expect(names.length).toBeLessThanOrEqual(1025); // cap + the legacy queue
+    expect(names.length).toBeLessThanOrEqual(1024);
     expect(warnings.some((w) => w.includes("cap"))).toBe(true);
-    expect(names).toContain(QUEUE_RUN_EXECUTE); // the fallback survives the cap
   });
 });

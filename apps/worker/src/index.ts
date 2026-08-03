@@ -7,14 +7,7 @@ import {
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
 } from "@agrippa/core";
-import {
-  awaitSchema,
-  createDb,
-  executorRegistrations,
-  notificationDeliveries,
-  runs,
-  runtimes,
-} from "@agrippa/db";
+import { awaitSchema, createDb, notificationDeliveries, runs, runtimes } from "@agrippa/db";
 import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
@@ -121,25 +114,6 @@ const queue = await createRunQueue(process.env.DATABASE_URL as string, {
   resolveRunExecutors: dbRunExecutorResolver(db),
 });
 
-/**
- * Deployment-wide registration rows — now a deploy-skew dual-write only: the
- * API reads per-worker advertisements from worker_heartbeats and unions these
- * in so an old worker's executors don't read as vanished mid-deploy. The
- * table and this writer are dropped by a post-merge cleanup.
- */
-async function registerExecutors(): Promise<void> {
-  for (const executorId of Object.keys(executors)) {
-    await db
-      .insert(executorRegistrations)
-      .values({ executorId, registeredAt: new Date() })
-      .onConflictDoUpdate({
-        target: executorRegistrations.executorId,
-        set: { registeredAt: new Date() },
-      });
-  }
-}
-await registerExecutors();
-
 const deps: EngineDeps = {
   db,
   executors,
@@ -167,7 +141,7 @@ const consumer = createRunConsumer(db, deps, queue);
  * can serve (the engine runs centrally even when the executor is remote, so
  * daemon-only sets need SOME worker fetching their jobs — but sets a capable
  * central worker covers are left to that worker, or an incapable fetcher
- * would route central and decline in a steal loop), and the legacy queue.
+ * would route central and decline in a steal loop).
  * Recomputed on the sweeper tick because runtimes and workers come and go.
  */
 const knownQueues = new Set<string>();
@@ -329,9 +303,6 @@ setInterval(async () => {
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
     for (const runId of await findStrandedCheckpointRuns(db)) await queue.enqueueRun(runId);
-
-    // executor-availability heartbeat (the API's live window is minutes-wide)
-    await registerExecutors();
 
     // notification backstop: backfill missed events, re-enqueue stale rows
     await sweepNotificationDeliveries(db, queue);
