@@ -35,6 +35,14 @@
     "title": "Schedule could not run",
     "body": "The schedule “{{scheduleName}}” in {{projectName}} produced no run this time: {{error}}. It stays enabled and will try again."
   },
+  "triggerDisabled": {
+    "title": "Trigger stopped",
+    "body": "The webhook trigger “{{triggerName}}” in {{projectName}} was disabled and will accept nothing further: {{reason}}."
+  },
+  "triggerFailed": {
+    "title": "Trigger could not run",
+    "body": "A request to the webhook trigger “{{triggerName}}” in {{projectName}} produced no run: {{error}}. The sender was already acknowledged, so nobody else will hear about this."
+  },
   "test": {
     "title": "Test notification",
     "body": "This is a test notification from Agrippa for project {{projectName}}."

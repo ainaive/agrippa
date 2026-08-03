@@ -2,14 +2,14 @@ import {
   AppError,
   applyScheduleTokens,
   isTerminalRunStatus,
-  projectRoleAtLeast,
   type RunQueue,
   type RunStatus,
   type ScheduleDisabledReason,
 } from "@agrippa/core";
-import { type Db, projectMembers, projects, runs, taskSchedules, taskTypes } from "@agrippa/db";
-import { and, eq } from "drizzle-orm";
+import { type Db, runs, taskSchedules } from "@agrippa/db";
+import { eq } from "drizzle-orm";
 import { auditAs } from "./audit";
+import { checkWorkAuthority } from "./authority";
 import { requestRunCancellation } from "./engine/run-lifecycle";
 import { notifyProjectEvent } from "./notifications";
 import { submitTask } from "./submit";
@@ -51,7 +51,7 @@ export async function fireSchedule(
   scheduleId: string,
 ): Promise<ScheduleFireOutcome> {
   const [schedule] = await db.select().from(taskSchedules).where(eq(taskSchedules.id, scheduleId));
-  if (!schedule || !schedule.enabled) return { kind: "skipped", reason: "disabled" };
+  if (!schedule?.enabled) return { kind: "skipped", reason: "disabled" };
 
   const disable = async (reason: ScheduleDisabledReason): Promise<ScheduleFireOutcome> => {
     await db
@@ -93,31 +93,12 @@ export async function fireSchedule(
 
   // ── permanent conditions ───────────────────────────────────────────────────
 
-  const [project] = await db
-    .select({ status: projects.status })
-    .from(projects)
-    .where(eq(projects.id, schedule.projectId));
-  if (!project || project.status !== "active") return disable("project_archived");
-
-  const [taskType] = await db
-    .select({ enabled: taskTypes.enabled })
-    .from(taskTypes)
-    .where(eq(taskTypes.id, schedule.taskTypeId));
-  if (!taskType?.enabled) return disable("task_type_gone");
-
-  // the same gate POST /projects/:id/tasks applies to a human
-  const [membership] = await db
-    .select({ role: projectMembers.role })
-    .from(projectMembers)
-    .where(
-      and(
-        eq(projectMembers.projectId, schedule.projectId),
-        eq(projectMembers.userId, schedule.createdBy),
-      ),
-    );
-  if (!membership || !projectRoleAtLeast(membership.role, "member")) {
-    return disable("owner_lost_access");
-  }
+  const denied = await checkWorkAuthority(db, {
+    projectId: schedule.projectId,
+    taskTypeId: schedule.taskTypeId,
+    ownerId: schedule.createdBy,
+  });
+  if (denied) return disable(denied);
 
   // ── overlap with the previous firing ───────────────────────────────────────
 

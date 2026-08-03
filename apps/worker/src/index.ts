@@ -7,7 +7,9 @@ import {
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
   QUEUE_SCHEDULE_FIRE,
+  QUEUE_TRIGGER_FIRE,
   type ScheduleFirePayload,
+  type TriggerFirePayload,
 } from "@agrippa/core";
 import {
   awaitSchema,
@@ -30,6 +32,7 @@ import {
   FakeScmService,
   findStrandedCheckpointRuns,
   fireSchedule,
+  fireTrigger,
   InProcessEventBus,
   liveCentralWorkerSets,
   RedisEventBus,
@@ -274,6 +277,16 @@ await queue.boss.work(QUEUE_SCHEDULE_FIRE, async (jobs: Job<ScheduleFirePayload>
     // infrastructure fault, which pg-boss should retry.
     const outcome = await fireSchedule(db, queue, job.data.scheduleId);
     deps.logger.info(`schedule ${job.data.scheduleId} fired`, { outcome: outcome.kind });
+  }
+});
+
+await queue.boss.work(QUEUE_TRIGGER_FIRE, async (jobs: Job<TriggerFirePayload>[]) => {
+  for (const job of jobs) {
+    // like fireSchedule, this records its own outcome rather than throwing for
+    // a trigger-level problem — a throw here means infrastructure, which
+    // pg-boss should retry
+    const outcome = await fireTrigger(db, queue, job.data.deliveryId);
+    deps.logger.info(`trigger delivery ${job.data.deliveryId}`, { outcome: outcome.kind });
   }
 });
 

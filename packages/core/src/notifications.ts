@@ -29,6 +29,12 @@ export const NOTIFIABLE_EVENT_TYPES = [
   // a firing produced no run but the schedule lives on (quota, config); noisy
   // to ignore, so it is filterable separately from the terminal case
   "schedule.failed",
+  // the same pair for inbound webhook triggers. These matter more than they
+  // look: the sender was acknowledged the moment its request was recorded, so
+  // it will never learn that the run did not happen — this is the only channel
+  // that reaches a human
+  "trigger.disabled",
+  "trigger.failed",
 ] as const;
 export type NotifiableEventType = (typeof NOTIFIABLE_EVENT_TYPES)[number];
 

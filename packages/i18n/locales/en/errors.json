@@ -3,6 +3,8 @@
   "daemon_token_invalid": "Invalid or revoked daemon token",
   "api_key_invalid": "Invalid, revoked, or expired API key",
   "project_archived": "This project is archived and accepts no new work",
+  "trigger_request_invalid": "Invalid, expired, or unsigned trigger request",
+  "trigger_payload_too_large": "Trigger payload exceeds the size limit",
   "dispatch_not_live": "Dispatch is not claimed or already terminated",
   "dispatch_batch_too_large": "Event batch exceeds the size bound",
   "artifact_too_large": "Artifact exceeds the size limit",

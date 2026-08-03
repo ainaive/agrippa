@@ -135,6 +135,7 @@ export function makeFakeQueue(overrides: Partial<RunQueue> = {}): RunQueue {
     enqueueApprovalExpiry: async () => {},
     enqueueNotificationDelivery: async () => {},
     registerSchedule: async () => {},
+    enqueueTriggerDelivery: async () => {},
     unregisterSchedule: async () => {},
     ...overrides,
   };

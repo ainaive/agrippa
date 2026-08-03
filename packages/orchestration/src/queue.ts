@@ -3,6 +3,7 @@ import {
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
   QUEUE_SCHEDULE_FIRE,
+  QUEUE_TRIGGER_FIRE,
   type RunQueue,
   requiredExecutorIds,
   runExecuteQueueName,
@@ -72,6 +73,7 @@ export async function createRunQueue(
   }
   await boss.createQueue(QUEUE_NOTIFICATION_DELIVER, { policy: "exclusive" });
   await boss.createQueue(QUEUE_SCHEDULE_FIRE);
+  await boss.createQueue(QUEUE_TRIGGER_FIRE);
 
   return {
     boss,
@@ -110,6 +112,16 @@ export async function createRunQueue(
     },
     async unregisterSchedule(scheduleId: string): Promise<void> {
       await boss.unschedule(QUEUE_SCHEDULE_FIRE, scheduleId);
+    },
+    async enqueueTriggerDelivery(deliveryId: string): Promise<void> {
+      // the inbound request already committed the delivery row, so a lost job
+      // is recoverable from it; the singleton key keeps a sender's retry and
+      // an operator's replay from racing into two runs
+      await boss.send(
+        QUEUE_TRIGGER_FIRE,
+        { deliveryId },
+        { singletonKey: deliveryId, retryLimit: 3, retryDelay: 10 },
+      );
     },
     async enqueueNotificationDelivery(deliveryId: string): Promise<void> {
       await boss.send(

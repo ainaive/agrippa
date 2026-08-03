@@ -5,6 +5,7 @@
     "resources": "Resources",
     "repos": "Repositories",
     "schedules": "Schedules",
+    "triggers": "Webhooks",
     "apiKeys": "API keys",
     "quota": "Quota",
     "notifications": "Notifications"
@@ -199,5 +200,26 @@
       "task_type_gone": "Stopped: its task type is no longer available."
     },
     "createElsewhere": "Schedules are created from a task: open the <catalog>catalog</catalog>, fill in the task's form, then choose “Run on a schedule”. Manage them here."
+  },
+  "triggers": {
+    "title": "Webhook triggers",
+    "hint": "An external system can start a task by POSTing to a signed URL. A trigger runs as the person who created it and can only do what they can do at the time it fires.",
+    "empty": "No webhook triggers yet",
+    "createElsewhere": "Triggers are created from a task: open the <catalog>catalog</catalog>, fill in the task's form, then choose “Trigger by webhook”. Manage them here.",
+    "lastFired": "last fired {{time}}",
+    "neverFired": "never fired",
+    "toggle": "Enabled",
+    "remove": "Delete",
+    "removeConfirm": "Delete “{{name}}”?",
+    "removeHint": "The URL stops working immediately. Runs it already produced are kept.",
+    "removed": "Trigger deleted",
+    "copy": "Copy URL",
+    "copied": "URL copied",
+    "deliveriesTitle": "Recent deliveries",
+    "deliveriesEmpty": "Nothing has been received yet.",
+    "payload": "Payload",
+    "retry": "Retry",
+    "retried": "Delivery queued again",
+    "attempts": "{{count}} attempts"
   }
 }

@@ -12,4 +12,5 @@ export * from "./runs";
 export * from "./runtimes";
 export * from "./schedules";
 export * from "./secrets";
+export * from "./triggers";
 export * from "./usage";

@@ -5,6 +5,7 @@
     "resources": "资源",
     "repos": "代码仓库",
     "schedules": "定时计划",
+    "triggers": "Webhook",
     "apiKeys": "API 密钥",
     "quota": "配额",
     "notifications": "通知"
@@ -199,5 +200,26 @@
       "task_type_gone": "已停用：对应的任务类型已不可用。"
     },
     "createElsewhere": "定时计划从任务创建：打开<catalog>任务目录</catalog>，填写任务表单，然后选择「定时执行」。在此管理已有计划。"
+  },
+  "triggers": {
+    "title": "Webhook 触发器",
+    "hint": "外部系统可以通过 POST 到一个带签名的 URL 来启动任务。触发器以创建者的身份执行，权限与触发那一刻的本人完全一致。",
+    "empty": "暂无 Webhook 触发器",
+    "createElsewhere": "触发器从任务创建：打开<catalog>任务目录</catalog>，填写任务表单，然后选择「Webhook 触发」。在此管理已有触发器。",
+    "lastFired": "最近触发于 {{time}}",
+    "neverFired": "尚未触发",
+    "toggle": "启用",
+    "remove": "删除",
+    "removeConfirm": "删除「{{name}}」？",
+    "removeHint": "该 URL 将立即失效，已产生的执行记录会保留。",
+    "removed": "触发器已删除",
+    "copy": "复制 URL",
+    "copied": "URL 已复制",
+    "deliveriesTitle": "最近接收",
+    "deliveriesEmpty": "尚未收到任何请求。",
+    "payload": "请求内容",
+    "retry": "重试",
+    "retried": "已重新排队",
+    "attempts": "{{count}} 次尝试"
   }
 }

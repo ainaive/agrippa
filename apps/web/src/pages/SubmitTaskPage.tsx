@@ -6,7 +6,13 @@ import {
 } from "@agrippa/core";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { AlertCircleIcon, CalendarClockIcon, CheckCircle2Icon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  CalendarClockIcon,
+  CheckCircle2Icon,
+  CopyIcon,
+  WebhookIcon,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -44,7 +50,7 @@ import { useMe } from "../features/me";
 import { api } from "../lib/api";
 import { formatTokensCompact, lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
-import type { Preflight, PreflightCheck, TaskTypeDetail } from "../lib/types";
+import type { Preflight, PreflightCheck, TaskTypeDetail, TriggerCreated } from "../lib/types";
 
 /**
  * Turn the form the user just filled in into a recurring schedule.
@@ -173,6 +179,138 @@ function ScheduleDialog({
   );
 }
 
+/**
+ * Create a webhook trigger from this form's parameters.
+ *
+ * Here for the same reason the schedule dialog is: a trigger submits a real
+ * task, so it needs the real parameter form. The difference is what it hands
+ * back — a URL that exists exactly once, so the dialog stays open on success
+ * and shows it rather than navigating away from the only copy.
+ */
+function TriggerDialog({
+  open,
+  onOpenChange,
+  projectId,
+  taskTypeId,
+  title,
+  params,
+  agentOverrides,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projectId: string;
+  taskTypeId: string;
+  title: string;
+  params: ParamsValue;
+  agentOverrides: AgentOverrides;
+}) {
+  const { t } = useTranslation(["catalog", "settings", "common"]);
+  const [secret, setSecret] = useState("");
+  const [timezone, setTimezone] = useState(
+    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  );
+  const [created, setCreated] = useState<TriggerCreated | null>(null);
+
+  const create = useMutation({
+    mutationFn: () =>
+      api<TriggerCreated>(`/projects/${projectId}/triggers`, {
+        method: "POST",
+        json: { name: title, taskTypeId, params, agents: agentOverrides, secret, timezone },
+      }),
+    onSuccess: setCreated,
+    onError: toastApiError,
+  });
+
+  const url = created ? `${window.location.origin}/api/triggers/${created.token}` : "";
+  const close = () => {
+    setCreated(null);
+    setSecret("");
+    onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t("catalog:trigger.title")}</DialogTitle>
+          <DialogDescription>{t("catalog:trigger.description")}</DialogDescription>
+        </DialogHeader>
+        {created ? (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm">
+              <p className="font-medium">{t("catalog:trigger.urlOnce")}</p>
+              <div className="mt-2 flex items-center gap-2">
+                <code className="flex-1 truncate rounded bg-muted/60 px-2 py-1 font-mono text-xs">
+                  {url}
+                </code>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={t("catalog:trigger.copy")}
+                  onClick={() => {
+                    void navigator.clipboard
+                      .writeText(url)
+                      .then(() => toast.success(t("catalog:trigger.copied")));
+                  }}
+                >
+                  <CopyIcon />
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs font-medium">{t("catalog:trigger.howToSign")}</p>
+              <pre className="overflow-x-auto rounded bg-muted/60 p-2 text-[11px] leading-relaxed">
+                {`ts=$(date +%s)
+body='{"event":"ci.passed"}'
+sig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print $2}')
+curl -X POST '${url}' \\
+  -H "x-agrippa-timestamp: $ts" \\
+  -H "x-agrippa-signature: v1=$sig" \\
+  -H 'content-type: application/json' -d "$body"`}
+              </pre>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label htmlFor="trigger-secret">{t("catalog:trigger.secret")}</Label>
+              <Input
+                id="trigger-secret"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                placeholder={t("catalog:trigger.secretPlaceholder")}
+              />
+              <p className="text-xs text-muted-foreground">{t("catalog:trigger.secretHint")}</p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="trigger-tz">{t("settings:schedules.timezone")}</Label>
+              <Input
+                id="trigger-tz"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">{t("catalog:trigger.timezoneHint")}</p>
+            </div>
+          </div>
+        )}
+        <DialogFooter className="mt-5">
+          <Button type="button" variant="outline" onClick={close}>
+            {created ? t("common:actions.close") : t("common:actions.cancel")}
+          </Button>
+          {created ? null : (
+            <Button
+              disabled={create.isPending || secret.length < 16}
+              onClick={() => create.mutate()}
+            >
+              {t("catalog:trigger.create")}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function SubmitTaskPage() {
   const { t } = useTranslation("catalog");
   const navigate = useNavigate();
@@ -206,6 +344,7 @@ export function SubmitTaskPage() {
   const [params, setParams] = useState<ParamsValue | null>(null);
   const [agentOverrides, setAgentOverrides] = useState<AgentOverrides>({});
   const [scheduling, setScheduling] = useState(false);
+  const [triggering, setTriggering] = useState(false);
   // creating a schedule is a project-admin action (it commits the project to
   // recurring token spend), so the affordance matches what the API allows
   const me = useMe();
@@ -342,11 +481,31 @@ export function SubmitTaskPage() {
               {t("form.schedule")}
             </Button>
           ) : null}
+          {canSchedule ? (
+            <Button
+              variant="outline"
+              className="w-full"
+              disabled={!title || missing.length > 0 || !detail.templateVersion}
+              onClick={() => setTriggering(true)}
+            >
+              <WebhookIcon />
+              {t("form.trigger")}
+            </Button>
+          ) : null}
           {missing.length > 0 ? (
             <p className="text-xs text-muted-foreground">
               {t("form.missingRequired")}: {missing.join(", ")}
             </p>
           ) : null}
+          <TriggerDialog
+            open={triggering}
+            onOpenChange={setTriggering}
+            projectId={projectId}
+            taskTypeId={taskTypeId}
+            title={title}
+            params={value}
+            agentOverrides={agentOverrides}
+          />
           <ScheduleDialog
             open={scheduling}
             onOpenChange={setScheduling}

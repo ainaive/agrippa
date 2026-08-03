@@ -339,6 +339,36 @@ export const scheduleUpdateSchema = z
   .partial();
 export type ScheduleUpdateInput = z.infer<typeof scheduleUpdateSchema>;
 
+export const triggerCreateSchema = z.object({
+  name: z.string().min(1).max(200),
+  taskTypeId: z.uuid(),
+  params: z.record(z.string(), z.unknown()).default({}),
+  agents: z
+    .record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    )
+    .default({}),
+  timezone: timezoneField.default("UTC"),
+  /** Write-only; encrypted into the secrets table. Required — see the schema. */
+  secret: z.string().min(16).max(200),
+});
+export type TriggerCreateInput = z.infer<typeof triggerCreateSchema>;
+
+export const triggerUpdateSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    timezone: timezoneField,
+    params: z.record(z.string(), z.unknown()),
+    agents: z.record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    ),
+    enabled: z.boolean(),
+  })
+  .partial();
+export type TriggerUpdateInput = z.infer<typeof triggerUpdateSchema>;
+
 export const apiKeyCreateSchema = z.object({
   name: z.string().min(1).max(100),
   /** At least one — a key that grants nothing is a footgun, not a default. */

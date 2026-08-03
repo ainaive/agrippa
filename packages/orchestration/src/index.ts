@@ -1,5 +1,6 @@
 export * from "./artifact-store";
 export * from "./audit";
+export * from "./authority";
 export * from "./compile";
 export * from "./engine/bus";
 export * from "./engine/deps";
@@ -21,5 +22,6 @@ export * from "./schedule-fire";
 export * from "./seed-builtins";
 export * from "./submit";
 export * from "./template-schema";
+export * from "./trigger-fire";
 export * from "./usage";
 export * from "./worker-executors";

@@ -20,7 +20,8 @@
     "agentFaber": "人设",
     "agentExecutor": "引擎",
     "agentUnavailable": "当前部署不可用",
-    "schedule": "定时执行"
+    "schedule": "定时执行",
+    "trigger": "Webhook 触发"
   },
   "preflight": {
     "title": "就绪检查",
@@ -40,5 +41,18 @@
     "tokensHint": "计划只保存一次参数。在文本参数中（例如报告周期）填入下列占位符，每次触发时会按上方时区替换为真实日期。",
     "create": "创建计划",
     "created": "计划已创建"
+  },
+  "trigger": {
+    "title": "Webhook 触发",
+    "description": "创建一个 URL，外部系统可以 POST 到它，用你刚才填写的参数启动这个任务。",
+    "secret": "签名密钥",
+    "secretPlaceholder": "至少 16 个字符",
+    "secretHint": "必填。每个请求都必须用它签名——未签名的 URL 会让任何看到它的人消耗本项目的 Token。密钥加密存储，且不会再次显示。",
+    "create": "创建触发器",
+    "urlOnce": "请立即复制该 URL——它只显示这一次。",
+    "copy": "复制 URL",
+    "copied": "URL 已复制",
+    "howToSign": "像这样发送一个带签名的请求：",
+    "timezoneHint": "上方参数中的日期占位符会在触发时按此时区解析。"
   }
 }
