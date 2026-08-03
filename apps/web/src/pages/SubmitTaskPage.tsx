@@ -1,15 +1,37 @@
+import {
+  projectRoleAtLeast,
+  SCHEDULE_CONCURRENCY_POLICIES,
+  SCHEDULE_TOKENS,
+  type ScheduleConcurrencyPolicy,
+} from "@agrippa/core";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { AlertCircleIcon, CheckCircle2Icon } from "lucide-react";
+import { AlertCircleIcon, CalendarClockIcon, CheckCircle2Icon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import { FaberAvatar } from "@/components/FaberAvatar";
 import { DetailSkeleton } from "@/components/LoadingSkeletons";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { type AgentOverrides, AgentSlotPicker } from "../components/submit/AgentSlotPicker";
 import {
@@ -18,10 +40,138 @@ import {
   type ParamsValue,
   TaskParamsForm,
 } from "../components/TaskParamsForm";
+import { useMe } from "../features/me";
 import { api } from "../lib/api";
 import { formatTokensCompact, lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
 import type { Preflight, PreflightCheck, TaskTypeDetail } from "../lib/types";
+
+/**
+ * Turn the form the user just filled in into a recurring schedule.
+ *
+ * This lives on the submit page rather than in project settings because the
+ * parameter form, the preflight check, and the agent-slot picker are all
+ * already here — and because the mental model is "this task, repeatedly"
+ * rather than "reconstruct a task from scratch somewhere else". Settings
+ * stays the management view: list, pause, delete, see why one stopped.
+ */
+function ScheduleDialog({
+  open,
+  onOpenChange,
+  projectId,
+  taskTypeId,
+  title,
+  params,
+  agentOverrides,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projectId: string;
+  taskTypeId: string;
+  title: string;
+  params: ParamsValue;
+  agentOverrides: AgentOverrides;
+}) {
+  const { t } = useTranslation(["catalog", "settings", "common"]);
+  const navigate = useNavigate();
+  const [cron, setCron] = useState("0 9 * * 1");
+  const [timezone, setTimezone] = useState(
+    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  );
+  const [policy, setPolicy] = useState<ScheduleConcurrencyPolicy>("skip");
+
+  const create = useMutation({
+    mutationFn: () =>
+      api(`/projects/${projectId}/schedules`, {
+        method: "POST",
+        json: {
+          name: title,
+          taskTypeId,
+          params,
+          agents: agentOverrides,
+          cron,
+          timezone,
+          concurrencyPolicy: policy,
+        },
+      }),
+    onSuccess: () => {
+      toast.success(t("catalog:schedule.created"));
+      onOpenChange(false);
+      void navigate({
+        to: "/projects/$projectId/settings",
+        params: { projectId },
+        search: { tab: "schedules" },
+      });
+    },
+    onError: toastApiError,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t("catalog:schedule.title")}</DialogTitle>
+          <DialogDescription>{t("catalog:schedule.description")}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <Label htmlFor="schedule-cron">{t("settings:schedules.cron")}</Label>
+            <Input
+              id="schedule-cron"
+              value={cron}
+              onChange={(e) => setCron(e.target.value)}
+              className="font-mono"
+            />
+            <p className="text-xs text-muted-foreground">{t("settings:schedules.cronHint")}</p>
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="schedule-tz">{t("settings:schedules.timezone")}</Label>
+            <Input
+              id="schedule-tz"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label>{t("settings:schedules.policy")}</Label>
+            <Select value={policy} onValueChange={(v) => setPolicy(v as ScheduleConcurrencyPolicy)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SCHEDULE_CONCURRENCY_POLICIES.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {t(`settings:schedules.policies.${p}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {t(`settings:schedules.policyHints.${policy}`)}
+            </p>
+          </div>
+          {/* the whole reason a schedule differs from a submission: its
+              parameters are frozen unless they say otherwise */}
+          <div className="rounded-md border bg-muted/40 p-3">
+            <p className="text-xs font-medium">{t("catalog:schedule.tokensTitle")}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{t("catalog:schedule.tokensHint")}</p>
+            <p className="mt-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {SCHEDULE_TOKENS.map((token) => `{{${token}}}`).join("  ")}
+            </p>
+          </div>
+        </div>
+        <DialogFooter className="mt-5">
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            {t("common:actions.cancel")}
+          </Button>
+          <Button disabled={create.isPending || !cron.trim()} onClick={() => create.mutate()}>
+            {t("catalog:schedule.create")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 export function SubmitTaskPage() {
   const { t } = useTranslation("catalog");
@@ -55,6 +205,14 @@ export function SubmitTaskPage() {
   const [title, setTitle] = useState("");
   const [params, setParams] = useState<ParamsValue | null>(null);
   const [agentOverrides, setAgentOverrides] = useState<AgentOverrides>({});
+  const [scheduling, setScheduling] = useState(false);
+  // creating a schedule is a project-admin action (it commits the project to
+  // recurring token spend), so the affordance matches what the API allows
+  const me = useMe();
+  const canSchedule = projectRoleAtLeast(
+    me.projects.find((p) => p.projectId === projectId)?.role ?? "viewer",
+    "admin",
+  );
   const inputs = taskType.data?.inputs ?? [];
   const value = useMemo(() => params ?? defaultParams(inputs), [params, inputs]);
 
@@ -173,11 +331,31 @@ export function SubmitTaskPage() {
           >
             {submit.isPending ? t("form.submitting") : t("form.submit")}
           </Button>
+          {canSchedule ? (
+            <Button
+              variant="outline"
+              className="w-full"
+              disabled={!title || missing.length > 0 || !detail.templateVersion}
+              onClick={() => setScheduling(true)}
+            >
+              <CalendarClockIcon />
+              {t("form.schedule")}
+            </Button>
+          ) : null}
           {missing.length > 0 ? (
             <p className="text-xs text-muted-foreground">
               {t("form.missingRequired")}: {missing.join(", ")}
             </p>
           ) : null}
+          <ScheduleDialog
+            open={scheduling}
+            onOpenChange={setScheduling}
+            projectId={projectId}
+            taskTypeId={taskTypeId}
+            title={title}
+            params={value}
+            agentOverrides={agentOverrides}
+          />
         </CardContent>
       </Card>
     </div>

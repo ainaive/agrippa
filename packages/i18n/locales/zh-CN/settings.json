@@ -170,10 +170,6 @@
   "schedules": {
     "title": "定时计划",
     "hint": "按周期自动提交任务。计划以创建者的身份执行，权限与本人当前完全一致——若其失去本项目的访问权限，计划会停止并通知你。",
-    "addTitle": "创建计划",
-    "name": "名称",
-    "taskType": "任务类型",
-    "taskTypePlaceholder": "选择任务类型",
     "cron": "Cron 表达式",
     "cronHint": "五个字段：分 时 日 月 周。「0 9 * * 1」表示每周一 09:00。",
     "timezone": "时区",
@@ -188,8 +184,6 @@
       "queue": "照常提交，让执行排队进行。",
       "replace": "先取消上一次执行，再提交新的。"
     },
-    "create": "创建计划",
-    "created": "计划已创建",
     "empty": "暂无定时计划",
     "lastFired": "最近执行于 {{time}}",
     "neverFired": "尚未执行",
@@ -203,6 +197,7 @@
       "owner_lost_access": "已停用：创建者不再拥有本项目的访问权限。",
       "project_archived": "已停用：本项目已归档。",
       "task_type_gone": "已停用：对应的任务类型已不可用。"
-    }
+    },
+    "createElsewhere": "定时计划从任务创建：打开<catalog>任务目录</catalog>，填写任务表单，然后选择「定时执行」。在此管理已有计划。"
   }
 }

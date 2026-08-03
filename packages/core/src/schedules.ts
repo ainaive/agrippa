@@ -88,3 +88,142 @@ export function validateTimezone(tz: string): string | null {
     return "not a valid IANA timezone";
   }
 }
+
+// ── Fire-time parameter tokens ───────────────────────────────────────────────
+
+/**
+ * A schedule stores its parameters once, but the interesting ones are about
+ * *when* it fires: a weekly report whose `dateRange` is frozen reports on the
+ * same week forever, which makes "runs weekly unattended" true and useless.
+ * These tokens are substituted into string parameters when the schedule fires,
+ * resolved in the schedule's own timezone.
+ *
+ * The set is **closed on purpose**. The template expression language is
+ * deliberately non-Turing-complete (ADR-0006), and the failure mode here is
+ * quietly growing a second, more capable one beside it. So: no arithmetic, no
+ * formats, no nesting — a fixed list of calendar boundaries, all `YYYY-MM-DD`.
+ * Anything more expressive belongs in the template, not in a parameter value.
+ */
+export const SCHEDULE_TOKENS = [
+  "today",
+  "yesterday",
+  "thisWeekStart",
+  "thisWeekEnd",
+  "lastWeekStart",
+  "lastWeekEnd",
+  "thisMonthStart",
+  "lastMonthStart",
+  "lastMonthEnd",
+] as const;
+export type ScheduleToken = (typeof SCHEDULE_TOKENS)[number];
+
+const TOKEN_PATTERN = /\{\{\s*(\w+)\s*\}\}/g;
+
+/** `YYYY-MM-DD` for an instant, as seen in `timezone`. */
+function calendarDay(at: Date, timezone: string): string {
+  // en-CA renders ISO-ordered dates, which is what makes this a plain format
+  // call rather than a manual assembly of parts
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(at);
+}
+
+/**
+ * Day arithmetic on a `YYYY-MM-DD` value. Deliberately done in UTC: the input
+ * is already a calendar date in the target zone, so shifting it by whole days
+ * as UTC never crosses a DST boundary — converting back through the zone is
+ * exactly what would introduce one.
+ */
+function shiftDays(day: string, delta: number): string {
+  const at = new Date(`${day}T00:00:00Z`);
+  at.setUTCDate(at.getUTCDate() + delta);
+  return at.toISOString().slice(0, 10);
+}
+
+/** 0 = Sunday, matching `Date.getUTCDay`. */
+function weekday(day: string): number {
+  return new Date(`${day}T00:00:00Z`).getUTCDay();
+}
+
+/** Weeks start Monday — the convention every "last week" report means. */
+function mondayOf(day: string): string {
+  const dow = weekday(day);
+  return shiftDays(day, dow === 0 ? -6 : 1 - dow);
+}
+
+function firstOfMonth(day: string): string {
+  return `${day.slice(0, 8)}01`;
+}
+
+/** Every token's value for one firing. */
+export function scheduleTokenValues(at: Date, timezone: string): Record<ScheduleToken, string> {
+  const today = calendarDay(at, timezone);
+  const thisWeekStart = mondayOf(today);
+  const thisMonthStart = firstOfMonth(today);
+  const lastMonthEnd = shiftDays(thisMonthStart, -1);
+  return {
+    today,
+    yesterday: shiftDays(today, -1),
+    thisWeekStart,
+    thisWeekEnd: shiftDays(thisWeekStart, 6),
+    lastWeekStart: shiftDays(thisWeekStart, -7),
+    lastWeekEnd: shiftDays(thisWeekStart, -1),
+    thisMonthStart,
+    lastMonthStart: firstOfMonth(lastMonthEnd),
+    lastMonthEnd,
+  };
+}
+
+function isScheduleToken(name: string): name is ScheduleToken {
+  return (SCHEDULE_TOKENS as readonly string[]).includes(name);
+}
+
+/**
+ * Every `{{name}}` in the value that is not a known token. Creation rejects on
+ * a non-empty result: a typo left to run would otherwise reach the agent's
+ * prompt literally, which reads as a broken report rather than a broken
+ * schedule and would take a human to notice.
+ */
+export function findUnknownScheduleTokens(value: unknown): string[] {
+  const unknown = new Set<string>();
+  const walk = (node: unknown): void => {
+    if (typeof node === "string") {
+      for (const match of node.matchAll(TOKEN_PATTERN)) {
+        const name = match[1] as string;
+        if (!isScheduleToken(name)) unknown.add(name);
+      }
+    } else if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+    } else if (node && typeof node === "object") {
+      for (const item of Object.values(node)) walk(item);
+    }
+  };
+  walk(value);
+  return [...unknown];
+}
+
+/**
+ * Substitute tokens throughout a parameter tree. Only strings are rewritten,
+ * so a number or boolean parameter is never reinterpreted; unknown tokens are
+ * left verbatim, because creation already rejected them and silently blanking
+ * one at fire time would hide the mistake.
+ */
+export function applyScheduleTokens<T>(params: T, at: Date, timezone: string): T {
+  const values = scheduleTokenValues(at, timezone);
+  const walk = (node: unknown): unknown => {
+    if (typeof node === "string") {
+      return node.replace(TOKEN_PATTERN, (whole, name: string) =>
+        isScheduleToken(name) ? values[name] : whole,
+      );
+    }
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === "object") {
+      return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, walk(v)]));
+    }
+    return node;
+  };
+  return walk(params) as T;
+}

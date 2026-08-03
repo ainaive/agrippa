@@ -19,7 +19,8 @@
     "agents": "代理",
     "agentFaber": "人设",
     "agentExecutor": "引擎",
-    "agentUnavailable": "当前部署不可用"
+    "agentUnavailable": "当前部署不可用",
+    "schedule": "定时执行"
   },
   "preflight": {
     "title": "就绪检查",
@@ -31,5 +32,13 @@
     "mcp": "MCP 服务",
     "repo": "代码仓库",
     "configure": "去配置"
+  },
+  "schedule": {
+    "title": "定时执行",
+    "description": "用刚才填写的参数创建一个周期性计划。计划以你的身份执行，权限与触发那一刻的你完全一致。",
+    "tokensTitle": "参数是固定的——除非使用日期占位符",
+    "tokensHint": "计划只保存一次参数。在文本参数中（例如报告周期）填入下列占位符，每次触发时会按上方时区替换为真实日期。",
+    "create": "创建计划",
+    "created": "计划已创建"
   }
 }

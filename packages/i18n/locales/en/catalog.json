@@ -19,7 +19,8 @@
     "agents": "Agents",
     "agentFaber": "Persona",
     "agentExecutor": "Engine",
-    "agentUnavailable": "not available in this deployment"
+    "agentUnavailable": "not available in this deployment",
+    "schedule": "Run on a schedule"
   },
   "preflight": {
     "title": "Readiness",
@@ -31,5 +32,13 @@
     "mcp": "MCP servers",
     "repo": "Repository",
     "configure": "Configure"
+  },
+  "schedule": {
+    "title": "Run on a schedule",
+    "description": "Create a recurring schedule from the parameters you just filled in. It runs as you, and can only do what you can do at the time it fires.",
+    "tokensTitle": "Parameters are frozen — unless you use a date token",
+    "tokensHint": "A schedule stores its parameters once. Put one of these in a text parameter (for example a reporting period) and it is replaced with the real date each time the schedule fires, in the timezone above.",
+    "create": "Create schedule",
+    "created": "Schedule created"
   }
 }

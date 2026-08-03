@@ -5,7 +5,7 @@ import {
   type ScheduleConcurrencyPolicy,
 } from "@agrippa/core";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   BellIcon,
@@ -21,7 +21,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
@@ -1227,48 +1227,13 @@ function ApiKeysSection({ projectId }: { projectId: string }) {
 function SchedulesSection({ projectId }: { projectId: string }) {
   const { t } = useTranslation(["settings", "common"]);
   const queryClient = useQueryClient();
-  const [name, setName] = useState("");
-  const [taskTypeId, setTaskTypeId] = useState("");
-  const [cron, setCron] = useState("0 9 * * 1");
-  const [timezone, setTimezone] = useState(
-    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-  );
-  const [policy, setPolicy] = useState<ScheduleConcurrencyPolicy>("skip");
 
   const schedules = useQuery({
     queryKey: ["schedules", projectId],
     queryFn: () => api<ScheduleRow[]>(`/projects/${projectId}/schedules`),
   });
-  // the catalog has no list-all endpoint (it is browsed by scenario), so fan
-  // out the same way CatalogPage does rather than adding one for a picker
-  const scenarios = useQuery({
-    queryKey: ["scenarios"],
-    queryFn: () => api<Array<{ slug: string }>>("/scenarios"),
-  });
-  const taskTypeQueries = useQueries({
-    queries: (scenarios.data ?? []).map((scenario) => ({
-      queryKey: ["task-types", scenario.slug],
-      queryFn: () => api<TaskTypeSummary[]>(`/scenarios/${scenario.slug}/task-types`),
-    })),
-  });
-  const taskTypeOptions = taskTypeQueries.flatMap((q) => q.data ?? []);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["schedules", projectId] });
-  const create = useMutation({
-    mutationFn: () =>
-      api(`/projects/${projectId}/schedules`, {
-        method: "POST",
-        // params stay empty here: a schedule's parameters come from the task
-        // form, which this section does not render — see the manual's note
-        json: { name: name.trim(), taskTypeId, cron, timezone, concurrencyPolicy: policy },
-      }),
-    onSuccess: () => {
-      setName("");
-      toast.success(t("settings:schedules.created"));
-      void refresh();
-    },
-    onError: toastApiError,
-  });
   const update = useMutation({
     mutationFn: (input: { id: string; body: Record<string, unknown> }) =>
       api(`/projects/${projectId}/schedules/${input.id}`, { method: "PATCH", json: input.body }),
@@ -1349,66 +1314,23 @@ function SchedulesSection({ projectId }: { projectId: string }) {
         <EmptyState title={t("settings:schedules.empty")} icon={CalendarClockIcon} />
       )}
 
-      <div className="max-w-md space-y-3">
-        <h3 className="text-sm font-medium">{t("settings:schedules.addTitle")}</h3>
-        <div className="space-y-1">
-          <Label htmlFor="sched-name">{t("settings:schedules.name")}</Label>
-          <Input id="sched-name" value={name} onChange={(e) => setName(e.target.value)} />
-        </div>
-        <div className="space-y-1">
-          <Label>{t("settings:schedules.taskType")}</Label>
-          <Select value={taskTypeId} onValueChange={setTaskTypeId}>
-            <SelectTrigger>
-              <SelectValue placeholder={t("settings:schedules.taskTypePlaceholder")} />
-            </SelectTrigger>
-            <SelectContent>
-              {taskTypeOptions.map((tt) => (
-                <SelectItem key={tt.id} value={tt.id}>
-                  {lt(tt.nameI18n)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="sched-cron">{t("settings:schedules.cron")}</Label>
-          <Input
-            id="sched-cron"
-            value={cron}
-            onChange={(e) => setCron(e.target.value)}
-            className="font-mono"
-          />
-          <p className="text-xs text-muted-foreground">{t("settings:schedules.cronHint")}</p>
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="sched-tz">{t("settings:schedules.timezone")}</Label>
-          <Input id="sched-tz" value={timezone} onChange={(e) => setTimezone(e.target.value)} />
-        </div>
-        <div className="space-y-1">
-          <Label>{t("settings:schedules.policy")}</Label>
-          <Select value={policy} onValueChange={(v) => setPolicy(v as ScheduleConcurrencyPolicy)}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {SCHEDULE_CONCURRENCY_POLICIES.map((p) => (
-                <SelectItem key={p} value={p}>
-                  {t(`settings:schedules.policies.${p}`)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            {t(`settings:schedules.policyHints.${policy}`)}
-          </p>
-        </div>
-        <Button
-          disabled={create.isPending || !name.trim() || !taskTypeId || !cron.trim()}
-          onClick={() => create.mutate()}
-        >
-          {t("settings:schedules.create")}
-        </Button>
-      </div>
+      {/* Creating a schedule needs the task's own parameter form, which lives
+          on the submit page — offering a form here that cannot fill it in is
+          how you get a schedule that fails its first firing a week later. */}
+      <p className="text-xs text-muted-foreground">
+        <Trans
+          i18nKey="settings:schedules.createElsewhere"
+          components={{
+            catalog: (
+              <Link
+                to="/projects/$projectId/catalog"
+                params={{ projectId }}
+                className="underline underline-offset-2"
+              />
+            ),
+          }}
+        />
+      </p>
     </div>
   );
 }

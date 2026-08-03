@@ -154,6 +154,76 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     expect(await rowOf(deleted.id)).toBeUndefined();
   });
 
+  // ── parameters ─────────────────────────────────────────────────────────────
+
+  it("rejects params that could never produce a run, at creation rather than at the first firing", async () => {
+    // weekly-report requires dateRange and rawNotes; a weekly schedule created
+    // with neither would otherwise fail its first firing a WEEK later
+    const res = await admin.request(`/api/v1/projects/${projectId}/schedules`, {
+      method: "POST",
+      json: { name: "empty", taskTypeId, params: {}, cron: "0 9 * * 1" },
+    });
+    expect(res.status).toBe(400);
+
+    const partial = await admin.request(`/api/v1/projects/${projectId}/schedules`, {
+      method: "POST",
+      json: { name: "partial", taskTypeId, params: { dateRange: "x" }, cron: "0 9 * * 1" },
+    });
+    expect(partial.status).toBe(400);
+  });
+
+  it("rejects an unknown token instead of letting it reach the agent verbatim", async () => {
+    const res = await admin.request(`/api/v1/projects/${projectId}/schedules`, {
+      method: "POST",
+      json: {
+        name: "typo",
+        taskTypeId,
+        params: { ...params, dateRange: "{{lastWeek}}" },
+        cron: "0 9 * * 1",
+      },
+    });
+    expect(res.status).toBe(400);
+    const body = await jsonOf<{ details?: Array<{ message: string }> }>(res);
+    expect(JSON.stringify(body)).toContain("lastWeek");
+  });
+
+  it("re-validates on edit, so an edit cannot break a working schedule silently", async () => {
+    const row = await createSchedule();
+    const res = await admin.request(`/api/v1/projects/${projectId}/schedules/${row.id}`, {
+      method: "PATCH",
+      json: { params: { dateRange: "only-this" } },
+    });
+    expect(res.status).toBe(400);
+    // unchanged on disk
+    expect((await rowOf(row.id))?.params).toEqual(params);
+  });
+
+  it("resolves date tokens against the firing, so a weekly report moves with the weeks", async () => {
+    const row = await createSchedule({
+      params: { ...params, dateRange: "{{lastWeekStart}}..{{lastWeekEnd}}" },
+      timezone: "Asia/Shanghai",
+    });
+    expect(await fireSchedule(db, queue, row.id)).toMatchObject({ kind: "submitted" });
+
+    const [run] = await db
+      .select()
+      .from(runs)
+      .where(eq(runs.id, (await rowOf(row.id))?.lastRunId as string));
+    const snapshot = run?.paramsSnapshot as { dateRange: string };
+    // the stored parameter is still the token; only the run carries dates
+    expect((await rowOf(row.id))?.params).toMatchObject({
+      dateRange: "{{lastWeekStart}}..{{lastWeekEnd}}",
+    });
+    expect(snapshot.dateRange).toMatch(/^\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2}$/);
+
+    // and it is genuinely last week: the range ends the day before this Monday
+    const [start, end] = snapshot.dateRange.split("..") as [string, string];
+    expect(new Date(`${end}T00:00:00Z`).getTime()).toBeGreaterThan(
+      new Date(`${start}T00:00:00Z`).getTime(),
+    );
+    expect(new Date(`${end}T00:00:00Z`).getTime()).toBeLessThan(Date.now());
+  });
+
   // ── firing ─────────────────────────────────────────────────────────────────
 
   it("submits a run attributed to its owner", async () => {

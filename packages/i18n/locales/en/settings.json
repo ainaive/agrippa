@@ -170,10 +170,6 @@
   "schedules": {
     "title": "Schedules",
     "hint": "Submit a task on a recurring schedule. A schedule runs as the person who created it and can only do what they can do right now — if they lose access to this project, it stops and tells you.",
-    "addTitle": "Create a schedule",
-    "name": "Name",
-    "taskType": "Task type",
-    "taskTypePlaceholder": "Pick a task type",
     "cron": "Cron expression",
     "cronHint": "Five fields: minute hour day-of-month month day-of-week. “0 9 * * 1” is Mondays at 09:00.",
     "timezone": "Timezone",
@@ -188,8 +184,6 @@
       "queue": "Submit anyway and let the runs queue up.",
       "replace": "Cancel the previous run, then submit."
     },
-    "create": "Create schedule",
-    "created": "Schedule created",
     "empty": "No schedules yet",
     "lastFired": "last ran {{time}}",
     "neverFired": "never run",
@@ -203,6 +197,7 @@
       "owner_lost_access": "Stopped: its owner no longer has access to this project.",
       "project_archived": "Stopped: this project is archived.",
       "task_type_gone": "Stopped: its task type is no longer available."
-    }
+    },
+    "createElsewhere": "Schedules are created from a task: open the <catalog>catalog</catalog>, fill in the task's form, then choose “Run on a schedule”. Manage them here."
   }
 }

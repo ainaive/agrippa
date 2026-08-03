@@ -1,5 +1,6 @@
 import {
   AppError,
+  applyScheduleTokens,
   isTerminalRunStatus,
   projectRoleAtLeast,
   type RunQueue,
@@ -146,6 +147,10 @@ export async function fireSchedule(
 
   // ── submit ─────────────────────────────────────────────────────────────────
 
+  // one clock reading for the firing: token values and lastFiredAt must agree,
+  // or a report could be stamped with a different day than it claims to cover
+  const firedAt = new Date();
+
   try {
     const { taskId, runId } = await submitTask(db, queue, {
       projectId: schedule.projectId,
@@ -154,14 +159,18 @@ export async function fireSchedule(
       input: {
         taskTypeId: schedule.taskTypeId,
         title: schedule.name,
-        params: schedule.params,
+        // resolved against THIS firing, in the schedule's own timezone: stored
+        // parameters are frozen, but the interesting ones are about when the
+        // schedule fired — a weekly report with a fixed dateRange reports on
+        // the same week forever
+        params: applyScheduleTokens(schedule.params, firedAt, schedule.timezone),
         agents: schedule.agentOverrides,
       },
     });
     await db
       .update(taskSchedules)
       .set({
-        lastFiredAt: new Date(),
+        lastFiredAt: firedAt,
         lastRunId: runId,
         lastError: null,
         lastErrorAt: null,
