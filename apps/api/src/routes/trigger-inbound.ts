@@ -17,6 +17,7 @@ import {
   triggerDeliveries,
   triggerEndpoints,
 } from "@agrippa/db";
+import { enqueueAfterCommit } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { tokenMatches, tokenPrefixOf } from "../lib/bearer-tokens";
@@ -46,22 +47,27 @@ function signatureMatches(expected: string, provided: string): boolean {
 }
 
 /**
- * Read a request body into a string, refusing anything past `limit`.
+ * Read a request body into a Buffer, refusing anything past `limit`.
+ *
+ * Returns BYTES, not text, because the signature is computed over them. A
+ * decode first would be lossy: `TextDecoder` substitutes U+FFFD for invalid
+ * UTF-8, so a sender that legitimately signed non-UTF-8 bytes could never
+ * verify — and would be told its secret was wrong. Decoding happens after
+ * verification, for parsing and storage only.
  *
  * The cap is enforced per chunk, so an oversized send is rejected after one
  * buffer rather than after all of it — the pattern `stageDispatchArtifact`
  * uses for daemon artifact uploads. The reader is always cancelled, so the
  * sender is not left streaming into a request nobody is reading.
  */
-async function readBoundedText(
+async function readBoundedBytes(
   body: ReadableStream<Uint8Array> | null,
   limit: number,
-): Promise<string> {
-  if (!body) return "";
+): Promise<Buffer> {
+  if (!body) return Buffer.alloc(0);
   const reader = body.getReader();
-  const decoder = new TextDecoder();
+  const chunks: Uint8Array[] = [];
   let seen = 0;
-  let out = "";
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -70,12 +76,12 @@ async function readBoundedText(
       if (seen > limit) {
         throw new AppError("trigger_payload_too_large", 413, "Payload exceeds the size limit");
       }
-      out += decoder.decode(value, { stream: true });
+      chunks.push(value);
     }
   } finally {
     await reader.cancel().catch(() => {});
   }
-  return out + decoder.decode();
+  return Buffer.concat(chunks);
 }
 
 export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async (c) => {
@@ -102,12 +108,13 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
   // Oversize THROWS rather than truncating (unlike `readBounded`, which is
   // reading a response nobody signed): the signature covers these exact bytes,
   // so a silently truncated body would fail verification and report itself as
-  // a wrong secret.
+  // a wrong secret — the same misdiagnosis a lossy decode would cause, which
+  // is why `readBoundedBytes` returns bytes and defers decoding.
   const declared = Number(c.req.header("content-length"));
   if (Number.isFinite(declared) && declared > TRIGGER_PAYLOAD_MAX_BYTES) {
     throw new AppError("trigger_payload_too_large", 413, "Payload exceeds the size limit");
   }
-  const raw = await readBoundedText(c.req.raw.body, TRIGGER_PAYLOAD_MAX_BYTES);
+  const rawBytes = await readBoundedBytes(c.req.raw.body, TRIGGER_PAYLOAD_MAX_BYTES);
 
   const timestamp = c.req.header(TRIGGER_TIMESTAMP_HEADER) ?? "";
   const signature = c.req.header(TRIGGER_SIGNATURE_HEADER) ?? "";
@@ -123,12 +130,19 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
     .where(eq(secrets.id, endpoint.secretRef));
   if (!secretRow) throw invalid();
   const secret = decryptSecret(secretRow.ciphertext, loadSecretKey());
-  const expected = `v1=${createHmac("sha256", secret).update(`${timestamp}.${raw}`).digest("hex")}`;
+  // over the wire bytes: `.update(string)` would re-encode a lossily-decoded
+  // body and reject a legitimately signed one
+  const expected = `v1=${createHmac("sha256", secret)
+    .update(`${timestamp}.`)
+    .update(rawBytes)
+    .digest("hex")}`;
   if (!signatureMatches(expected, signature)) throw invalid();
 
   // Only now is the sender trusted. The body is still *untrusted content* —
   // it is stored for inspection and never interpolated into a prompt, because
   // a valid signature proves who sent it, not that what they sent is safe.
+  // verified — now decode, for parsing and storage only
+  const raw = rawBytes.toString("utf8");
   let payload: Record<string, unknown> | null = null;
   if (raw.length > 0) {
     try {
@@ -174,12 +188,23 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
         ),
       );
     if (existing?.status === "pending") {
-      await c.var.queue?.enqueueTriggerDelivery(existing.id);
+      await enqueueAfterCommit(
+        () => c.var.queue?.enqueueTriggerDelivery(existing.id) ?? Promise.resolve(),
+        `trigger delivery ${existing.id}`,
+      );
     }
     return c.json({ accepted: true, deduplicated: true }, 200);
   }
 
-  await c.var.queue?.enqueueTriggerDelivery(delivery.id);
+  // Best-effort: the delivery row is committed, so a send failure is the
+  // sweeper's problem, not the sender's. A 500 here would be answered by a
+  // retry — and without the optional delivery-id header there is nothing to
+  // dedupe against, so that retry inserts a SECOND delivery and produces a
+  // second run while the sweeper revives the first.
+  await enqueueAfterCommit(
+    () => c.var.queue?.enqueueTriggerDelivery(delivery.id) ?? Promise.resolve(),
+    `trigger delivery ${delivery.id}`,
+  );
   // 202, not 200: the run has not happened yet and may still fail. Saying
   // otherwise would be a lie the sender cannot check.
   return c.json({ accepted: true, deliveryId: delivery.id }, 202);

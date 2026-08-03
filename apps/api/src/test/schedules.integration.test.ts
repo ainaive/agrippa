@@ -11,7 +11,7 @@ import {
   taskTypes,
   tokenUsage,
 } from "@agrippa/db";
-import { fireSchedule } from "@agrippa/orchestration";
+import { fireSchedule, reconcileScheduleCalendar } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
@@ -265,6 +265,75 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     expect((await fireSchedule(db, queue, replace.id)).kind).toBe("submitted");
     const [old] = await db.select().from(runs).where(eq(runs.id, replaced));
     expect(old?.status).toBe("cancelled");
+  });
+
+  // ── review round 2 regressions ─────────────────────────────────────────────
+
+  it("repairs calendar drift without waiting for a restart", async () => {
+    // registration is best-effort at request time, so a dropped one used to
+    // mean a schedule that silently never fired until someone restarted a
+    // worker — and an edit whose re-registration was lost kept the OLD cron
+    // while the UI showed the new one
+    const calendar = new Map<string, { key: string; cron: string; timezone: string }>();
+    const view = {
+      list: async () => [...calendar.values()],
+      register: async (id: string, cron: string, timezone: string) => {
+        calendar.set(id, { key: id, cron, timezone });
+      },
+      unregister: async (id: string) => {
+        calendar.delete(id);
+      },
+    };
+
+    const row = await createSchedule({ cron: "0 9 * * 1" });
+    // sync everything the suite has created, then drop just this one's entry
+    // — the shape a failed registerSchedule leaves behind
+    await reconcileScheduleCalendar(db, view);
+    calendar.delete(row.id);
+
+    expect(await reconcileScheduleCalendar(db, view)).toEqual({
+      registered: 1,
+      unregistered: 0,
+    });
+    expect(calendar.get(row.id)?.cron).toBe("0 9 * * 1");
+
+    // an edit whose re-registration was lost converges too
+    await db.update(taskSchedules).set({ cron: "0 17 * * 5" }).where(eq(taskSchedules.id, row.id));
+    expect(await reconcileScheduleCalendar(db, view)).toEqual({
+      registered: 1,
+      unregistered: 0,
+    });
+    expect(calendar.get(row.id)?.cron).toBe("0 17 * * 5");
+
+    // steady state writes nothing
+    expect(await reconcileScheduleCalendar(db, view)).toEqual({
+      registered: 0,
+      unregistered: 0,
+    });
+
+    // and an orphaned entry whose row is gone is removed — nothing else could
+    calendar.set("ghost", { key: "ghost", cron: "* * * * *", timezone: "UTC" });
+    expect(await reconcileScheduleCalendar(db, view)).toMatchObject({ unregistered: 1 });
+    expect(calendar.has("ghost")).toBe(false);
+  });
+
+  it("rolls the mutation back when its audit row cannot be written", async () => {
+    await db.execute(
+      `alter table audit_logs add constraint tmp_block_schedule_create
+       check (action <> 'schedule.create') not valid`,
+    );
+    try {
+      const before = (await db.select().from(taskSchedules)).length;
+      const res = await admin.request(`/api/v1/projects/${projectId}/schedules`, {
+        method: "POST",
+        json: { name: "unaudited", taskTypeId, params, cron: "0 9 * * 1" },
+      });
+      expect(res.status).toBe(500);
+      // no orphan schedule for the user's retry to duplicate
+      expect((await db.select().from(taskSchedules)).length).toBe(before);
+    } finally {
+      await db.execute(`alter table audit_logs drop constraint tmp_block_schedule_create`);
+    }
   });
 
   // ── the loud-failure design ────────────────────────────────────────────────

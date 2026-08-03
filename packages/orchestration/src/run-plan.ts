@@ -1,4 +1,4 @@
-import { type Db, mcpServers, projects, skills } from "@agrippa/db";
+import { type Db, type DbOrTx, mcpServers, projects, skills } from "@agrippa/db";
 import { eq } from "drizzle-orm";
 import { authorizeResources, resolveAgentBindings } from "./resolve";
 import type { CompiledTemplate } from "./template-schema";
@@ -15,7 +15,7 @@ export const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sd
  * from the pinned template_versions.compiled row, never from a copy.
  */
 export async function resolveRunPlan(
-  db: Db,
+  db: DbOrTx,
   projectId: string,
   taskType: { defaultFaberId: string },
   compiled: CompiledTemplate,

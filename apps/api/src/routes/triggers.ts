@@ -12,7 +12,7 @@ import {
   triggerEndpoints,
 } from "@agrippa/db";
 import { enqueueAfterCommit } from "@agrippa/orchestration";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
@@ -92,15 +92,18 @@ export const triggerRoutes = new Hono<AppEnv>()
           })
           .returning(triggerView);
         if (!row) throw new Error("trigger insert failed");
+        await audit(
+          c,
+          {
+            action: "trigger.create",
+            resourceType: "trigger_endpoint",
+            resourceId: row.id,
+            projectId,
+            payload: { name: row.name, taskTypeId: row.taskTypeId },
+          },
+          tx,
+        );
         return row;
-      });
-
-      await audit(c, {
-        action: "trigger.create",
-        resourceType: "trigger_endpoint",
-        resourceId: created.id,
-        projectId,
-        payload: { name: created.name, taskTypeId: created.taskTypeId },
       });
       // the token is shown exactly once, as part of the URL the sender needs
       return c.json({ ...created, token: issued.token }, 201);
@@ -130,26 +133,32 @@ export const triggerRoutes = new Hono<AppEnv>()
         );
       }
 
-      const [row] = await c.var.db
-        .update(triggerEndpoints)
-        .set({
-          ...(body.name === undefined ? {} : { name: body.name }),
-          ...(body.params === undefined ? {} : { params: body.params }),
-          ...(body.timezone === undefined ? {} : { timezone: body.timezone }),
-          ...(body.agents === undefined ? {} : { agentOverrides: body.agents }),
-          ...(body.enabled === undefined ? {} : { enabled: body.enabled, disabledReason: null }),
-          updatedAt: new Date(),
-        })
-        .where(and(eq(triggerEndpoints.id, id), eq(triggerEndpoints.projectId, projectId)))
-        .returning(triggerView);
-      if (!row) throw AppError.notFound("Trigger");
-
-      await audit(c, {
-        action: "trigger.update",
-        resourceType: "trigger_endpoint",
-        resourceId: id,
-        projectId,
-        payload: body,
+      const row = await c.var.db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(triggerEndpoints)
+          .set({
+            ...(body.name === undefined ? {} : { name: body.name }),
+            ...(body.params === undefined ? {} : { params: body.params }),
+            ...(body.timezone === undefined ? {} : { timezone: body.timezone }),
+            ...(body.agents === undefined ? {} : { agentOverrides: body.agents }),
+            ...(body.enabled === undefined ? {} : { enabled: body.enabled, disabledReason: null }),
+            updatedAt: new Date(),
+          })
+          .where(and(eq(triggerEndpoints.id, id), eq(triggerEndpoints.projectId, projectId)))
+          .returning(triggerView);
+        if (!updated) throw AppError.notFound("Trigger");
+        await audit(
+          c,
+          {
+            action: "trigger.update",
+            resourceType: "trigger_endpoint",
+            resourceId: id,
+            projectId,
+            payload: body,
+          },
+          tx,
+        );
+        return updated;
       });
       return c.json(row);
     },
@@ -173,16 +182,20 @@ export const triggerRoutes = new Hono<AppEnv>()
       // has no reverse cascade, so nothing else would ever reap it, and the
       // row that pointed at it is the only thing that could have found it.
       await tx.delete(secrets).where(eq(secrets.id, deleted.secretRef));
+      await audit(
+        c,
+        {
+          action: "trigger.delete",
+          resourceType: "trigger_endpoint",
+          resourceId: id,
+          projectId,
+          payload: { name: deleted.name },
+        },
+        tx,
+      );
       return deleted;
     });
     if (!row) throw AppError.notFound("Trigger");
-    await audit(c, {
-      action: "trigger.delete",
-      resourceType: "trigger_endpoint",
-      resourceId: id,
-      projectId,
-      payload: { name: row.name },
-    });
     return c.json({ ok: true });
   })
 
@@ -221,25 +234,40 @@ export const triggerRoutes = new Hono<AppEnv>()
       // failed → pending only: replaying a succeeded delivery would spend the
       // project's tokens on a run it already got, and fireTrigger refuses it
       // anyway — better to say so here than to enqueue a job that no-ops
-      const [row] = await c.var.db
-        .update(triggerDeliveries)
-        .set({ status: "pending", lastError: null })
-        .where(
-          and(
-            eq(triggerDeliveries.id, deliveryId),
-            eq(triggerDeliveries.projectId, projectId),
-            eq(triggerDeliveries.status, "failed"),
-          ),
-        )
-        .returning({ id: triggerDeliveries.id });
-      if (!row)
-        throw AppError.conflict("delivery_not_retryable", "Delivery is not in a failed state");
-
-      await audit(c, {
-        action: "trigger.delivery.retry",
-        resourceType: "trigger_delivery",
-        resourceId: deliveryId,
-        projectId,
+      await c.var.db.transaction(async (tx) => {
+        const [retried] = await tx
+          .update(triggerDeliveries)
+          // attempts reset so a delivery the sweeper exhausted is not re-failed
+          // the moment it ages — `attempts` only climbs, so without this it can
+          // never escape; lastAttemptAt reset so the worker's claim-recency
+          // window does not silently no-op a retry clicked within 20s. Same two
+          // hazards the notification retry names.
+          .set({ status: "pending", attempts: 0, lastError: null, lastAttemptAt: null })
+          .where(
+            and(
+              eq(triggerDeliveries.id, deliveryId),
+              eq(triggerDeliveries.projectId, projectId),
+              eq(triggerDeliveries.status, "failed"),
+              // never re-submit a delivery that already produced a run: a
+              // failure recorded after the run committed would otherwise let
+              // one click charge the project twice
+              isNull(triggerDeliveries.runId),
+            ),
+          )
+          .returning({ id: triggerDeliveries.id });
+        if (!retried) {
+          throw AppError.conflict("delivery_not_retryable", "Delivery is not in a retryable state");
+        }
+        await audit(
+          c,
+          {
+            action: "trigger.delivery.retry",
+            resourceType: "trigger_delivery",
+            resourceId: deliveryId,
+            projectId,
+          },
+          tx,
+        );
       });
       // the CAS and its audit are committed; the delivery sweeper re-enqueues
       // a stale pending row, so a send failure must not 500 a replay that did

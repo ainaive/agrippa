@@ -1,6 +1,7 @@
 import { AppError, type RunQueue, type TaskSubmitInput } from "@agrippa/core";
 import {
   type Db,
+  type DbOrTx,
   orchestrationTemplates,
   projects,
   runs,
@@ -26,7 +27,7 @@ import { assertQuotaHeadroom } from "./usage";
  * the one nobody is looking at — runs would accumulate and burn quota unseen.
  * Both manuals already promise this behavior; this is where it becomes true.
  */
-export async function assertProjectAcceptsWork(db: Db, projectId: string): Promise<void> {
+export async function assertProjectAcceptsWork(db: DbOrTx, projectId: string): Promise<void> {
   const [project] = await db
     .select({ status: projects.status })
     .from(projects)
@@ -51,20 +52,28 @@ export type SubmitTaskArgs = {
   input: TaskSubmitInput;
 };
 
+export type SubmittedTask = { taskId: string; runId: string };
+
 /**
- * Create a task + its first run and enqueue it. Deliberately free of any Hono
- * context so non-HTTP callers (cron schedules, webhook triggers, API-key
- * requests) submit through exactly the same path the browser does — quota,
- * repo-ref verification, resource authorization, and audit included.
+ * Create a task and its first run **on the caller's transaction**, without
+ * enqueueing.
+ *
+ * Taking a tx is what lets an unattended caller commit the submission together
+ * with the bookkeeping that records it happened. Written separately, the two
+ * are a dual write, and the gap is not theoretical: a crash between them leaves
+ * a delivery `pending` or a schedule's `lastRunId` stale, and the retry — whose
+ * claim window is deliberately tuned to let retries through — submits a second
+ * charged run. Inside one transaction there is no such gap: either the run and
+ * the record of it both exist, or neither does.
+ *
+ * The reads above the inserts stay on the same handle. They are all reads, so
+ * they are safe in a caller's transaction; the only cost is holding it open a
+ * little longer.
  *
  * Throws `SubmitError` (from resolution) and `AppError`; callers own the
  * mapping to a response.
  */
-export async function submitTask(
-  db: Db,
-  queue: RunQueue | null,
-  args: SubmitTaskArgs,
-): Promise<{ taskId: string; runId: string }> {
+export async function submitTaskIn(db: DbOrTx, args: SubmitTaskArgs): Promise<SubmittedTask> {
   const { projectId, actorUserId, actor, input } = args;
 
   await assertProjectAcceptsWork(db, projectId);
@@ -104,54 +113,66 @@ export async function submitTask(
     input.agents ?? {},
   );
 
-  const { task, run } = await db.transaction(async (tx) => {
-    const [task] = await tx
-      .insert(tasks)
-      .values({
-        orgId: actor.orgId,
-        projectId,
-        taskTypeId: taskType.id,
-        title: input.title,
-        params: parsed.data,
-        agentOverrides: input.agents ?? {},
-        createdBy: actorUserId,
-      })
-      .returning();
-    if (!task) throw new Error("task insert failed");
-    const [run] = await tx
-      .insert(runs)
-      .values({
-        taskId: task.id,
-        projectId,
-        number: 1,
-        templateVersionId: version.id,
-        faberId: agentResolution.primary.faberId,
-        executorId: agentResolution.primary.executorId,
-        agentBindings: agentResolution.bindings,
-        paramsSnapshot: parsed.data,
-        modelResolution: agentResolution.modelResolution,
-        resourceManifest,
-        createdBy: actorUserId,
-      })
-      .returning();
-    if (!run) throw new Error("run insert failed");
-    await tx.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
-    // in the tx: a committed mutation without its audit row would break
-    // the every-mutation-is-audited invariant (ADR-0013 amendment 1)
-    await auditAs(tx, actor, {
-      action: "task.submit",
-      resourceType: "task",
-      resourceId: task.id,
+  const [task] = await db
+    .insert(tasks)
+    .values({
+      orgId: actor.orgId,
       projectId,
-      payload: { taskTypeId: taskType.id, runId: run.id },
-    });
-    return { task, run };
+      taskTypeId: taskType.id,
+      title: input.title,
+      params: parsed.data,
+      agentOverrides: input.agents ?? {},
+      createdBy: actorUserId,
+    })
+    .returning();
+  if (!task) throw new Error("task insert failed");
+  const [run] = await db
+    .insert(runs)
+    .values({
+      taskId: task.id,
+      projectId,
+      number: 1,
+      templateVersionId: version.id,
+      faberId: agentResolution.primary.faberId,
+      executorId: agentResolution.primary.executorId,
+      agentBindings: agentResolution.bindings,
+      paramsSnapshot: parsed.data,
+      modelResolution: agentResolution.modelResolution,
+      resourceManifest,
+      createdBy: actorUserId,
+    })
+    .returning();
+  if (!run) throw new Error("run insert failed");
+  await db.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, task.id));
+  // with the mutation: a committed mutation without its audit row would break
+  // the every-mutation-is-audited invariant (ADR-0013 amendment 1)
+  await auditAs(db, actor, {
+    action: "task.submit",
+    resourceType: "task",
+    resourceId: task.id,
+    projectId,
+    payload: { taskTypeId: taskType.id, runId: run.id },
   });
+  return { taskId: task.id, runId: run.id };
+}
 
+/**
+ * Submit and enqueue, for callers with nothing to be atomic with — the browser
+ * and API-key paths, where the HTTP response is the only bookkeeping.
+ */
+export async function submitTask(
+  db: Db,
+  queue: RunQueue | null,
+  args: SubmitTaskArgs,
+): Promise<SubmittedTask> {
+  const submitted = await db.transaction((tx) => submitTaskIn(tx, args));
   // Post-commit: the worker's straggler sweep is the delivery guarantee, so a
   // send failure must not surface as a submission failure — the run exists and
   // will execute either way, and telling the caller otherwise invites a retry
   // that creates a second one.
-  await enqueueAfterCommit(() => queue?.enqueueRun(run.id) ?? Promise.resolve(), `run ${run.id}`);
-  return { taskId: task.id, runId: run.id };
+  await enqueueAfterCommit(
+    () => queue?.enqueueRun(submitted.runId) ?? Promise.resolve(),
+    `run ${submitted.runId}`,
+  );
+  return submitted;
 }

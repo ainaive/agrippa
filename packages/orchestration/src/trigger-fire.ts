@@ -8,13 +8,9 @@ import { type Db, triggerDeliveries, triggerEndpoints } from "@agrippa/db";
 import { and, eq, sql } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
-import {
-  enqueueProjectEventDeliveries,
-  insertProjectEventDeliveries,
-  notifyProjectEvent,
-} from "./notifications";
+import { enqueueProjectEventDeliveries, insertProjectEventDeliveries } from "./notifications";
 import { enqueueAfterCommit } from "./queue";
-import { submitTask } from "./submit";
+import { submitTaskIn } from "./submit";
 
 export type TriggerFireOutcome =
   | { kind: "submitted"; taskId: string; runId: string }
@@ -133,27 +129,43 @@ export async function fireTrigger(
     return { kind: "disabled", reason: denied };
   }
 
+  let submitted: { taskId: string; runId: string };
   try {
-    const { taskId, runId } = await submitTask(db, queue, {
-      projectId: endpoint.projectId,
-      actorUserId: endpoint.createdBy,
-      actor: { orgId: endpoint.orgId, userId: endpoint.createdBy },
-      input: {
-        taskTypeId: endpoint.taskTypeId,
-        title: endpoint.name,
-        // resolved against this firing, exactly as a schedule resolves them:
-        // creation validated the resolved form, so firing must resolve too or
-        // the token reaches the agent's prompt literally
-        params: applyScheduleTokens(endpoint.params, new Date(), endpoint.timezone),
-        agents: endpoint.agentOverrides,
-      },
+    // The run and the record that it happened commit together. Written
+    // separately they are a dual write, and the retry that follows a crash in
+    // the gap is not blocked by the claim above — its window is deliberately
+    // shorter than the retry delay — so it would submit a second charged run.
+    submitted = await db.transaction(async (tx) => {
+      const result = await submitTaskIn(tx, {
+        projectId: endpoint.projectId,
+        actorUserId: endpoint.createdBy,
+        actor: { orgId: endpoint.orgId, userId: endpoint.createdBy },
+        input: {
+          taskTypeId: endpoint.taskTypeId,
+          title: endpoint.name,
+          // resolved against this firing, exactly as a schedule resolves them:
+          // creation validated the resolved form, so firing must resolve too or
+          // the token reaches the agent's prompt literally
+          params: applyScheduleTokens(endpoint.params, new Date(), endpoint.timezone),
+          agents: endpoint.agentOverrides,
+        },
+      });
+      await tx
+        .update(triggerDeliveries)
+        .set({
+          status: "succeeded",
+          taskId: result.taskId,
+          runId: result.runId,
+          lastError: null,
+          lastAttemptAt: new Date(),
+        })
+        .where(eq(triggerDeliveries.id, deliveryId));
+      await tx
+        .update(triggerEndpoints)
+        .set({ lastFiredAt: new Date(), updatedAt: new Date() })
+        .where(eq(triggerEndpoints.id, endpoint.id));
+      return result;
     });
-    await markAttempt({ status: "succeeded", taskId, runId, lastError: null });
-    await db
-      .update(triggerEndpoints)
-      .set({ lastFiredAt: new Date(), updatedAt: new Date() })
-      .where(eq(triggerEndpoints.id, endpoint.id));
-    return { kind: "submitted", taskId, runId };
   } catch (err) {
     const message =
       err instanceof AppError
@@ -161,14 +173,32 @@ export async function fireTrigger(
         : err instanceof Error
           ? err.message
           : String(err);
-    await markAttempt({ status: "failed", lastError: message });
-    await notifyProjectEvent(db, queue, {
-      projectId: endpoint.projectId,
-      eventType: "trigger.failed",
-      payload: { triggerId: endpoint.id, triggerName: endpoint.name, error: message, deliveryId },
+    // terminal mark and announcement together, for the reason the disable path
+    // gives: `failed` is what makes the retry's claim reject, so a throw
+    // between them would lose a notification no sweeper can reconstruct
+    const failIds = await db.transaction(async (tx) => {
+      await tx
+        .update(triggerDeliveries)
+        .set({ status: "failed", lastError: message, lastAttemptAt: new Date() })
+        .where(eq(triggerDeliveries.id, deliveryId));
+      return insertProjectEventDeliveries(tx, {
+        projectId: endpoint.projectId,
+        eventType: "trigger.failed",
+        payload: { triggerId: endpoint.id, triggerName: endpoint.name, error: message, deliveryId },
+      });
     });
+    await enqueueProjectEventDeliveries(queue, failIds);
     return { kind: "failed", error: message };
   }
+
+  // Post-commit, outside the try on purpose: a send failure here must not be
+  // mistaken for a submission failure and mark a delivery whose run is alive
+  // and billing as `failed`.
+  await enqueueAfterCommit(
+    () => queue?.enqueueRun(submitted.runId) ?? Promise.resolve(),
+    `run ${submitted.runId}`,
+  );
+  return { kind: "submitted", taskId: submitted.taskId, runId: submitted.runId };
 }
 
 /** A delivery untouched this long lost its job and needs re-enqueueing. */

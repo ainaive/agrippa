@@ -8,10 +8,12 @@ import {
 } from "@agrippa/core";
 import {
   auditLogs,
+  notificationEndpoints,
   projectMembers,
   projects,
   runs,
   secrets,
+  taskTypes,
   triggerDeliveries,
   triggerEndpoints,
 } from "@agrippa/db";
@@ -570,6 +572,178 @@ describe.skipIf(!dbUp)("inbound webhook triggers", () => {
     // no orphaned key material: nothing else references it, so nothing would
     // ever reap it
     expect(await db.select().from(secrets).where(eq(secrets.id, secretId))).toHaveLength(0);
+  });
+
+  // ── review round 2 regressions ─────────────────────────────────────────────
+
+  it("commits the run and its bookkeeping together, so a crash cannot duplicate", async () => {
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    const runsBefore = (await db.select().from(runs)).length;
+
+    // make the delivery's success write fail INSIDE the transaction
+    await db.execute(
+      `alter table trigger_deliveries add constraint tmp_block_succeeded
+       check (status <> 'succeeded') not valid`,
+    );
+    try {
+      // the bookkeeping write fails, so the whole submission rolls back with
+      // it: no orphan run for a retry to duplicate, which is the
+      // duplicate-charge path
+      expect((await fireTrigger(db, queue, deliveryId)).kind).toBe("failed");
+      expect((await db.select().from(runs)).length).toBe(runsBefore);
+    } finally {
+      await db.execute(`alter table trigger_deliveries drop constraint tmp_block_succeeded`);
+    }
+
+    // and once the write can land, exactly one run appears
+    await db
+      .update(triggerDeliveries)
+      .set({ status: "pending", attempts: 0, lastAttemptAt: null })
+      .where(eq(triggerDeliveries.id, deliveryId));
+    expect((await fireTrigger(db, queue, deliveryId)).kind).toBe("submitted");
+    expect((await db.select().from(runs)).length).toBe(runsBefore + 1);
+  });
+
+  it("still answers 202 when the inbound enqueue fails", async () => {
+    const t = await createTrigger();
+    const brokenApp = createApp({
+      db,
+      queue: makeFakeQueue({
+        enqueueTriggerDelivery: async () => {
+          throw new Error("queue is down");
+        },
+      }),
+    });
+    const raw = JSON.stringify({ event: "x" });
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = `v1=${createHmac("sha256", SECRET).update(`${ts}.${raw}`).digest("hex")}`;
+    const res = await brokenApp.request(`/api/triggers/${t.token}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [TRIGGER_TIMESTAMP_HEADER]: ts,
+        [TRIGGER_SIGNATURE_HEADER]: sig,
+      },
+      body: raw,
+    });
+    // a 500 would make the sender retry, and without a delivery-id header that
+    // retry inserts a SECOND delivery and produces a second run
+    expect(res.status).toBe(202);
+  });
+
+  it("keeps the delivery pending when trigger.failed cannot be announced", async () => {
+    // `failed` is what makes the retry's claim reject, so it must not commit
+    // without the announcement that no sweeper can reconstruct
+    await db.insert(notificationEndpoints).values({
+      projectId,
+      kind: "generic",
+      name: "blocker-trig",
+      url: "https://example.com/blocked",
+      events: [],
+      createdBy: (await db.select().from(triggerEndpoints).limit(1))[0]?.createdBy as string,
+    });
+    const t = await createTrigger({ params: { dateRange: "x", rawNotes: "y" } });
+    // make submission fail so we reach the catch path
+    await db.update(taskTypes).set({ enabled: false }).where(eq(taskTypes.id, taskTypeId));
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    await db.update(taskTypes).set({ enabled: true }).where(eq(taskTypes.id, taskTypeId));
+
+    await db.execute(
+      `alter table notification_deliveries add constraint tmp_block_trigger_failed
+       check (event_type <> 'trigger.failed') not valid`,
+    );
+    try {
+      await db
+        .update(triggerEndpoints)
+        .set({ params: { nope: 1 } })
+        .where(eq(triggerEndpoints.id, t.id));
+      await expect(fireTrigger(db, queue, deliveryId)).rejects.toThrow();
+      const [row] = await db
+        .select()
+        .from(triggerDeliveries)
+        .where(eq(triggerDeliveries.id, deliveryId));
+      expect(row?.status).toBe("pending"); // rolled back, so the retry still has work
+    } finally {
+      await db.execute(
+        `alter table notification_deliveries drop constraint tmp_block_trigger_failed`,
+      );
+    }
+  });
+
+  it("a retried delivery survives a sweep and is not immediately re-failed", async () => {
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    // the exhausted state Retry exists to rescue
+    await db
+      .update(triggerDeliveries)
+      .set({
+        status: "failed",
+        attempts: 8,
+        lastError: "the real error",
+        lastAttemptAt: new Date(Date.now() - 5 * 60_000),
+      })
+      .where(eq(triggerDeliveries.id, deliveryId));
+
+    const res = await admin.request(
+      `/api/v1/projects/${projectId}/triggers/deliveries/${deliveryId}/retry`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(200);
+
+    await sweepTriggerDeliveries(db, queue);
+    const [row] = await db
+      .select()
+      .from(triggerDeliveries)
+      .where(eq(triggerDeliveries.id, deliveryId));
+    // without the attempts reset the sweeper re-fails it instantly, and
+    // attempts only ever climb, so it could never escape
+    expect(row?.status).toBe("pending");
+    expect(row?.attempts).toBe(0);
+  });
+
+  it("refuses to retry a delivery that already produced a run", async () => {
+    const t = await createTrigger();
+    const { deliveryId } = await jsonOf<{ deliveryId: string }>(
+      await send(t.token as string, { event: "x" }),
+    );
+    await fireTrigger(db, queue, deliveryId);
+    // a failure recorded after the run committed would otherwise let one click
+    // charge the project a second time
+    await db
+      .update(triggerDeliveries)
+      .set({ status: "failed" })
+      .where(eq(triggerDeliveries.id, deliveryId));
+    const res = await admin.request(
+      `/api/v1/projects/${projectId}/triggers/deliveries/${deliveryId}/retry`,
+      { method: "POST" },
+    );
+    expect(res.status).toBe(409);
+  });
+
+  it("verifies a signature over bytes that are not valid UTF-8", async () => {
+    const t = await createTrigger();
+    // a lone 0xFF is not valid UTF-8; a decode-then-hash turns it into U+FFFD
+    // and the signature can never match
+    const body = Buffer.concat([Buffer.from('{"a":"'), Buffer.from([0xff]), Buffer.from('"}')]);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = `v1=${createHmac("sha256", SECRET).update(`${ts}.`).update(body).digest("hex")}`;
+    const res = await app.request(`/api/triggers/${t.token}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [TRIGGER_TIMESTAMP_HEADER]: ts,
+        [TRIGGER_SIGNATURE_HEADER]: sig,
+      },
+      body,
+    });
+    expect(res.status).toBe(202);
   });
 
   // ── delivery log ───────────────────────────────────────────────────────────

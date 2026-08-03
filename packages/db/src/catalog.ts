@@ -1,6 +1,6 @@
 import { buildProviderCatalog, type ProviderCatalog, type ProviderCatalogRow } from "@agrippa/core";
 import { and, eq, isNull, or } from "drizzle-orm";
-import type { Db } from "./client";
+import type { Db, DbOrTx } from "./client";
 import { providerCatalog } from "./schema";
 
 /**
@@ -10,7 +10,7 @@ import { providerCatalog } from "./schema";
  * auth-policy/baseUrl lookups. Builtins are seeded org_id NULL so every org
  * sees anthropic/openai/dashscope; customs are org_admin-registered.
  */
-export async function loadProviderCatalog(db: Db, orgId: string): Promise<ProviderCatalog> {
+export async function loadProviderCatalog(db: DbOrTx, orgId: string): Promise<ProviderCatalog> {
   const rows = await db
     .select({
       providerId: providerCatalog.providerId,

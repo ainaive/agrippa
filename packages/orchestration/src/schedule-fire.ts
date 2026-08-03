@@ -11,13 +11,9 @@ import { eq } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
 import { requestRunCancellation } from "./engine/run-lifecycle";
-import {
-  enqueueProjectEventDeliveries,
-  insertProjectEventDeliveries,
-  notifyProjectEvent,
-} from "./notifications";
+import { enqueueProjectEventDeliveries, insertProjectEventDeliveries } from "./notifications";
 import { enqueueAfterCommit } from "./queue";
-import { submitTask } from "./submit";
+import { submitTaskIn } from "./submit";
 
 export type ScheduleFireOutcome =
   | { kind: "submitted"; taskId: string; runId: string }
@@ -99,15 +95,22 @@ export async function fireSchedule(
   };
 
   const fail = async (error: string): Promise<ScheduleFireOutcome> => {
-    await db
-      .update(taskSchedules)
-      .set({ lastError: error, lastErrorAt: new Date(), updatedAt: new Date() })
-      .where(eq(taskSchedules.id, scheduleId));
-    await notifyProjectEvent(db, queue, {
-      projectId: schedule.projectId,
-      eventType: "schedule.failed",
-      payload: { scheduleId, scheduleName: schedule.name, error },
+    // recorded and announced together, the same rule the disable path follows.
+    // Less acute here — a recurring schedule announces again next firing — but
+    // a run-less notification still cannot be reconstructed if it is lost, and
+    // a weekly schedule means a week of silence.
+    const deliveryIds = await db.transaction(async (tx) => {
+      await tx
+        .update(taskSchedules)
+        .set({ lastError: error, lastErrorAt: new Date(), updatedAt: new Date() })
+        .where(eq(taskSchedules.id, scheduleId));
+      return insertProjectEventDeliveries(tx, {
+        projectId: schedule.projectId,
+        eventType: "schedule.failed",
+        payload: { scheduleId, scheduleName: schedule.name, error },
+      });
     });
+    await enqueueProjectEventDeliveries(queue, deliveryIds);
     return { kind: "failed", error };
   };
 
@@ -152,33 +155,41 @@ export async function fireSchedule(
   // or a report could be stamped with a different day than it claims to cover
   const firedAt = new Date();
 
+  let submitted: { taskId: string; runId: string };
   try {
-    const { taskId, runId } = await submitTask(db, queue, {
-      projectId: schedule.projectId,
-      actorUserId: schedule.createdBy,
-      actor: { orgId: schedule.orgId, userId: schedule.createdBy },
-      input: {
-        taskTypeId: schedule.taskTypeId,
-        title: schedule.name,
-        // resolved against THIS firing, in the schedule's own timezone: stored
-        // parameters are frozen, but the interesting ones are about when the
-        // schedule fired — a weekly report with a fixed dateRange reports on
-        // the same week forever
-        params: applyScheduleTokens(schedule.params, firedAt, schedule.timezone),
-        agents: schedule.agentOverrides,
-      },
+    // Run and bookkeeping commit together. Losing `lastRunId` is worse here
+    // than for a trigger: it is the ONLY thing the concurrency check above
+    // reads, and this queue retries immediately with no claim to stop it — so
+    // the stale pointer makes `skip` fail to skip and `replace` cancel a run
+    // that already finished while the live one keeps going.
+    submitted = await db.transaction(async (tx) => {
+      const result = await submitTaskIn(tx, {
+        projectId: schedule.projectId,
+        actorUserId: schedule.createdBy,
+        actor: { orgId: schedule.orgId, userId: schedule.createdBy },
+        input: {
+          taskTypeId: schedule.taskTypeId,
+          title: schedule.name,
+          // resolved against THIS firing, in the schedule's own timezone: stored
+          // parameters are frozen, but the interesting ones are about when the
+          // schedule fired — a weekly report with a fixed dateRange reports on
+          // the same week forever
+          params: applyScheduleTokens(schedule.params, firedAt, schedule.timezone),
+          agents: schedule.agentOverrides,
+        },
+      });
+      await tx
+        .update(taskSchedules)
+        .set({
+          lastFiredAt: firedAt,
+          lastRunId: result.runId,
+          lastError: null,
+          lastErrorAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(taskSchedules.id, scheduleId));
+      return result;
     });
-    await db
-      .update(taskSchedules)
-      .set({
-        lastFiredAt: firedAt,
-        lastRunId: runId,
-        lastError: null,
-        lastErrorAt: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(taskSchedules.id, scheduleId));
-    return { kind: "submitted", taskId, runId };
   } catch (err) {
     // Everything reaching here is fixable configuration or a transient
     // shortage — quota exhausted, a revoked grant, no live worker for the
@@ -192,4 +203,80 @@ export async function fireSchedule(
           : String(err);
     return fail(message);
   }
+
+  // outside the try: a send failure must not be recorded as a firing failure
+  // for a run that is alive and billing
+  await enqueueAfterCommit(
+    () => queue?.enqueueRun(submitted.runId) ?? Promise.resolve(),
+    `run ${submitted.runId}`,
+  );
+  return { kind: "submitted", taskId: submitted.taskId, runId: submitted.runId };
+}
+
+/**
+ * Converge pg-boss's cron calendar with the schedule rows.
+ *
+ * Registration at request time is best-effort, and the boot pass only runs at
+ * boot — so without this a dropped `registerSchedule` meant the schedule
+ * silently never fired until someone restarted a worker, and a dropped
+ * re-registration after an edit meant it kept firing on the OLD cron while the
+ * UI displayed the new one. Silence and a lie, from the feature whose whole
+ * premise is running unattended.
+ *
+ * Diffs rather than re-registers: `getSchedules` returns the live calendar
+ * keyed by schedule id with its cron and timezone, which is exactly the drift
+ * surface, so a converged deployment does no writes at all. It also catches
+ * the one class nothing else can — a calendar entry whose row was deleted
+ * while its unregister failed, which would otherwise wake a worker forever.
+ */
+export async function reconcileScheduleCalendar(
+  db: Db,
+  calendar: {
+    list(): Promise<Array<{ key: string; cron: string; timezone: string }>>;
+    register(scheduleId: string, cron: string, timezone: string): Promise<void>;
+    unregister(scheduleId: string): Promise<void>;
+  },
+): Promise<{ registered: number; unregistered: number }> {
+  const rows = await db
+    .select({
+      id: taskSchedules.id,
+      cron: taskSchedules.cron,
+      timezone: taskSchedules.timezone,
+      enabled: taskSchedules.enabled,
+    })
+    .from(taskSchedules);
+  const live = new Map((await calendar.list()).map((e) => [e.key, e]));
+
+  let registered = 0;
+  let unregistered = 0;
+  for (const row of rows) {
+    // isolated per row: this is a repair loop, and one unrepairable schedule
+    // must not stop the others being repaired
+    try {
+      const entry = live.get(row.id);
+      if (row.enabled) {
+        if (!entry || entry.cron !== row.cron || entry.timezone !== row.timezone) {
+          await calendar.register(row.id, row.cron, row.timezone);
+          registered += 1;
+        }
+      } else if (entry) {
+        await calendar.unregister(row.id);
+        unregistered += 1;
+      }
+      live.delete(row.id);
+    } catch {
+      live.delete(row.id); // not an orphan; it has a row, just an unhappy one
+    }
+  }
+
+  // whatever is left in the calendar has no row at all
+  for (const key of live.keys()) {
+    try {
+      await calendar.unregister(key);
+      unregistered += 1;
+    } catch {
+      // next tick
+    }
+  }
+  return { registered, unregistered };
 }

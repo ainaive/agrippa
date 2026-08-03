@@ -58,29 +58,39 @@ export const scheduleRoutes = new Hono<AppEnv>()
 
       await assertSchedulableParams(c.var.db, body.taskTypeId, body.params, body.timezone);
 
-      const [row] = await c.var.db
-        .insert(taskSchedules)
-        .values({
-          orgId: c.var.user.orgId,
-          projectId,
-          taskTypeId: body.taskTypeId,
-          name: body.name,
-          params: body.params,
-          agentOverrides: body.agents,
-          cron: body.cron,
-          timezone: body.timezone,
-          concurrencyPolicy: body.concurrencyPolicy,
-          createdBy: c.var.user.id,
-        })
-        .returning(scheduleView);
-      if (!row) throw new Error("schedule insert failed");
-
-      await audit(c, {
-        action: "schedule.create",
-        resourceType: "task_schedule",
-        resourceId: row.id,
-        projectId,
-        payload: { name: row.name, cron: row.cron, timezone: row.timezone },
+      // the row and its audit commit together — ADR-0014 decision 3: a
+      // committed mutation with no audit row breaks the
+      // every-mutation-is-audited invariant, and the 500 it returns invites a
+      // retry that creates a duplicate schedule
+      const row = await c.var.db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(taskSchedules)
+          .values({
+            orgId: c.var.user.orgId,
+            projectId,
+            taskTypeId: body.taskTypeId,
+            name: body.name,
+            params: body.params,
+            agentOverrides: body.agents,
+            cron: body.cron,
+            timezone: body.timezone,
+            concurrencyPolicy: body.concurrencyPolicy,
+            createdBy: c.var.user.id,
+          })
+          .returning(scheduleView);
+        if (!created) throw new Error("schedule insert failed");
+        await audit(
+          c,
+          {
+            action: "schedule.create",
+            resourceType: "task_schedule",
+            resourceId: created.id,
+            projectId,
+            payload: { name: created.name, cron: created.cron, timezone: created.timezone },
+          },
+          tx,
+        );
+        return created;
       });
       // best-effort, as the module comment promises: the row and its audit are
       // committed, so a 500 here would tell the user creation failed while the
@@ -118,35 +128,46 @@ export const scheduleRoutes = new Hono<AppEnv>()
         );
       }
 
-      const [row] = await c.var.db
-        .update(taskSchedules)
-        .set({
-          ...(body.name === undefined ? {} : { name: body.name }),
-          ...(body.params === undefined ? {} : { params: body.params }),
-          ...(body.agents === undefined ? {} : { agentOverrides: body.agents }),
-          ...(body.cron === undefined ? {} : { cron: body.cron }),
-          ...(body.timezone === undefined ? {} : { timezone: body.timezone }),
-          ...(body.concurrencyPolicy === undefined
-            ? {}
-            : { concurrencyPolicy: body.concurrencyPolicy }),
-          // re-enabling clears the platform's reason for stopping it; whether
-          // the underlying condition is actually fixed is re-checked at the
-          // next firing rather than trusted here
-          ...(body.enabled === undefined
-            ? {}
-            : { enabled: body.enabled, disabledReason: null, lastError: null, lastErrorAt: null }),
-          updatedAt: new Date(),
-        })
-        .where(and(eq(taskSchedules.id, id), eq(taskSchedules.projectId, projectId)))
-        .returning(scheduleView);
-      if (!row) throw AppError.notFound("Schedule");
-
-      await audit(c, {
-        action: "schedule.update",
-        resourceType: "task_schedule",
-        resourceId: id,
-        projectId,
-        payload: body,
+      const row = await c.var.db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(taskSchedules)
+          .set({
+            ...(body.name === undefined ? {} : { name: body.name }),
+            ...(body.params === undefined ? {} : { params: body.params }),
+            ...(body.agents === undefined ? {} : { agentOverrides: body.agents }),
+            ...(body.cron === undefined ? {} : { cron: body.cron }),
+            ...(body.timezone === undefined ? {} : { timezone: body.timezone }),
+            ...(body.concurrencyPolicy === undefined
+              ? {}
+              : { concurrencyPolicy: body.concurrencyPolicy }),
+            // re-enabling clears the platform's reason for stopping it; whether
+            // the underlying condition is actually fixed is re-checked at the
+            // next firing rather than trusted here
+            ...(body.enabled === undefined
+              ? {}
+              : {
+                  enabled: body.enabled,
+                  disabledReason: null,
+                  lastError: null,
+                  lastErrorAt: null,
+                }),
+            updatedAt: new Date(),
+          })
+          .where(and(eq(taskSchedules.id, id), eq(taskSchedules.projectId, projectId)))
+          .returning(scheduleView);
+        if (!updated) throw AppError.notFound("Schedule");
+        await audit(
+          c,
+          {
+            action: "schedule.update",
+            resourceType: "task_schedule",
+            resourceId: id,
+            projectId,
+            payload: body,
+          },
+          tx,
+        );
+        return updated;
       });
       // the calendar follows the row: a disabled schedule has none at all, so
       // pausing cannot leave a firing in flight
@@ -164,17 +185,23 @@ export const scheduleRoutes = new Hono<AppEnv>()
   .delete("/:projectId/schedules/:id", requireProjectRole("admin"), async (c) => {
     const projectId = c.req.param("projectId");
     const id = c.req.param("id");
-    const [row] = await c.var.db
-      .delete(taskSchedules)
-      .where(and(eq(taskSchedules.id, id), eq(taskSchedules.projectId, projectId)))
-      .returning({ id: taskSchedules.id, name: taskSchedules.name });
-    if (!row) throw AppError.notFound("Schedule");
-    await audit(c, {
-      action: "schedule.delete",
-      resourceType: "task_schedule",
-      resourceId: id,
-      projectId,
-      payload: { name: row.name },
+    await c.var.db.transaction(async (tx) => {
+      const [deleted] = await tx
+        .delete(taskSchedules)
+        .where(and(eq(taskSchedules.id, id), eq(taskSchedules.projectId, projectId)))
+        .returning({ id: taskSchedules.id, name: taskSchedules.name });
+      if (!deleted) throw AppError.notFound("Schedule");
+      await audit(
+        c,
+        {
+          action: "schedule.delete",
+          resourceType: "task_schedule",
+          resourceId: id,
+          projectId,
+          payload: { name: deleted.name },
+        },
+        tx,
+      );
     });
     await enqueueAfterCommit(
       () => c.var.queue?.unregisterSchedule(id) ?? Promise.resolve(),

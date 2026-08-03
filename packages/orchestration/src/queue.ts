@@ -17,12 +17,18 @@ export type BossQueue = RunQueue & { boss: PgBoss; stop(): Promise<void> };
 /**
  * Hand work to the queue *after* its row is already committed.
  *
- * Never throws. Every post-commit send in this codebase is backed by a sweeper
- * — queued runs by the straggler sweep, decided checkpoints by
- * `findStrandedCheckpointRuns`, deliveries by their own sweepers — so a failed
- * send delays work, it does not lose it. Reporting it as a failure would be a
- * lie about durable state, and a costly one: the caller's retry creates a
- * *second* task and run while the first is still recovered by the sweeper.
+ * Never throws — **on the condition that the caller's work has a sweeper
+ * behind it**. Queued runs have the straggler sweep, decided checkpoints
+ * `findStrandedCheckpointRuns`, deliveries and the cron calendar their own
+ * sweeper stages. Given that, a failed send delays work rather than losing it,
+ * and reporting it as a failure would be a lie about durable state — a costly
+ * one, since the caller's retry creates a *second* task and run while the
+ * first is recovered anyway.
+ *
+ * The condition is load-bearing, not decoration. Schedule registration used
+ * this helper while reconciliation ran only at boot, which turned a loud 500
+ * into a schedule that silently never fired until someone restarted a worker.
+ * Before swallowing a send here, name the sweeper that will pick it up.
  */
 export async function enqueueAfterCommit(
   send: () => Promise<void>,
@@ -32,7 +38,7 @@ export async function enqueueAfterCommit(
     await send();
   } catch (err) {
     console.warn(
-      `[queue] post-commit enqueue failed (${context}) — the sweeper will recover it:`,
+      `[queue] post-commit enqueue failed (${context}) — its sweeper should recover it:`,
       String(err),
     );
   }

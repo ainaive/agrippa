@@ -1,5 +1,14 @@
 import { AppError, type LocalizedText } from "@agrippa/core";
-import { type Db, models, projectQuotas, runs, tasks, taskTypes, tokenUsage } from "@agrippa/db";
+import {
+  type Db,
+  type DbOrTx,
+  models,
+  projectQuotas,
+  runs,
+  tasks,
+  taskTypes,
+  tokenUsage,
+} from "@agrippa/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 const periodStart = sql`date_trunc('month', now())`;
@@ -21,7 +30,7 @@ export type ProjectUsage = {
  * Current-period (monthly) usage for a project. All groupings share the same
  * month window the quota gate uses, so the numbers agree everywhere.
  */
-export async function projectUsage(db: Db, projectId: string): Promise<ProjectUsage> {
+export async function projectUsage(db: DbOrTx, projectId: string): Promise<ProjectUsage> {
   const where = and(eq(tokenUsage.projectId, projectId), gte(tokenUsage.occurredAt, periodStart));
   const [totals] = await db
     .select({
@@ -92,7 +101,7 @@ export async function projectUsage(db: Db, projectId: string): Promise<ProjectUs
  * for mid-run enforcement, so this gate and the engine agree on both the
  * accounting window and the measure.
  */
-export async function assertQuotaHeadroom(db: Db, projectId: string): Promise<void> {
+export async function assertQuotaHeadroom(db: DbOrTx, projectId: string): Promise<void> {
   const [quota] = await db
     .select()
     .from(projectQuotas)

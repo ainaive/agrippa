@@ -37,6 +37,7 @@ import {
   InProcessEventBus,
   liveCentralWorkerSets,
   RedisEventBus,
+  reconcileScheduleCalendar,
   sweepNotificationDeliveries,
   sweepOfflineRuntimes,
   sweepRunLeases,
@@ -292,40 +293,27 @@ await queue.boss.work(QUEUE_TRIGGER_FIRE, async (jobs: Job<TriggerFirePayload>[]
   }
 });
 
-// Reconcile pg-boss's cron calendar with the schedule rows. The two are
-// written separately (row first, registration second), so a crash in between —
-// or a database restored from a backup taken mid-edit — can leave a schedule
-// that never fires, which is invisible by nature. Re-registering every enabled
-// schedule at boot is idempotent (`key` replaces the entry) and cheap.
+/**
+ * The calendar view the reconciler drives. Kept here rather than on `RunQueue`
+ * because listing is a worker-side repair concern, not something a producer
+ * needs; the boss handle is already in reach for `boss.work` above.
+ */
+const scheduleCalendar = {
+  list: async () => {
+    const entries = await queue.boss.getSchedules(QUEUE_SCHEDULE_FIRE);
+    return entries.map((e) => ({ key: e.key, cron: e.cron, timezone: e.timezone }));
+  },
+  register: (id: string, cron: string, timezone: string) =>
+    queue.registerSchedule(id, cron, timezone),
+  unregister: (id: string) => queue.unregisterSchedule(id),
+};
+
+// Converge once at boot so a restart repairs drift immediately; the sweeper
+// stage below then keeps converging, which is what makes a dropped
+// registration recoverable without waiting for the next restart.
 try {
-  const rows = await db
-    .select({
-      id: taskSchedules.id,
-      cron: taskSchedules.cron,
-      timezone: taskSchedules.timezone,
-      enabled: taskSchedules.enabled,
-    })
-    .from(taskSchedules);
-  let reconciled = 0;
-  for (const row of rows) {
-    // Per row, for the reason the sweeper is per stage: this runs only at boot,
-    // so a single failing schedule aborting the loop would leave an arbitrary
-    // remainder unreconciled for the entire life of the process, with nothing
-    // to retry it — and row order is unspecified, so which ones is a lottery.
-    try {
-      // Both directions. Registering only the enabled ones leaves a cron entry
-      // behind whenever a schedule was disabled while its unregister failed —
-      // and nothing else ever removes it, so it wakes a worker forever to be
-      // skipped. Reconciliation means converging, not just adding.
-      if (row.enabled) await queue.registerSchedule(row.id, row.cron, row.timezone);
-      else await queue.unregisterSchedule(row.id);
-      reconciled += 1;
-    } catch (err) {
-      deps.logger.warn(`schedule ${row.id}: reconciliation failed`, { err: String(err) });
-    }
-  }
-  // the count is what actually converged, not what was considered
-  deps.logger.info(`reconciled ${reconciled}/${rows.length} schedule(s)`);
+  const { registered, unregistered } = await reconcileScheduleCalendar(db, scheduleCalendar);
+  deps.logger.info(`schedule calendar reconciled (+${registered}/-${unregistered})`);
 } catch (err) {
   deps.logger.warn("schedule reconciliation failed", { err: String(err) });
 }
@@ -409,6 +397,17 @@ setInterval(async () => {
   // delivery backstops: backfill missed events, re-enqueue stale rows
   await stage("notification-deliveries", () => sweepNotificationDeliveries(db, queue));
   await stage("trigger-deliveries", () => sweepTriggerDeliveries(db, queue));
+
+  // calendar drift: a registration dropped at request time, or an edit whose
+  // re-registration was lost, would otherwise persist until the next restart —
+  // a schedule that silently never fires, or one firing on its old cron while
+  // the UI shows the new one. Steady state does no writes.
+  await stage("schedule-calendar", async () => {
+    const { registered, unregistered } = await reconcileScheduleCalendar(db, scheduleCalendar);
+    if (registered || unregistered) {
+      deps.logger.warn(`schedule calendar drift repaired (+${registered}/-${unregistered})`);
+    }
+  });
 }, 60_000);
 
 console.log(
