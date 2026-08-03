@@ -16,6 +16,15 @@ import type { ApiKeyScope } from "@agrippa/core";
  * endpoints, checkpoint decisions — is deliberately absent: those are decisions
  * a human makes in the UI, not things a script should do with a stolen token.
  */
+/**
+ * **Before adding a route here**: confirm it reaches project data through
+ * `assertProjectRole`. That function is where a key's `boundProjectId` is
+ * enforced, so a handler that scopes some other way — `GET /checkpoints/pending`
+ * joins `project_members` directly, for instance — would serve a bound key rows
+ * from *every* project its owner belongs to. Such a handler is safe only while
+ * it stays off this list, which is a property of this file rather than of the
+ * handler, and therefore worth stating here rather than hoping it is noticed.
+ */
 export type ApiKeyRouteRule = {
   method: string;
   pattern: RegExp;

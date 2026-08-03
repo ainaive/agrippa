@@ -59,6 +59,16 @@ export const triggerInboundRoutes = new Hono<TriggerEnv>().post("/:token", async
 
   // Read the body ONCE, as raw bytes: the signature covers the exact bytes the
   // sender hashed, and re-serializing parsed JSON would change them.
+  // Bound the body BEFORE reading it, the way the daemon event batch does:
+  // deciding after `text()` means an oversized send is already resident in
+  // memory by the time we object to it. Content-Length can be absent under
+  // chunked encoding, so the post-read check stays as the backstop that
+  // actually cannot be evaded — the header check is what keeps the common
+  // case from being paid for at all.
+  const declared = Number(c.req.header("content-length") ?? 0);
+  if (declared > TRIGGER_PAYLOAD_MAX_BYTES) {
+    throw new AppError("trigger_payload_too_large", 413, "Payload exceeds the size limit");
+  }
   const raw = await c.req.text();
   if (Buffer.byteLength(raw, "utf8") > TRIGGER_PAYLOAD_MAX_BYTES) {
     throw new AppError("trigger_payload_too_large", 413, "Payload exceeds the size limit");
