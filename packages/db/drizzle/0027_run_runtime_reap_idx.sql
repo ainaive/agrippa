@@ -1,0 +1,1 @@
+CREATE INDEX "runs_runtime_reap_idx" ON "runs" USING btree ("runtime_id","finished_at") WHERE "runs"."runtime_id" is not null;

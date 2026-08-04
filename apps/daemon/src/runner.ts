@@ -13,6 +13,7 @@ import type { Executor, ExecutorEvent, Logger, StepExecutionRequest } from "@agr
 import {
   checkoutFromUrl,
   git,
+  removeWorkspace,
   resetAgentProjectConfig,
   stagePlatformSnapshot,
   workspaceDirFor,
@@ -48,6 +49,14 @@ export class DaemonRunner {
   private hints: DaemonProtocolHints = DAEMON_PROTOCOL_HINTS;
   private stopped = false;
   private readonly activeAborts = new Map<string, AbortController>();
+  /** Runs executing here right now — never reap one of these. */
+  private readonly activeRunIds = new Set<string>();
+  /**
+   * Already deleted this process, so a run named on every poll for the rest of
+   * its 24-hour window costs one `has` rather than an `rm -rf` each time.
+   * Bounded by that window; a restart simply re-reaps, which is a no-op.
+   */
+  private readonly reaped = new Set<string>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly opts: RunnerOpts) {}
@@ -88,6 +97,7 @@ export class DaemonRunner {
       for (const dispatchId of claim.abortedDispatchIds) {
         this.activeAborts.get(dispatchId)?.abort("server requested abort");
       }
+      await this.reapWorkspaces(claim.reapableRunIds ?? []);
       if (claim.dispatch) await this.executeDispatch(claim.dispatch);
     }
   }
@@ -104,6 +114,7 @@ export class DaemonRunner {
     const { api, logger } = this.opts;
     const controller = new AbortController();
     this.activeAborts.set(dispatch.id, controller);
+    this.activeRunIds.add(dispatch.runId);
     try {
       const executor = this.opts.executors[dispatch.payload.executorId];
       if (!executor) {
@@ -174,6 +185,34 @@ export class DaemonRunner {
         .catch((failErr) => logger.warn("fail() report lost", { err: String(failErr) }));
     } finally {
       this.activeAborts.delete(dispatch.id);
+      this.activeRunIds.delete(dispatch.runId);
+    }
+  }
+
+  /**
+   * Delete the workspaces of runs the server says have finished.
+   *
+   * Affinity hands this machine a run's workspace for the run's whole life
+   * (ADR-0017 Decision 3), so the directory accumulates state across steps and
+   * only the server — where the engine finalizes, even for a remote executor —
+   * can say when it is spent. Left alone, every remote run leaves a shallow
+   * clone here for good.
+   *
+   * Best-effort and idempotent: `removeWorkspace` is `rm -rf` on both the
+   * workspace and its platform sidecar, so a repeated id costs a syscall, and
+   * a failure just means the next poll tries again. The active-run guard is
+   * belt and braces — the server only names terminal runs — but it keeps a
+   * stale response from deleting a directory out from under a live dispatch.
+   */
+  private async reapWorkspaces(runIds: readonly string[]): Promise<void> {
+    for (const runId of runIds) {
+      if (this.activeRunIds.has(runId) || this.reaped.has(runId)) continue;
+      try {
+        await removeWorkspace(runId);
+        this.reaped.add(runId);
+      } catch (err) {
+        this.opts.logger.warn(`workspace reap failed for run ${runId}`, { err: String(err) });
+      }
     }
   }
 

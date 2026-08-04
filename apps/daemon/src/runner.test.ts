@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
   ClaimedDispatch,
+  DaemonClaimResponse,
   DispatchCompleteBody,
   DispatchEventBatch,
   DispatchFailBody,
@@ -29,8 +30,19 @@ class MockApi implements DaemonApi {
     };
   }
   async heartbeat(): Promise<void> {}
-  async claim(): Promise<never> {
-    throw new Error("not used in unit tests");
+  /** Responses the claim loop will be fed, in order; empty means "unused". */
+  claimQueue: DaemonClaimResponse[] = [];
+  claimCalls = 0;
+  async claim(): Promise<DaemonClaimResponse> {
+    this.claimCalls += 1;
+    const next = this.claimQueue.shift();
+    if (next) return next;
+    // Idle rather than throwing once drained — a throw sends the loop into its
+    // 5s backoff, which outlives the test trying to stop it. The sleep stands
+    // in for the real long poll: without it the claim loop resolves purely in
+    // microtasks and starves the timer the test is waiting on.
+    await Bun.sleep(5);
+    return { dispatch: null, abortedDispatchIds: [] };
   }
   async postEvents(_id: string, batch: DispatchEventBatch["batch"]): Promise<{ abort: boolean }> {
     this.batches.push(batch);
@@ -220,5 +232,40 @@ describe("daemon runner config isolation", () => {
       ).exists(),
     ).toBe(true);
     expect(api.completed).toEqual({});
+  });
+
+  it("reaps the workspaces the server reports finished, and only those", async () => {
+    // The bug this closes: nothing ever deleted these, so every remote run
+    // left a shallow clone on the daemon host for good. The daemon cannot work
+    // out on its own that a run is done — affinity gives it the workspace for
+    // the run's whole life, and the engine finalizes centrally.
+    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-reap-"));
+    const finished = Bun.randomUUIDv7();
+    const live = Bun.randomUUIDv7();
+    for (const id of [finished, `${finished}.platform`, live]) {
+      await Bun.write(path.join(process.env.WORKSPACE_ROOT, id, "keep.txt"), "x");
+    }
+
+    const api = new MockApi();
+    const runner = makeRunner(api, new FakeExecutor({}));
+    await runner.register();
+    api.claimQueue = [
+      { dispatch: null, abortedDispatchIds: [], reapableRunIds: [finished] },
+      // second poll ends the loop, so start() returns
+      { dispatch: null, abortedDispatchIds: [], reapableRunIds: [] },
+    ];
+    const loop = runner.start();
+    while (api.claimCalls < 2) await Bun.sleep(5);
+    runner.stop();
+    await loop;
+
+    const root = process.env.WORKSPACE_ROOT;
+    expect(await Bun.file(path.join(root, finished, "keep.txt")).exists()).toBe(false);
+    // the platform sidecar goes with it — removeWorkspace takes both
+    expect(await Bun.file(path.join(root, `${finished}.platform`, "keep.txt")).exists()).toBe(
+      false,
+    );
+    // and a run the server did not name is untouched
+    expect(await Bun.file(path.join(root, live, "keep.txt")).exists()).toBe(true);
   });
 });

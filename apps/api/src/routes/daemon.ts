@@ -9,15 +9,16 @@ import {
   dispatchCompleteSchema,
   dispatchEventBatchSchema,
   dispatchFailSchema,
+  TERMINAL_RUN_STATUSES,
 } from "@agrippa/core";
-import { auditLogs, type Db, dispatchEvents, dispatches, runtimes } from "@agrippa/db";
+import { auditLogs, type Db, dispatchEvents, dispatches, runs, runtimes } from "@agrippa/db";
 import {
   ArtifactTooLargeError,
   DiskArtifactStore,
   isSafeArtifactKey,
   type RunEventBus,
 } from "@agrippa/orchestration";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { bearerToken } from "../lib/bearer-tokens";
@@ -29,6 +30,15 @@ import {
 import { validate } from "../lib/validate";
 
 type RuntimeRow = typeof runtimes.$inferSelect;
+
+/**
+ * How far back the claim poll looks for finished runs to reap, and how many it
+ * names at once. Long enough that a daemon offline for a working day still
+ * hears about its runs; short enough that the answer stays small. What falls
+ * out the far end is not lost — the daemon sweeps very old directories itself.
+ */
+const REAPABLE_WINDOW = "24 hours";
+const REAPABLE_LIMIT = 100;
 
 /**
  * The daemon-facing surface is its own Hono environment: requests carry a
@@ -192,9 +202,27 @@ export const daemonRoutes = new Hono<DaemonEnv>()
           eq(dispatches.abortRequested, true),
         ),
       );
+    // Runs pinned here that have finalized: the daemon holds their workspaces
+    // and cannot tell on its own that they are done, because the engine runs
+    // centrally even when the executor is remote. Bounded by a recency window
+    // rather than an acknowledgement — removal is idempotent, so repeating an
+    // id costs nothing, and anything older than the window is collected by the
+    // daemon's own backstop sweep.
+    const reapable = await c.var.db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(
+        and(
+          eq(runs.runtimeId, c.var.runtime.id),
+          inArray(runs.status, [...TERMINAL_RUN_STATUSES]),
+          gt(runs.finishedAt, sql`now() - ${REAPABLE_WINDOW}::interval`),
+        ),
+      )
+      .limit(REAPABLE_LIMIT);
     const response: DaemonClaimResponse = {
       dispatch: claimed,
       abortedDispatchIds: aborted.map((r) => r.id),
+      reapableRunIds: reapable.map((r) => r.id),
     };
     return c.json(response);
   })

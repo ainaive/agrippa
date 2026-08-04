@@ -122,6 +122,11 @@ export const runs = pgTable(
     index("runs_project_idx").on(t.projectId, t.status),
     // the expiry sweep scans only running runs
     index("runs_lease_sweep_idx").on(t.leaseExpiresAt).where(sql`${t.status} = 'running'`),
+    // the daemon claim poll asks "which of my pinned runs are finished?" on
+    // every long-poll, so it must not be a seq scan over every run ever
+    index("runs_runtime_reap_idx")
+      .on(t.runtimeId, t.finishedAt)
+      .where(sql`${t.runtimeId} is not null`),
   ],
 );
 

@@ -136,6 +136,20 @@ export type DaemonClaimResponse = {
   dispatch: ClaimedDispatch | null;
   /** Piggybacked abort flags for this runtime's other live dispatches. */
   abortedDispatchIds: string[];
+  /**
+   * Runs pinned here whose workspace is now safe to delete, piggybacked on the
+   * same poll for the same reason the aborts are.
+   *
+   * The daemon cannot work this out for itself. Affinity gives it the
+   * workspace for a run's whole life (ADR-0017 Decision 3), so the directory
+   * carries state across steps and reaping a live one is not merely wasteful —
+   * the next dispatch re-clones at the pinned base and the run silently
+   * continues without earlier steps' work. Only the server knows the run
+   * finalized, because the engine runs centrally even when the executor does
+   * not. Absent on an older server, which an older daemon also ignores; either
+   * way the backstop sweep still collects the directory eventually.
+   */
+  reapableRunIds?: string[];
 };
 
 export const dispatchEventBatchSchema = z.object({

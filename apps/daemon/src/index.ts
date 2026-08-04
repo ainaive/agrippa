@@ -6,6 +6,7 @@ import type { Executor, Logger } from "@agrippa/executor-core";
 import { HttpDaemonApi } from "./client";
 import { loadConfig } from "./config";
 import { DaemonRunner } from "./runner";
+import { STALE_WORKSPACE_DAYS, sweepStaleWorkspaces } from "./sweep";
 
 const logger: Logger = {
   info: (msg, extra) => console.log(`[daemon] ${msg}`, extra ?? ""),
@@ -61,6 +62,14 @@ const shutdown = (signal: string) => {
 };
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+// Backstop for whatever the server's reap signal never reached: a daemon that
+// was offline when its runs finished, one upgraded from a build that never
+// reaped at all, or a run that finalized more than the server's window ago.
+// The floor is deliberately far beyond any legitimate pause — a run waiting on
+// a checkpoint still owns its workspace, and deleting it would not merely cost
+// a re-clone but silently drop the completed steps' work.
+await sweepStaleWorkspaces(config.workspaceRoot, STALE_WORKSPACE_DAYS, logger);
 
 logger.info(`agrippa-daemon connecting to ${config.serverUrl}`);
 await runner.start();

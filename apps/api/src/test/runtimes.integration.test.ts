@@ -280,6 +280,30 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     runId = run?.id as string;
   });
 
+  it("names this runtime's finished runs so the daemon can reap their workspaces", async () => {
+    // Affinity gives the daemon a run's workspace for the run's whole life, so
+    // only the server — where the engine finalizes, even for a remote executor
+    // — can say when the directory is spent. Without this every remote run
+    // leaves a clone on the daemon host permanently.
+    const pinned = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
+    expect(pinned.reapableRunIds ?? []).not.toContain(runId);
+
+    await db
+      .update(runs)
+      .set({ runtimeId, status: "succeeded", finishedAt: sql`now()` })
+      .where(eq(runs.id, runId));
+    const done = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
+    expect(done.reapableRunIds).toContain(runId);
+
+    // never another runtime's, and never one that is still going
+    const foreign = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim(otherToken));
+    expect(foreign.reapableRunIds ?? []).not.toContain(runId);
+
+    await db.update(runs).set({ status: "running" }).where(eq(runs.id, runId));
+    const live = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
+    expect(live.reapableRunIds ?? []).not.toContain(runId);
+  });
+
   it("claim is atomic, oldest-first, and scoped to the runtime", async () => {
     // empty poll answers 200 with a null dispatch (the abort piggyback rides it)
     const empty = await jsonOf<{ dispatch: null; abortedDispatchIds: string[] }>(
