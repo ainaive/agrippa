@@ -11,6 +11,7 @@ import {
 } from "@agrippa/core";
 import {
   type Db,
+  type DbOrTx,
   fabri,
   loadProviderCatalog,
   mcpServers,
@@ -241,7 +242,7 @@ export function resolveSlotModels(args: {
 }
 
 /** Granted active model rows for a project (grants ∩ active registry rows). */
-async function fetchGrantedModels(db: Db, projectId: string): Promise<GrantedModelRow[]> {
+async function fetchGrantedModels(db: DbOrTx, projectId: string): Promise<GrantedModelRow[]> {
   const grants = await db
     .select({ resourceId: projectResourceGrants.resourceId })
     .from(projectResourceGrants)
@@ -332,7 +333,7 @@ export type AgentBindingResolution = {
  * run row exists, so failures are fast and actionable.
  */
 export async function resolveAgentBindings(
-  db: Db,
+  db: DbOrTx,
   projectId: string,
   compiled: CompiledTemplate,
   defaults: { faberId: string; executorId: string },
@@ -555,7 +556,7 @@ export function skillRefRange(ref: string): string {
  * re-reading the mutable global registry.
  */
 export async function authorizeResources(
-  db: Db,
+  db: DbOrTx,
   projectId: string,
   compiled: CompiledTemplate,
   registry: {
@@ -648,7 +649,7 @@ export async function authorizeResources(
  * stored credential — a cross-tenant authorization bypass.
  */
 export async function verifyRepoRefs(
-  db: Db,
+  db: DbOrTx,
   projectId: string,
   inputs: TemplateInput[],
   params: Record<string, unknown>,

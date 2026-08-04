@@ -54,8 +54,19 @@ export const notificationEndpoints = pgTable(
 /**
  * One delivery attempt-record per (endpoint, notifiable run event) — the
  * unique index is what makes syncRunNotifications idempotent. Test sends
- * carry no event/run. `payload` is a redacted snapshot for inspection;
- * retries re-render from the durable event because signatures embed
+ * carry no event/run.
+ *
+ * `payload` does two jobs, and the difference matters. A run-derived delivery
+ * re-renders from its `run_events` row, so `payload` is free to hold a
+ * redacted request snapshot for inspection once the send succeeds. A
+ * **project-scoped** delivery (a schedule or trigger that stopped) has no
+ * event row at all, so `payload` IS its event payload and is what a retry
+ * re-renders from. What keeps the two from colliding is that only the success
+ * path writes the snapshot and a succeeded delivery is never re-delivered —
+ * every other terminal write is guarded on `status = 'pending'` precisely so
+ * that invariant holds. Add a third writer and check it against that.
+ *
+ * Either way the retry re-renders rather than replaying: signatures embed
  * timestamps receivers reject when stale.
  */
 export const notificationDeliveries = pgTable(

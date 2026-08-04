@@ -2,6 +2,8 @@ import {
   type ApprovalExpirePayload,
   QUEUE_APPROVAL_EXPIRE,
   QUEUE_NOTIFICATION_DELIVER,
+  QUEUE_SCHEDULE_FIRE,
+  QUEUE_TRIGGER_FIRE,
   type RunQueue,
   requiredExecutorIds,
   runExecuteQueueName,
@@ -11,6 +13,36 @@ import { eq } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 
 export type BossQueue = RunQueue & { boss: PgBoss; stop(): Promise<void> };
+
+/**
+ * Hand work to the queue *after* its row is already committed.
+ *
+ * Never throws — **on the condition that the caller's work has a sweeper
+ * behind it**. Queued runs have the straggler sweep, decided checkpoints
+ * `findStrandedCheckpointRuns`, deliveries and the cron calendar their own
+ * sweeper stages. Given that, a failed send delays work rather than losing it,
+ * and reporting it as a failure would be a lie about durable state — a costly
+ * one, since the caller's retry creates a *second* task and run while the
+ * first is recovered anyway.
+ *
+ * The condition is load-bearing, not decoration. Schedule registration used
+ * this helper while reconciliation ran only at boot, which turned a loud 500
+ * into a schedule that silently never fired until someone restarted a worker.
+ * Before swallowing a send here, name the sweeper that will pick it up.
+ */
+export async function enqueueAfterCommit(
+  send: () => Promise<void>,
+  context: string,
+): Promise<void> {
+  try {
+    await send();
+  } catch (err) {
+    console.warn(
+      `[queue] post-commit enqueue failed (${context}) — its sweeper should recover it:`,
+      String(err),
+    );
+  }
+}
 
 /**
  * Resolves the executor ids a run requires, so enqueueRun can derive its
@@ -70,6 +102,29 @@ export async function createRunQueue(
     await boss.deleteQueue(QUEUE_NOTIFICATION_DELIVER);
   }
   await boss.createQueue(QUEUE_NOTIFICATION_DELIVER, { policy: "exclusive" });
+  // The one queue left on pg-boss's defaults (retry_limit 2, retry_delay 0,
+  // expire 15m), and deliberately so. Its retries are wanted — a firing that
+  // died mid-flight should be tried again — and what used to make them
+  // dangerous was that a redelivery could not be told from a new cron
+  // occurrence. `runs.origin_key` settles that at the submission itself, so
+  // the delivery semantics no longer have to carry the guarantee. Tightening
+  // them here would also need the converge-by-recreate dance below, since
+  // createQueue is upsert-blind to options.
+  //
+  // Do NOT give this queue a dead-letter queue without revisiting that: the
+  // redrive path re-creates a job with a NEW id, and the id is the firing's
+  // identity — a redriven job would mint a second `origin_key` and a second
+  // charged run for one cron occurrence.
+  await boss.createQueue(QUEUE_SCHEDULE_FIRE);
+  // trigger.fire needs the same treatment as the delivery queue, and for the
+  // same reason: enqueueTriggerDelivery leans on singletonKey to keep a
+  // sender's retry, a sweeper re-enqueue and an operator's replay from racing
+  // into two runs, and on 'standard' that key enforces nothing at all.
+  const existingTrigger = await boss.getQueue(QUEUE_TRIGGER_FIRE);
+  if (existingTrigger && existingTrigger.policy !== "exclusive") {
+    await boss.deleteQueue(QUEUE_TRIGGER_FIRE);
+  }
+  await boss.createQueue(QUEUE_TRIGGER_FIRE, { policy: "exclusive" });
 
   return {
     boss,
@@ -92,6 +147,33 @@ export async function createRunQueue(
         payload,
         { singletonKey: payload.approvalId },
         new Date(atMs),
+      );
+    },
+    async registerSchedule(scheduleId: string, cron: string, timezone: string): Promise<void> {
+      // `key` scopes the entry to this schedule, so re-registering after an
+      // edit replaces its calendar rather than adding a second one; pg-boss
+      // owns the timezone, and with it the DST edges we would otherwise have
+      // to reason about ourselves.
+      await boss.schedule(
+        QUEUE_SCHEDULE_FIRE,
+        cron,
+        { scheduleId },
+        { tz: timezone, key: scheduleId },
+      );
+    },
+    async unregisterSchedule(scheduleId: string): Promise<void> {
+      await boss.unschedule(QUEUE_SCHEDULE_FIRE, scheduleId);
+    },
+    async enqueueTriggerDelivery(deliveryId: string): Promise<void> {
+      // the inbound request already committed the delivery row, so a lost job
+      // is recoverable from it; the singleton key keeps a sender's retry and
+      // an operator's replay from racing into two runs
+      await boss.send(
+        QUEUE_TRIGGER_FIRE,
+        { deliveryId },
+        // retryDelay outlasts the 20s claim window in fireTrigger, so a retry
+        // is never mistaken for a concurrent duplicate and turned away
+        { singletonKey: deliveryId, retryLimit: 3, retryDelay: 30 },
       );
     },
     async enqueueNotificationDelivery(deliveryId: string): Promise<void> {

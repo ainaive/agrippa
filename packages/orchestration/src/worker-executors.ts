@@ -1,4 +1,4 @@
-import { type Db, runtimes, workerHeartbeats } from "@agrippa/db";
+import { type DbOrTx, runtimes, workerHeartbeats } from "@agrippa/db";
 import { and, eq, gte, sql } from "drizzle-orm";
 
 /** Advertisements older than this are a worker that no longer runs that config. */
@@ -28,7 +28,7 @@ export type LiveWorkerExecutors = {
  * daemon-only executor is submittable (ADR-0017).
  */
 export async function liveWorkerExecutors(
-  db: Db,
+  db: DbOrTx,
   opts?: { orgId?: string },
 ): Promise<LiveWorkerExecutors> {
   const workers = await db
@@ -60,6 +60,6 @@ export async function liveWorkerExecutors(
  * advertised recently — callers skip availability checks then, rather than
  * blocking every submission on a fresh deployment.
  */
-export async function liveExecutorIds(db: Db): Promise<Set<string>> {
+export async function liveExecutorIds(db: DbOrTx): Promise<Set<string>> {
   return (await liveWorkerExecutors(db)).union;
 }

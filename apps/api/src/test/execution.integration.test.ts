@@ -14,7 +14,14 @@ import {
 import { desc, eq } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
-import { freshTestDb, jsonOf, postgresAvailable, signUp, type TestClient } from "./helpers";
+import {
+  freshTestDb,
+  jsonOf,
+  makeFakeQueue,
+  postgresAvailable,
+  signUp,
+  type TestClient,
+} from "./helpers";
 
 const dbUp = await postgresAvailable();
 
@@ -51,13 +58,11 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   const enqueued: string[] = [];
   const bus = new InProcessEventBus();
 
-  const fakeQueue: RunQueue = {
+  const fakeQueue: RunQueue = makeFakeQueue({
     enqueueRun: async (id) => {
       enqueued.push(id);
     },
-    enqueueApprovalExpiry: async () => {},
-    enqueueNotificationDelivery: async () => {},
-  };
+  });
 
   const engineDeps = (): EngineDeps => ({
     db,

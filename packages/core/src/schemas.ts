@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { API_KEY_SCOPES } from "./api-keys";
 import { PROJECT_ROLES } from "./domain";
 import { LOCALES } from "./i18n";
 import { NOTIFIABLE_EVENT_TYPES, NOTIFICATION_ENDPOINT_KINDS } from "./notifications";
+import { SCHEDULE_CONCURRENCY_POLICIES, validateCron, validateTimezone } from "./schedules";
 
 export const slugSchema = z
   .string()
@@ -247,6 +249,7 @@ export const taskSubmitSchema = z.object({
     )
     .optional(),
 });
+export type TaskSubmitInput = z.infer<typeof taskSubmitSchema>;
 
 /**
  * Kind-discriminated payload for POST /runs/:id/checkpoints/:checkpointId/respond.
@@ -295,3 +298,82 @@ export const grantsPutSchema = z.array(
 export const runtimeCreateSchema = z.object({
   name: z.string().min(1).max(100),
 });
+
+const cronField = z.string().refine((v) => validateCron(v) === null, {
+  error: (issue) => validateCron(String(issue.input)) ?? "invalid cron",
+});
+const timezoneField = z.string().refine((v) => validateTimezone(v) === null, {
+  error: "not a valid IANA timezone",
+});
+
+export const scheduleCreateSchema = z.object({
+  name: z.string().min(1).max(200),
+  taskTypeId: z.uuid(),
+  params: z.record(z.string(), z.unknown()).default({}),
+  agents: z
+    .record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    )
+    .default({}),
+  cron: cronField,
+  timezone: timezoneField.default("UTC"),
+  concurrencyPolicy: z.enum(SCHEDULE_CONCURRENCY_POLICIES).default("skip"),
+});
+export type ScheduleCreateInput = z.infer<typeof scheduleCreateSchema>;
+
+export const scheduleUpdateSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    params: z.record(z.string(), z.unknown()),
+    agents: z.record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    ),
+    cron: cronField,
+    timezone: timezoneField,
+    concurrencyPolicy: z.enum(SCHEDULE_CONCURRENCY_POLICIES),
+    /** Re-enabling clears `disabledReason`; the owner is re-checked at the next firing. */
+    enabled: z.boolean(),
+  })
+  .partial();
+export type ScheduleUpdateInput = z.infer<typeof scheduleUpdateSchema>;
+
+export const triggerCreateSchema = z.object({
+  name: z.string().min(1).max(200),
+  taskTypeId: z.uuid(),
+  params: z.record(z.string(), z.unknown()).default({}),
+  agents: z
+    .record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    )
+    .default({}),
+  timezone: timezoneField.default("UTC"),
+  /** Write-only; encrypted into the secrets table. Required — see the schema. */
+  secret: z.string().min(16).max(200),
+});
+export type TriggerCreateInput = z.infer<typeof triggerCreateSchema>;
+
+export const triggerUpdateSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    timezone: timezoneField,
+    params: z.record(z.string(), z.unknown()),
+    agents: z.record(
+      z.string(),
+      z.object({ executorId: z.string().min(1).optional(), faberId: z.uuid().optional() }),
+    ),
+    enabled: z.boolean(),
+  })
+  .partial();
+export type TriggerUpdateInput = z.infer<typeof triggerUpdateSchema>;
+
+export const apiKeyCreateSchema = z.object({
+  name: z.string().min(1).max(100),
+  /** At least one — a key that grants nothing is a footgun, not a default. */
+  scopes: z.array(z.enum(API_KEY_SCOPES)).min(1),
+  /** Omit for a non-expiring key. */
+  expiresDays: z.number().int().min(1).max(3650).optional(),
+});
+export type ApiKeyCreateInput = z.infer<typeof apiKeyCreateSchema>;

@@ -71,3 +71,28 @@ export type NotificationCatalog = typeof resources.en.notifications;
 export function notificationMessages(locale: string): NotificationCatalog {
   return locale.startsWith("zh") ? resources["zh-CN"].notifications : resources.en.notifications;
 }
+
+/**
+ * A schedule/trigger disabled-reason as a **clause**, not the raw enum.
+ *
+ * The emitters put a `ScheduleDisabledReason`/`TriggerDisabledReason` on the
+ * event payload and the template interpolates it into prose, so without this
+ * the operator is told the schedule stopped because `owner_lost_access`.
+ *
+ * It reads the `notifications` catalog rather than `settings.schedules.reasons`
+ * even though the two say the same thing, because the grammar differs: the SPA
+ * renders its copy as a standalone status line ("Stopped: its owner…"), and
+ * pasting that into a sentence that already says the schedule was disabled
+ * yields "was disabled and will not run again: Stopped: its owner… ." — a
+ * doubled statement and a doubled terminator. Two surfaces, two shapes.
+ *
+ * Falls back to the raw code, which beats an empty sentence. Nothing reaches
+ * that fallback today and a test pins it that way: every member of both
+ * disabled-reason enums must resolve in every locale.
+ */
+export function disabledReasonText(reason: string, locale: string): string {
+  const table = (locale.startsWith("zh") ? resources["zh-CN"] : resources.en).notifications as {
+    reasons?: Record<string, string>;
+  };
+  return table.reasons?.[reason] ?? reason;
+}

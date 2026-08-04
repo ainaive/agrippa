@@ -4,6 +4,9 @@
     "members": "Members",
     "resources": "Resources",
     "repos": "Repositories",
+    "schedules": "Schedules",
+    "triggers": "Webhooks",
+    "apiKeys": "API keys",
     "quota": "Quota",
     "notifications": "Notifications"
   },
@@ -115,6 +118,8 @@
       "run_failed": "Run failed",
       "run_cancelled": "Run cancelled",
       "run_timed_out": "Run timed out",
+      "schedule_disabled": "Schedule stopped",
+      "schedule_failed": "Schedule could not run",
       "notification_test": "Test"
     },
     "add": "Add endpoint",
@@ -137,5 +142,84 @@
     },
     "retry": "Retry",
     "retried": "Delivery re-queued"
+  },
+  "apiKeys": {
+    "title": "API keys",
+    "hint": "Programmatic access to this project: submit tasks, read runs. Keys act as you, are bound to this project, and cannot reach administration.",
+    "addTitle": "Create a key",
+    "name": "Name",
+    "scopes": "Scopes",
+    "scopeHints": {
+      "tasks_write": "Submit, retry, and cancel",
+      "runs_read": "Read tasks, runs, and artifacts",
+      "resources_read": "Read the task catalog"
+    },
+    "create": "Create key",
+    "created": "API key created",
+    "keyOnce": "Copy the key for “{{name}}” now — it is shown only once.",
+    "copy": "Copy key",
+    "copied": "Key copied",
+    "empty": "No API keys yet",
+    "lastUsed": "last used {{time}}",
+    "neverUsed": "never used",
+    "revoke": "Revoke",
+    "revokeConfirm": "Revoke “{{name}}”?",
+    "revokeHint": "Anything using this key stops working immediately. This cannot be undone.",
+    "revoked": "API key revoked",
+    "revokedBadge": "Revoked"
+  },
+  "schedules": {
+    "title": "Schedules",
+    "hint": "Submit a task on a recurring schedule. A schedule runs as the person who created it and can only do what they can do right now — if they lose access to this project, it stops and tells you.",
+    "cron": "Cron expression",
+    "cronHint": "Five fields: minute hour day-of-month month day-of-week. “0 9 * * 1” is Mondays at 09:00.",
+    "timezone": "Timezone",
+    "policy": "When the previous run is still going",
+    "policies": {
+      "skip": "Skip",
+      "queue": "Queue",
+      "replace": "Replace"
+    },
+    "policyHints": {
+      "skip": "Do nothing this time — one late report beats two overlapping ones.",
+      "queue": "Submit anyway and let the runs queue up.",
+      "replace": "Cancel the previous run, then submit."
+    },
+    "empty": "No schedules yet",
+    "lastFired": "last ran {{time}}",
+    "neverFired": "never run",
+    "lastError": "Last attempt failed: {{error}}",
+    "toggle": "Enabled",
+    "remove": "Delete",
+    "removeConfirm": "Delete “{{name}}”?",
+    "removeHint": "The schedule stops immediately. Runs it already produced are kept.",
+    "removed": "Schedule deleted",
+    "reasons": {
+      "owner_lost_access": "Stopped: its owner no longer has access to this project.",
+      "project_archived": "Stopped: this project is archived.",
+      "task_type_gone": "Stopped: its task type is no longer available."
+    },
+    "createElsewhere": "Schedules are created from a task: open the <catalog>catalog</catalog>, fill in the task's form, then choose “Run on a schedule”. Manage them here."
+  },
+  "triggers": {
+    "title": "Webhook triggers",
+    "hint": "An external system can start a task by POSTing to a signed URL. A trigger runs as the person who created it and can only do what they can do at the time it fires.",
+    "empty": "No webhook triggers yet",
+    "createElsewhere": "Triggers are created from a task: open the <catalog>catalog</catalog>, fill in the task's form, then choose “Trigger by webhook”. Manage them here.",
+    "lastFired": "last fired {{time}}",
+    "neverFired": "never fired",
+    "toggle": "Enabled",
+    "remove": "Delete",
+    "removeConfirm": "Delete “{{name}}”?",
+    "removeHint": "The URL stops working immediately. Runs it already produced are kept.",
+    "removed": "Trigger deleted",
+    "copy": "Copy URL",
+    "copied": "URL copied",
+    "deliveriesTitle": "Recent deliveries",
+    "deliveriesEmpty": "Nothing has been received yet.",
+    "payload": "Payload",
+    "retry": "Retry",
+    "retried": "Delivery queued again",
+    "attempts": "{{count}} attempts"
   }
 }

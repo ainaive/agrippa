@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { createHmac, randomBytes } from "node:crypto";
+import { SCHEDULE_DISABLED_REASONS, TRIGGER_DISABLED_REASONS } from "@agrippa/core";
 import {
   createDb,
   encryptSecret,
@@ -12,6 +13,7 @@ import {
   secrets,
   users,
 } from "@agrippa/db";
+import { disabledReasonText } from "@agrippa/i18n";
 import { ProviderCredentialError } from "@agrippa/orchestration";
 import { eq, sql } from "drizzle-orm";
 import type { HostLookup } from "./net";
@@ -64,6 +66,55 @@ describe("renderMessage", () => {
       ctx({ locale: "zh-CN", eventPayload: { title: { en: "English only" } } }),
     );
     expect(fallback.body).toContain("English only");
+  });
+
+  it("renders a schedule failure with its name and cause, not an empty sentence", () => {
+    // The emitter sends `error` as a formatted STRING; the renderer used to
+    // cast it to {code,message}, so a truthy string took the object branch and
+    // produced "" — with the string fallback beneath it unreachable.
+    const msg = renderMessage(
+      ctx({
+        eventType: "schedule.failed",
+        eventPayload: { scheduleName: "Weekly report", error: "quota_exhausted: no headroom" },
+        run: null,
+        task: null,
+      }),
+    );
+    expect(msg.body).toContain("Weekly report");
+    expect(msg.body).toContain("quota_exhausted: no headroom");
+  });
+
+  it("renders a disabled reason as a clause, not the raw enum and not a doubled sentence", () => {
+    const msg = renderMessage(
+      ctx({
+        eventType: "schedule.disabled",
+        eventPayload: { scheduleName: "Weekly report", reason: "owner_lost_access" },
+        run: null,
+        task: null,
+      }),
+    );
+    // exact, not `toContain`: the settings catalog says these standalone
+    // ("Stopped: its owner…"), and pasting that into a sentence that already
+    // says the schedule was disabled reads "…will not run again: Stopped:
+    // … ." with two terminators. Only a whole-string match catches that.
+    expect(msg.body).toBe(
+      "The schedule “Weekly report” in Widgets was disabled and will not run again: its owner no longer has access to this project.",
+    );
+  });
+
+  it("renders every disabled reason in every locale", () => {
+    // the parity test compares locales against each other, never against the
+    // enums — so a fourth reason would ship rendering as a raw code with a
+    // green suite, which is the bug this catalog exists to prevent
+    for (const locale of ["en", "zh-CN"]) {
+      for (const reason of [...SCHEDULE_DISABLED_REASONS, ...TRIGGER_DISABLED_REASONS]) {
+        expect({ locale, reason, text: disabledReasonText(reason, locale) }).not.toEqual({
+          locale,
+          reason,
+          text: reason,
+        });
+      }
+    }
   });
 
   it("includes the error on run.failed", () => {
@@ -214,6 +265,39 @@ describe.skipIf(!dbUp)("deliverNotification", () => {
       })
       .returning();
     signedEndpointId = endpoint?.id as string;
+  });
+
+  it("carries a project-scoped event's payload into the body it sends", async () => {
+    // A schedule or trigger that stopped has no run, so no `run_events` row to
+    // hang its payload on — `insertProjectEventDeliveries` puts it on the
+    // delivery instead. The renderer only ever read the event row, so every
+    // variable interpolated empty and the operator received: `The schedule ""
+    // in Widgets produced no run this time: .` The one channel that reaches a
+    // human when unattended work breaks, arriving with nothing in it.
+    const [row] = await db
+      .insert(notificationDeliveries)
+      .values({
+        endpointId: signedEndpointId,
+        projectId,
+        eventType: "schedule.failed",
+        payload: { scheduleName: "Weekly report", error: "quota_exhausted: no headroom" },
+      })
+      .returning({ id: notificationDeliveries.id });
+
+    let sent = "";
+    const fetchImpl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sent = String(init?.body);
+      return new Response('{"ok":true}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await deliverNotification(db, row?.id as string, { fetchImpl, lookup: publicLookup });
+
+    // the RENDERED message, not the raw body: the generic formatter echoes
+    // `payload` verbatim, so asserting on `sent` alone passes even when the
+    // message renders empty — it would pin the plumbing and nothing else
+    const body = (JSON.parse(sent) as { message: { title: string; body: string } }).message.body;
+    expect(body).toContain("Weekly report");
+    expect(body).toContain("quota_exhausted: no headroom");
   });
 
   it("delivers, verifies the signature server-side, and finalizes the row", async () => {

@@ -35,13 +35,16 @@ import {
   templateVersions,
   users,
 } from "@agrippa/db";
-import { preflightSubmit, upgradeCompiledTemplate } from "@agrippa/orchestration";
+import {
+  liveWorkerExecutors,
+  preflightSubmit,
+  projectUsage,
+  upgradeCompiledTemplate,
+} from "@agrippa/orchestration";
 import { and, count, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { audit } from "../lib/audit";
-import { liveWorkerExecutors } from "../lib/executors";
-import { projectUsage } from "../lib/usage";
 import { validate } from "../lib/validate";
 import { requireProjectRole } from "../middleware/rbac";
 

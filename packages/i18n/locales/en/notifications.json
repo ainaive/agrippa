@@ -27,9 +27,30 @@
     "title": "Runtime offline",
     "body": "The remote runtime “{{runtimeName}}” executing run #{{runNumber}} “{{taskTitle}}” in {{projectName}} has stopped reporting."
   },
+  "scheduleDisabled": {
+    "title": "Schedule stopped",
+    "body": "The schedule “{{scheduleName}}” in {{projectName}} was disabled and will not run again: {{reason}}."
+  },
+  "scheduleFailed": {
+    "title": "Schedule could not run",
+    "body": "The schedule “{{scheduleName}}” in {{projectName}} produced no run this time: {{error}}. It stays enabled and will try again."
+  },
+  "triggerDisabled": {
+    "title": "Trigger stopped",
+    "body": "The webhook trigger “{{triggerName}}” in {{projectName}} was disabled and will accept nothing further: {{reason}}."
+  },
+  "triggerFailed": {
+    "title": "Trigger could not run",
+    "body": "A request to the webhook trigger “{{triggerName}}” in {{projectName}} produced no run: {{error}}. The sender was already acknowledged, so nobody else will hear about this."
+  },
   "test": {
     "title": "Test notification",
     "body": "This is a test notification from Agrippa for project {{projectName}}."
   },
-  "openRun": "Open run"
+  "openRun": "Open run",
+  "reasons": {
+    "owner_lost_access": "its owner no longer has access to this project",
+    "project_archived": "this project is archived",
+    "task_type_gone": "its task type is no longer available"
+  }
 }

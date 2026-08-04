@@ -1,10 +1,9 @@
 import { AppError, EXECUTOR_CATALOG, EXECUTOR_DEFAULT_SENTINEL, isExecutorId } from "@agrippa/core";
 import { fabri, orchestrationTemplates, scenarios, taskTypes, templateVersions } from "@agrippa/db";
-import { upgradeCompiledTemplate } from "@agrippa/orchestration";
+import { liveExecutorIds, upgradeCompiledTemplate } from "@agrippa/orchestration";
 import { asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
-import { liveExecutorIds } from "../lib/executors";
 
 const DEFAULT_EXECUTOR = process.env.AGRIPPA_EXECUTOR ?? "claude-agent-sdk";
 

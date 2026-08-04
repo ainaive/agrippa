@@ -349,3 +349,70 @@ export type NotificationDeliveryRow = {
   lastError: string | null;
   createdAt: string;
 };
+
+export type ApiKeyRow = {
+  id: string;
+  name: string;
+  /** First 12 chars of the issued key — the plaintext is shown only at creation. */
+  prefix: string;
+  scopes: string[];
+  projectId: string | null;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+};
+
+export type ApiKeyCreated = ApiKeyRow & { key: string };
+
+export type ScheduleRow = {
+  id: string;
+  name: string;
+  taskTypeId: string;
+  params: Record<string, unknown>;
+  agentOverrides: Record<string, { executorId?: string; faberId?: string }>;
+  cron: string;
+  timezone: string;
+  concurrencyPolicy: "skip" | "queue" | "replace";
+  enabled: boolean;
+  /** Set when the platform stopped it; null when a human paused it. */
+  disabledReason: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  lastFiredAt: string | null;
+  lastRunId: string | null;
+  createdBy: string;
+  createdAt: string;
+};
+
+export type TriggerRow = {
+  id: string;
+  name: string;
+  taskTypeId: string;
+  params: Record<string, unknown>;
+  agentOverrides: Record<string, { executorId?: string; faberId?: string }>;
+  /** First 12 chars of the URL token — the full one is shown only at creation. */
+  tokenPrefix: string;
+  enabled: boolean;
+  disabledReason: string | null;
+  lastFiredAt: string | null;
+  createdBy: string;
+  createdAt: string;
+};
+
+export type TriggerCreated = TriggerRow & { token: string };
+
+export type TriggerDeliveryRow = {
+  id: string;
+  endpointId: string;
+  endpointName: string | null;
+  externalId: string | null;
+  status: "pending" | "succeeded" | "failed";
+  attempts: number;
+  payload: Record<string, unknown> | null;
+  runId: string | null;
+  lastError: string | null;
+  lastAttemptAt: string | null;
+  createdAt: string;
+};

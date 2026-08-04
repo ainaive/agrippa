@@ -8,6 +8,7 @@ import { type Auth, createAuth } from "./auth";
 import type { AppEnv } from "./context";
 import { requireSession } from "./middleware/auth";
 import { errorHandler } from "./middleware/error";
+import { apiKeyRoutes } from "./routes/api-keys";
 import { catalogRoutes } from "./routes/catalog";
 import { daemonRoutes } from "./routes/daemon";
 import { executionRoutes } from "./routes/execution";
@@ -19,7 +20,10 @@ import { notificationRoutes } from "./routes/notifications";
 import { projectRoutes } from "./routes/projects";
 import { registryRoutes } from "./routes/registry";
 import { runtimeRoutes } from "./routes/runtimes";
+import { scheduleRoutes } from "./routes/schedules";
 import { templateRoutes, templateValidateRoute } from "./routes/templates";
+import { triggerInboundRoutes } from "./routes/trigger-inbound";
+import { triggerRoutes } from "./routes/triggers";
 
 const HSTS_DEFAULT_MAX_AGE = 31_536_000; // 1 year
 
@@ -103,6 +107,9 @@ export function createApp(deps: {
   // daemon surface: bearer runtime-token auth, no session — mounted outside
   // the v1 session gate exactly like accept-invite (ADR-0017 Decision 3)
   app.route("/api/daemon", daemonRoutes);
+  // inbound webhook triggers: token in the path + a required signature, no
+  // session — mounted outside the v1 gate for the same reason the daemon is
+  app.route("/api/triggers", triggerInboundRoutes);
 
   app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
@@ -115,6 +122,9 @@ export function createApp(deps: {
   v1.route("/templates", templateRoutes);
   v1.route("/projects", projectRoutes);
   v1.route("/projects", notificationRoutes);
+  v1.route("/projects", apiKeyRoutes);
+  v1.route("/projects", scheduleRoutes);
+  v1.route("/projects", triggerRoutes);
   v1.route("/invitations", invitationRoutes);
   v1.route("/", executionRoutes);
   v1.route("/", governanceRoutes);

@@ -1,24 +1,29 @@
-import { PROVIDER_CATALOG } from "@agrippa/core";
+import { API_KEY_SCOPES, PROVIDER_CATALOG } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   BellIcon,
+  CalendarClockIcon,
+  CopyIcon,
   FolderCogIcon,
   GaugeIcon,
   GitBranchIcon,
+  KeyRoundIcon,
   type LucideIcon,
   ShieldCheckIcon,
   UsersIcon,
+  WebhookIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { RunStatusBadge } from "@/components/RunStatusBadge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -34,9 +39,11 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { clearLastProjectId } from "../features/lastProject";
 import { api } from "../lib/api";
-import { lt } from "../lib/format";
+import { formatTime, lt } from "../lib/format";
 import { toastApiError } from "../lib/toast";
 import type {
+  ApiKeyCreated,
+  ApiKeyRow,
   Faber,
   Grant,
   McpServerRow,
@@ -47,7 +54,10 @@ import type {
   ProviderCatalogRow,
   ProviderCredentialRow,
   Quota,
+  ScheduleRow,
   SkillRow,
+  TriggerDeliveryRow,
+  TriggerRow,
 } from "../lib/types";
 import { cn } from "../lib/utils";
 
@@ -776,6 +786,8 @@ const NOTIFY_EVENT_TYPES = [
   "run.failed",
   "run.cancelled",
   "run.timed_out",
+  "schedule.disabled",
+  "schedule.failed",
 ] as const;
 
 const eventTypeKey = (type: string) => type.replaceAll(".", "_");
@@ -1053,12 +1065,446 @@ function NotificationsSection({ projectId }: { projectId: string }) {
   );
 }
 
+function TriggersSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation(["settings", "common"]);
+  const queryClient = useQueryClient();
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const triggers = useQuery({
+    queryKey: ["triggers", projectId],
+    queryFn: () => api<TriggerRow[]>(`/projects/${projectId}/triggers`),
+  });
+  const deliveries = useQuery({
+    queryKey: ["trigger-deliveries", projectId],
+    queryFn: () => api<TriggerDeliveryRow[]>(`/projects/${projectId}/triggers/deliveries?limit=30`),
+  });
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["triggers", projectId] });
+    void queryClient.invalidateQueries({ queryKey: ["trigger-deliveries", projectId] });
+  };
+  const update = useMutation({
+    mutationFn: (input: { id: string; body: Record<string, unknown> }) =>
+      api(`/projects/${projectId}/triggers/${input.id}`, { method: "PATCH", json: input.body }),
+    onSuccess: refresh,
+    onError: toastApiError,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api(`/projects/${projectId}/triggers/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success(t("settings:triggers.removed"));
+      refresh();
+    },
+    onError: toastApiError,
+  });
+  const retry = useMutation({
+    mutationFn: (id: string) =>
+      api(`/projects/${projectId}/triggers/deliveries/${id}/retry`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success(t("settings:triggers.retried"));
+      refresh();
+    },
+    onError: toastApiError,
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">{t("settings:triggers.title")}</h3>
+        <p className="text-xs text-muted-foreground">{t("settings:triggers.hint")}</p>
+      </div>
+
+      {triggers.data && triggers.data.length > 0 ? (
+        <div className="divide-y rounded-lg border">
+          {triggers.data.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0 flex-1">
+                <p className="truncate">
+                  <span className="font-medium">{row.name}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.tokenPrefix}…
+                  </span>
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {row.lastFiredAt
+                    ? t("settings:triggers.lastFired", { time: formatTime(row.lastFiredAt) })
+                    : t("settings:triggers.neverFired")}
+                </p>
+                {row.disabledReason ? (
+                  <p className="truncate text-xs text-destructive">
+                    {t(`settings:schedules.reasons.${row.disabledReason}`)}
+                  </p>
+                ) : null}
+              </div>
+              <Switch
+                checked={row.enabled}
+                aria-label={t("settings:triggers.toggle")}
+                onCheckedChange={(on) => update.mutate({ id: row.id, body: { enabled: on } })}
+              />
+              <ConfirmDialog
+                trigger={
+                  <Button size="icon-sm" variant="ghost" aria-label={t("settings:triggers.remove")}>
+                    <XIcon />
+                  </Button>
+                }
+                title={t("settings:triggers.removeConfirm", { name: row.name })}
+                description={t("settings:triggers.removeHint")}
+                destructive
+                onConfirm={() => remove.mutate(row.id)}
+              />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title={t("settings:triggers.empty")} icon={WebhookIcon} />
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        <Trans
+          i18nKey="settings:triggers.createElsewhere"
+          components={{
+            catalog: (
+              <Link
+                to="/projects/$projectId/catalog"
+                params={{ projectId }}
+                className="underline underline-offset-2"
+              />
+            ),
+          }}
+        />
+      </p>
+
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">{t("settings:triggers.deliveriesTitle")}</h3>
+        {!deliveries.data || deliveries.data.length === 0 ? (
+          <p className="text-xs text-muted-foreground">{t("settings:triggers.deliveriesEmpty")}</p>
+        ) : (
+          <div className="divide-y rounded-lg border">
+            {deliveries.data.map((d) => (
+              <div key={d.id} className="px-4 py-2.5 text-sm">
+                <div className="flex items-center gap-3">
+                  <RunStatusBadge status={d.status} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs">
+                      {d.endpointName ?? "—"}
+                      <span className="ml-2 text-muted-foreground">
+                        {formatTime(d.createdAt)}
+                        {d.attempts > 1
+                          ? ` · ${t("settings:triggers.attempts", { count: d.attempts })}`
+                          : ""}
+                      </span>
+                    </p>
+                    {d.lastError ? (
+                      <p className="truncate text-xs text-destructive" title={d.lastError}>
+                        {d.lastError}
+                      </p>
+                    ) : null}
+                  </div>
+                  {/* the payload is what a sender actually said — inspecting it
+                      is the whole reason a delivery row exists */}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setExpanded(expanded === d.id ? null : d.id)}
+                  >
+                    {t("settings:triggers.payload")}
+                  </Button>
+                  {d.status === "failed" ? (
+                    <Button size="sm" variant="outline" onClick={() => retry.mutate(d.id)}>
+                      {t("settings:triggers.retry")}
+                    </Button>
+                  ) : null}
+                </div>
+                {expanded === d.id ? (
+                  <pre className="mt-2 max-h-64 overflow-auto rounded bg-muted/60 p-2 text-[11px]">
+                    {JSON.stringify(d.payload, null, 2)}
+                  </pre>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ApiKeysSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation(["settings", "common"]);
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [scopes, setScopes] = useState<string[]>(["tasks:write", "runs:read"]);
+  // the plaintext exists only in this component's state, only until navigation
+  const [lastKey, setLastKey] = useState<ApiKeyCreated | null>(null);
+
+  const keys = useQuery({
+    queryKey: ["api-keys", projectId],
+    queryFn: () => api<ApiKeyRow[]>(`/projects/${projectId}/api-keys`),
+  });
+
+  const create = useMutation({
+    mutationFn: () =>
+      api<ApiKeyCreated>(`/projects/${projectId}/api-keys`, {
+        method: "POST",
+        json: { name: name.trim(), scopes },
+      }),
+    onSuccess: (created) => {
+      setLastKey(created);
+      setName("");
+      toast.success(t("settings:apiKeys.created"));
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", projectId] });
+    },
+    onError: toastApiError,
+  });
+
+  const revoke = useMutation({
+    mutationFn: (id: string) =>
+      api(`/projects/${projectId}/api-keys/${id}/revoke`, { method: "POST" }),
+    onSuccess: () => {
+      toast.success(t("settings:apiKeys.revoked"));
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", projectId] });
+    },
+    onError: toastApiError,
+  });
+
+  const toggleScope = (scope: string, on: boolean) =>
+    setScopes((prev) => (on ? [...new Set([...prev, scope])] : prev.filter((s) => s !== scope)));
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">{t("settings:apiKeys.title")}</h3>
+        <p className="text-xs text-muted-foreground">{t("settings:apiKeys.hint")}</p>
+      </div>
+
+      {keys.data && keys.data.length > 0 ? (
+        <div className="divide-y rounded-lg border">
+          {keys.data.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0 flex-1">
+                <p className="truncate">
+                  <span className="font-medium">{row.name}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.prefix}…
+                  </span>
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {row.scopes.join(", ")}
+                  {" · "}
+                  {row.lastUsedAt
+                    ? t("settings:apiKeys.lastUsed", { time: formatTime(row.lastUsedAt) })
+                    : t("settings:apiKeys.neverUsed")}
+                </p>
+              </div>
+              {row.revokedAt ? (
+                <Badge variant="outline">{t("settings:apiKeys.revokedBadge")}</Badge>
+              ) : (
+                <ConfirmDialog
+                  trigger={
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={t("settings:apiKeys.revoke")}
+                    >
+                      <XIcon />
+                    </Button>
+                  }
+                  title={t("settings:apiKeys.revokeConfirm", { name: row.name })}
+                  description={t("settings:apiKeys.revokeHint")}
+                  onConfirm={() => revoke.mutate(row.id)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title={t("settings:apiKeys.empty")} icon={KeyRoundIcon} />
+      )}
+
+      {lastKey ? (
+        <div className="max-w-xl rounded-lg border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
+          <p className="font-medium">{t("settings:apiKeys.keyOnce", { name: lastKey.name })}</p>
+          <div className="mt-2 flex items-center gap-2">
+            <code className="flex-1 truncate rounded bg-muted/60 px-2 py-1 font-mono text-xs">
+              {lastKey.key}
+            </code>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={t("settings:apiKeys.copy")}
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(lastKey.key)
+                  .then(() => toast.success(t("settings:apiKeys.copied")));
+              }}
+            >
+              <CopyIcon />
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="max-w-md space-y-3">
+        <h3 className="text-sm font-medium">{t("settings:apiKeys.addTitle")}</h3>
+        <div className="space-y-1">
+          <Label htmlFor="apikey-name">{t("settings:apiKeys.name")}</Label>
+          <Input id="apikey-name" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <Label>{t("settings:apiKeys.scopes")}</Label>
+          <div className="flex flex-wrap gap-2">
+            {API_KEY_SCOPES.map((scope) => {
+              const active = scopes.includes(scope);
+              return (
+                <button
+                  key={scope}
+                  type="button"
+                  title={t(`settings:apiKeys.scopeHints.${scope.replace(":", "_")}`)}
+                  onClick={() => toggleScope(scope, !active)}
+                  className={cn(
+                    "rounded-full border px-2.5 py-0.5 font-mono text-xs",
+                    active
+                      ? "border-primary bg-primary/10 font-medium"
+                      : "text-muted-foreground hover:bg-muted/60",
+                  )}
+                >
+                  {scope}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <Button
+          disabled={create.isPending || !name.trim() || scopes.length === 0}
+          onClick={() => create.mutate()}
+        >
+          {t("settings:apiKeys.create")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function SchedulesSection({ projectId }: { projectId: string }) {
+  const { t } = useTranslation(["settings", "common"]);
+  const queryClient = useQueryClient();
+
+  const schedules = useQuery({
+    queryKey: ["schedules", projectId],
+    queryFn: () => api<ScheduleRow[]>(`/projects/${projectId}/schedules`),
+  });
+
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["schedules", projectId] });
+  const update = useMutation({
+    mutationFn: (input: { id: string; body: Record<string, unknown> }) =>
+      api(`/projects/${projectId}/schedules/${input.id}`, { method: "PATCH", json: input.body }),
+    onSuccess: () => void refresh(),
+    onError: toastApiError,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api(`/projects/${projectId}/schedules/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      toast.success(t("settings:schedules.removed"));
+      void refresh();
+    },
+    onError: toastApiError,
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">{t("settings:schedules.title")}</h3>
+        <p className="text-xs text-muted-foreground">{t("settings:schedules.hint")}</p>
+      </div>
+
+      {schedules.data && schedules.data.length > 0 ? (
+        <div className="divide-y rounded-lg border">
+          {schedules.data.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0 flex-1">
+                <p className="truncate">
+                  <span className="font-medium">{row.name}</span>
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.cron} · {row.timezone}
+                  </span>
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {row.lastFiredAt
+                    ? t("settings:schedules.lastFired", { time: formatTime(row.lastFiredAt) })
+                    : t("settings:schedules.neverFired")}
+                </p>
+                {/* why it stopped is the point of disabling rather than skipping */}
+                {row.disabledReason ? (
+                  <p className="truncate text-xs text-destructive">
+                    {t(`settings:schedules.reasons.${row.disabledReason}`)}
+                  </p>
+                ) : null}
+                {row.lastError ? (
+                  <p className="truncate text-xs text-amber-600" title={row.lastError}>
+                    {t("settings:schedules.lastError", { error: row.lastError })}
+                  </p>
+                ) : null}
+              </div>
+              <Badge variant="outline">
+                {t(`settings:schedules.policies.${row.concurrencyPolicy}`)}
+              </Badge>
+              <Switch
+                checked={row.enabled}
+                aria-label={t("settings:schedules.toggle")}
+                onCheckedChange={(on) => update.mutate({ id: row.id, body: { enabled: on } })}
+              />
+              <ConfirmDialog
+                trigger={
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label={t("settings:schedules.remove")}
+                  >
+                    <XIcon />
+                  </Button>
+                }
+                title={t("settings:schedules.removeConfirm", { name: row.name })}
+                description={t("settings:schedules.removeHint")}
+                destructive
+                onConfirm={() => remove.mutate(row.id)}
+              />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title={t("settings:schedules.empty")} icon={CalendarClockIcon} />
+      )}
+
+      {/* Creating a schedule needs the task's own parameter form, which lives
+          on the submit page — offering a form here that cannot fill it in is
+          how you get a schedule that fails its first firing a week later. */}
+      <p className="text-xs text-muted-foreground">
+        <Trans
+          i18nKey="settings:schedules.createElsewhere"
+          components={{
+            catalog: (
+              <Link
+                to="/projects/$projectId/catalog"
+                params={{ projectId }}
+                className="underline underline-offset-2"
+              />
+            ),
+          }}
+        />
+      </p>
+    </div>
+  );
+}
+
 const SECTIONS: Array<{ key: string; icon: LucideIcon }> = [
   { key: "general", icon: FolderCogIcon },
   { key: "members", icon: UsersIcon },
   { key: "resources", icon: ShieldCheckIcon },
   { key: "repos", icon: GitBranchIcon },
   { key: "notifications", icon: BellIcon },
+  { key: "schedules", icon: CalendarClockIcon },
+  { key: "triggers", icon: WebhookIcon },
+  { key: "apiKeys", icon: KeyRoundIcon },
   { key: "quota", icon: GaugeIcon },
 ];
 
@@ -1102,6 +1548,9 @@ export function SettingsPage() {
             {section === "resources" && <ResourcesSection projectId={projectId} />}
             {section === "repos" && <ReposSection projectId={projectId} />}
             {section === "notifications" && <NotificationsSection projectId={projectId} />}
+            {section === "schedules" && <SchedulesSection projectId={projectId} />}
+            {section === "triggers" && <TriggersSection projectId={projectId} />}
+            {section === "apiKeys" && <ApiKeysSection projectId={projectId} />}
             {section === "quota" && <QuotaSection projectId={projectId} />}
           </CardContent>
         </Card>

@@ -44,7 +44,8 @@ users     (id pk, org_id fk, email unique, name,
            ... better-auth columns)
 
 api_keys  (id pk, org_id fk, project_id fk null,              -- null = org-wide key
-           name, key_hash, prefix,                            -- 'agr_' + short prefix shown in UI
+           name, key_hash, prefix unique,                     -- 'agr_' + short prefix; the indexed lookup that precedes
+                                                               -- the constant-time hash compare (shared with agrd_/agrt_)
            scopes jsonb,                                      -- ["tasks:write","runs:read",...]
            created_by fk users, expires_at, revoked_at, last_used_at)
 
@@ -110,6 +111,32 @@ notification_deliveries (id pk, endpoint_id fk cascade, project_id fk cascade,
            attempts int, payload jsonb,                        -- redacted rendered snapshot
            last_attempt_at, response_status, response_snippet, last_error, created_at,
            unique (endpoint_id, event_id) where event_id is not null)  -- delivery bookkeeping is idempotent
+
+task_schedules (id pk, org_id fk, project_id fk cascade, task_type_id fk,
+           name, params jsonb, agent_overrides jsonb,          -- exactly what a manual submission would carry
+           cron text, timezone text default 'UTC',             -- 5-field cron; pg-boss owns the calendar and its DST edges
+           concurrency_policy check in ('skip','queue','replace'),  -- what a firing does when the previous run is unfinished
+           enabled bool, disabled_reason text,                 -- set by the platform for conditions that never self-heal
+           last_error text, last_error_at tstz,                -- fixable failures: the schedule stays on and retries
+           last_fired_at tstz, last_run_id fk runs null,       -- the concurrency check reads last_run_id
+           created_by fk NOT NULL, created_at, updated_at)     -- authority anchor: re-checked at every firing, never frozen
+
+trigger_endpoints (id pk, org_id fk, project_id fk cascade, task_type_id fk,
+           name, params jsonb, agent_overrides jsonb,
+           token_hash text, token_prefix text unique,          -- token travels in the URL path; prefix is the indexed lookup
+           secret_ref fk secrets NOT NULL,                     -- required, unlike outbound: an unsigned inbound URL is an open
+                                                               -- 'spend this project's tokens' endpoint for whoever sees it
+           timezone text default 'UTC',                        -- resolves the same fire-time date tokens schedules use
+           enabled bool, disabled_reason text,
+           last_fired_at tstz, created_by fk NOT NULL, created_at, updated_at)
+
+trigger_deliveries (id pk, endpoint_id fk cascade, project_id fk cascade,
+           external_id text null,                              -- sender-supplied id; the idempotency key when offered
+           status check in ('pending','succeeded','failed'), attempts int,
+           payload jsonb,                                      -- the received body, stored for inspection, never interpolated
+           task_id fk null, run_id fk null,                    -- set once the worker submits
+           last_error text, last_attempt_at, created_at,
+           unique (endpoint_id, external_id) where external_id is not null)  -- a sender's retry cannot become a second run
 ```
 
 ### Scenario layer
@@ -190,6 +217,10 @@ runs      (id pk, task_id fk,
            usage_totals jsonb,
            workspace_ref text, error jsonb,
            cancel_requested boolean not null default false,
+           origin_key text null, unique (origin_key) where not null,
+                                                              -- one unattended FIRING: 'schedule:<job id>'
+                                                              -- or 'trigger:<delivery id>'; NULL when a
+                                                              -- human submitted (see docs/design/04)
            queued_at, started_at, finished_at, created_by fk)
 
 run_steps (id pk, run_id fk, phase_id text, step_id text,
@@ -244,4 +275,4 @@ audit_logs (id pk, org_id fk, project_id fk null,
 
 ## Drizzle Package Layout
 
-`packages/db/src/schema/` — one file per aggregate: `orgs.ts`, `auth.ts` (users/sessions/accounts + better-auth extensions), `invitations.ts`, `projects.ts`, `catalog.ts` (scenarios/task_types), `resources.ts` (fabri/skills/mcp/models), `templates.ts`, `runs.ts` (tasks/runs/steps/events/approvals/artifacts), `usage.ts`, `audit.ts`, `secrets.ts`. Generated SQL migrations are committed under `packages/db/drizzle/`. Seed data (`packages/db/src/seed/`) upserts the builtin org, scenarios, task types, fabri, models, and compiles+publishes builtin templates from `templates/` (checksum-guarded so re-seeding is idempotent).
+`packages/db/src/schema/` — one file per aggregate: `orgs.ts`, `auth.ts` (users/sessions/accounts + better-auth extensions), `invitations.ts`, `projects.ts`, `registry.ts` (scenarios/task_types/fabri/skills/mcp/models/templates), `runs.ts` (tasks/runs/steps/events/checkpoints/artifacts), `usage.ts`, `audit.ts`, `secrets.ts`, `api-keys.ts`, `notifications.ts` (endpoints + deliveries), `schedules.ts` (task_schedules), `triggers.ts` (endpoints + deliveries), `runtimes.ts`, `dispatches.ts`. Generated SQL migrations are committed under `packages/db/drizzle/`. Seed data (`packages/db/src/seed/`) upserts the builtin org, scenarios, task types, fabri, models, and compiles+publishes builtin templates from `templates/` (checksum-guarded so re-seeding is idempotent).

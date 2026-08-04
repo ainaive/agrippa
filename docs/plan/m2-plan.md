@@ -30,12 +30,12 @@ BYO compute: a daemon on a user/team machine registers, reports which executors 
 - [ ] Follow-up steering runs: a "follow-up" action on a finished run resumes the executor session in the same workspace with a user message; burst coalescing; fresh-session fallback prepends a context-loss disclosure to the prompt (Multica's pattern); executors that can't detect resume rejection fail closed
 - Verify: follow-up on a completed `swdev` run continues in the same branch/workspace with prior context; a forced resume failure produces a fresh session whose transcript opens with the disclosure
 
-## Track T — triggers + API keys ☐ *(parallel, independent)*
+## Track T — triggers + API keys ☑ *(parallel, independent)*
 
-- [ ] API-key auth middleware (`Bearer agr_…`; schema already at `packages/db/src/schema/api-keys.ts`; design at [05-api-and-auth](../design/05-api-and-auth.md)); scoped to project; audit on use
-- [ ] Cron-scheduled task submission (pg-boss cron): timezone-aware schedules, per-schedule concurrency policy (skip / queue / replace)
-- [ ] Webhook triggers: per-trigger token + signing secret, durable delivery log with payload inspection + replay
-- Verify: `pm.weekly-report` runs weekly unattended; a signed webhook submits a run; a revoked key gets 401 and an audit row
+- [x] API-key auth middleware (`Bearer agr_…`) — project-scoped, issued/revoked by project admins, reach bounded by an explicit (method, path) → scope allow-list rather than a denylist, audit on use via `audit_logs.actor_api_key_id`
+- [x] Cron-scheduled task submission (pg-boss cron): timezone-aware schedules, concurrency policy (skip / queue / replace), plus **fire-time date tokens** — a frozen `dateRange` would have made a weekly report cover the same week forever
+- [x] Webhook triggers: per-trigger token + **mandatory** signing secret, durable delivery log with payload inspection + replay, delivery-id idempotency
+- Verify: ☑ covered by integration suites (`schedules`, `triggers`, `api-keys`) and a live browser + signed-`curl` smoke against the dev stack — a trigger produced a run whose date tokens resolved; a revoked key gets 401 and an audit row *(the unattended weekly `pm.weekly-report` firing on the deployed stack is still outstanding — it needs a week to elapse)*
 
 ## Track N — checkpoint notifications ☑ *(parallel, independent)*
 

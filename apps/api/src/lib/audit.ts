@@ -1,29 +1,27 @@
-import { auditLogs, type DbOrTx } from "@agrippa/db";
+import type { DbOrTx } from "@agrippa/db";
+import { type AuditActor, type AuditEntry, auditAs } from "@agrippa/orchestration";
 import type { Context } from "hono";
 import type { AppEnv } from "../context";
 
-type AuditEntry = {
-  action: string; // e.g. "project.member.add"
-  resourceType: string;
-  resourceId?: string | null;
-  projectId?: string | null;
-  payload?: Record<string, unknown>;
-};
+export type { AuditActor, AuditEntry };
 
 /**
- * Every mutating handler records an audit row (docs/design/05-api-and-auth.md).
- * Accepts an explicit tx so creations can be atomic with their mutation.
+ * The principal behind a v1 request. An API-key request names both the owning
+ * user and the key: the user is who is accountable, the key is which credential
+ * was used — dropping either would make a leaked key indistinguishable from its
+ * owner working in the browser. This is what satisfies "audit on use" without
+ * an audit row per read: mutations already write one, and now they say how.
  */
-export async function audit(c: Context<AppEnv>, entry: AuditEntry, tx?: DbOrTx): Promise<void> {
-  const db = tx ?? c.var.db;
-  await db.insert(auditLogs).values({
-    orgId: c.var.user.orgId,
-    projectId: entry.projectId ?? null,
-    actorUserId: c.var.user.id,
-    action: entry.action,
-    resourceType: entry.resourceType,
-    resourceId: entry.resourceId ?? null,
-    payload: entry.payload ?? {},
+export function requestActor(c: Context<AppEnv>): AuditActor {
+  return {
+    orgId: c.var.principal.orgId,
+    userId: c.var.principal.userId,
+    apiKeyId: c.var.principal.apiKeyId,
     ip: c.req.header("x-forwarded-for") ?? null,
-  });
+  };
+}
+
+/** Request-principal convenience wrapper — the shape every v1 handler uses. */
+export async function audit(c: Context<AppEnv>, entry: AuditEntry, tx?: DbOrTx): Promise<void> {
+  await auditAs(tx ?? c.var.db, requestActor(c), entry);
 }

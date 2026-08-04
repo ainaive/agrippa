@@ -102,6 +102,12 @@ export const runs = pgTable(
     // sends the run's execution to a daemon; every subsequent step dispatches
     // to the same runtime, which owns the workspace. NULL = central workers.
     runtimeId: uuid("runtime_id").references(() => runtimes.id),
+    // Idempotency key for an unattended firing, NULL for anything a human
+    // submitted. A schedule writes its pg-boss job id, a webhook its delivery
+    // id — both stable across a retry of the same firing and distinct between
+    // firings — so "this run exists" and "this firing already happened" become
+    // one committed fact instead of two writes with a crash-window between.
+    originKey: text("origin_key"),
     queuedAt: tstz("queued_at").notNull().defaultNow(),
     startedAt: tstz("started_at"),
     finishedAt: tstz("finished_at"),
@@ -111,6 +117,8 @@ export const runs = pgTable(
   },
   (t) => [
     uniqueIndex("runs_task_number_uq").on(t.taskId, t.number),
+    // a re-delivered schedule/trigger job must not be able to charge twice
+    uniqueIndex("runs_origin_key_uq").on(t.originKey).where(sql`${t.originKey} IS NOT NULL`),
     index("runs_project_idx").on(t.projectId, t.status),
     // the expiry sweep scans only running runs
     index("runs_lease_sweep_idx").on(t.leaseExpiresAt).where(sql`${t.status} = 'running'`),

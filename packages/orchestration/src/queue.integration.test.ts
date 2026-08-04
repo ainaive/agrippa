@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { QUEUE_NOTIFICATION_DELIVER } from "@agrippa/core";
+import { QUEUE_NOTIFICATION_DELIVER, QUEUE_TRIGGER_FIRE } from "@agrippa/core";
 import { createDb } from "@agrippa/db";
 import { sql } from "drizzle-orm";
 import { type BossQueue, createRunQueue } from "./queue";
@@ -50,6 +50,32 @@ describe.skipIf(!dbUp)("notification queue dedupe (exclusive policy)", () => {
     await queue.enqueueNotificationDelivery(deliveryId);
     await queue.enqueueNotificationDelivery(deliveryId);
     expect(await liveJobCount(deliveryId)).toBe(1);
+  });
+
+  it("gives trigger.fire the same policy, for the same reason", async () => {
+    // enqueueTriggerDelivery leans on singletonKey to stop a sender retry, a
+    // sweeper re-enqueue and an operator replay from becoming three runs — and
+    // on the default 'standard' policy that key enforces nothing at all
+    queue ??= await createRunQueue(TEST_DATABASE_URL, {
+      resolveRunExecutors: async () => ["fake"],
+    });
+
+    const [queueRow] = (await db.execute(
+      sql`select policy from pgboss.queue where name = ${QUEUE_TRIGGER_FIRE}`,
+    )) as unknown as Array<{ policy: string }>;
+    expect(queueRow?.policy).toBe("exclusive");
+
+    const deliveryId = Bun.randomUUIDv7();
+    await queue.enqueueTriggerDelivery(deliveryId);
+    await queue.enqueueTriggerDelivery(deliveryId);
+    await queue.enqueueTriggerDelivery(deliveryId);
+    const [row] = (await db.execute(
+      sql`select count(*)::int as count from pgboss.job
+          where name = ${QUEUE_TRIGGER_FIRE}
+            and singleton_key = ${deliveryId}
+            and state < 'completed'`,
+    )) as unknown as Array<{ count: number }>;
+    expect(row?.count).toBe(1);
   });
 
   it("dedupes against jobs waiting in retry or running active — not just created", async () => {

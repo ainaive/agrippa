@@ -19,7 +19,9 @@
     "agents": "Agents",
     "agentFaber": "Persona",
     "agentExecutor": "Engine",
-    "agentUnavailable": "not available in this deployment"
+    "agentUnavailable": "not available in this deployment",
+    "schedule": "Run on a schedule",
+    "trigger": "Trigger by webhook"
   },
   "preflight": {
     "title": "Readiness",
@@ -31,5 +33,26 @@
     "mcp": "MCP servers",
     "repo": "Repository",
     "configure": "Configure"
+  },
+  "schedule": {
+    "title": "Run on a schedule",
+    "description": "Create a recurring schedule from the parameters you just filled in. It runs as you, and can only do what you can do at the time it fires.",
+    "tokensTitle": "Parameters are frozen — unless you use a date token",
+    "tokensHint": "A schedule stores its parameters once. Put one of these in a text parameter (for example a reporting period) and it is replaced with the real date each time the schedule fires, in the timezone above.",
+    "create": "Create schedule",
+    "created": "Schedule created"
+  },
+  "trigger": {
+    "title": "Trigger by webhook",
+    "description": "Create a URL an external system can POST to in order to start this task with the parameters you just filled in.",
+    "secret": "Signing secret",
+    "secretPlaceholder": "at least 16 characters",
+    "secretHint": "Required. Every request must be signed with it — an unsigned URL would let anyone who ever sees it spend this project's tokens. It is stored encrypted and never shown again.",
+    "create": "Create trigger",
+    "urlOnce": "Copy this URL now — it is shown only once.",
+    "copy": "Copy URL",
+    "copied": "URL copied",
+    "howToSign": "Send a signed request like this:",
+    "timezoneHint": "Date tokens in the parameters above resolve in this timezone when the trigger fires."
   }
 }

@@ -4,6 +4,9 @@
     "members": "成员",
     "resources": "资源",
     "repos": "代码仓库",
+    "schedules": "定时计划",
+    "triggers": "Webhook",
+    "apiKeys": "API 密钥",
     "quota": "配额",
     "notifications": "通知"
   },
@@ -115,6 +118,8 @@
       "run_failed": "执行失败",
       "run_cancelled": "执行取消",
       "run_timed_out": "执行超时",
+      "schedule_disabled": "定时计划已停用",
+      "schedule_failed": "定时计划未能执行",
       "notification_test": "测试"
     },
     "add": "添加端点",
@@ -137,5 +142,84 @@
     },
     "retry": "重试",
     "retried": "投递已重新入队"
+  },
+  "apiKeys": {
+    "title": "API 密钥",
+    "hint": "对本项目的程序化访问：提交任务、读取运行记录。密钥以你的身份执行，绑定到本项目，且无法访问管理功能。",
+    "addTitle": "创建密钥",
+    "name": "名称",
+    "scopes": "权限范围",
+    "scopeHints": {
+      "tasks_write": "提交、重试与取消",
+      "runs_read": "读取任务、运行与产物",
+      "resources_read": "读取任务目录"
+    },
+    "create": "创建密钥",
+    "created": "API 密钥已创建",
+    "keyOnce": "请立即复制「{{name}}」的密钥——它只显示这一次。",
+    "copy": "复制密钥",
+    "copied": "密钥已复制",
+    "empty": "暂无 API 密钥",
+    "lastUsed": "最近使用于 {{time}}",
+    "neverUsed": "从未使用",
+    "revoke": "撤销",
+    "revokeConfirm": "撤销「{{name}}」？",
+    "revokeHint": "使用该密钥的程序将立即停止工作，且无法恢复。",
+    "revoked": "API 密钥已撤销",
+    "revokedBadge": "已撤销"
+  },
+  "schedules": {
+    "title": "定时计划",
+    "hint": "按周期自动提交任务。计划以创建者的身份执行，权限与本人当前完全一致——若其失去本项目的访问权限，计划会停止并通知你。",
+    "cron": "Cron 表达式",
+    "cronHint": "五个字段：分 时 日 月 周。「0 9 * * 1」表示每周一 09:00。",
+    "timezone": "时区",
+    "policy": "上次执行尚未结束时",
+    "policies": {
+      "skip": "跳过",
+      "queue": "排队",
+      "replace": "替换"
+    },
+    "policyHints": {
+      "skip": "本次不提交——迟一点的报告好过两份重叠的报告。",
+      "queue": "照常提交，让执行排队进行。",
+      "replace": "先取消上一次执行，再提交新的。"
+    },
+    "empty": "暂无定时计划",
+    "lastFired": "最近执行于 {{time}}",
+    "neverFired": "尚未执行",
+    "lastError": "上次尝试失败：{{error}}",
+    "toggle": "启用",
+    "remove": "删除",
+    "removeConfirm": "删除「{{name}}」？",
+    "removeHint": "计划将立即停止，已产生的执行记录会保留。",
+    "removed": "计划已删除",
+    "reasons": {
+      "owner_lost_access": "已停用：创建者不再拥有本项目的访问权限。",
+      "project_archived": "已停用：本项目已归档。",
+      "task_type_gone": "已停用：对应的任务类型已不可用。"
+    },
+    "createElsewhere": "定时计划从任务创建：打开<catalog>任务目录</catalog>，填写任务表单，然后选择「定时执行」。在此管理已有计划。"
+  },
+  "triggers": {
+    "title": "Webhook 触发器",
+    "hint": "外部系统可以通过 POST 到一个带签名的 URL 来启动任务。触发器以创建者的身份执行，权限与触发那一刻的本人完全一致。",
+    "empty": "暂无 Webhook 触发器",
+    "createElsewhere": "触发器从任务创建：打开<catalog>任务目录</catalog>，填写任务表单，然后选择「Webhook 触发」。在此管理已有触发器。",
+    "lastFired": "最近触发于 {{time}}",
+    "neverFired": "尚未触发",
+    "toggle": "启用",
+    "remove": "删除",
+    "removeConfirm": "删除「{{name}}」？",
+    "removeHint": "该 URL 将立即失效，已产生的执行记录会保留。",
+    "removed": "触发器已删除",
+    "copy": "复制 URL",
+    "copied": "URL 已复制",
+    "deliveriesTitle": "最近接收",
+    "deliveriesEmpty": "尚未收到任何请求。",
+    "payload": "请求内容",
+    "retry": "重试",
+    "retried": "已重新排队",
+    "attempts": "{{count}} 次尝试"
   }
 }

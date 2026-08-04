@@ -10,6 +10,8 @@
 export const QUEUE_RUN_EXECUTE = "run.execute";
 export const QUEUE_APPROVAL_EXPIRE = "approval.expire";
 export const QUEUE_NOTIFICATION_DELIVER = "notification.deliver";
+export const QUEUE_SCHEDULE_FIRE = "schedule.fire";
+export const QUEUE_TRIGGER_FIRE = "trigger.fire";
 
 export const RUN_EXECUTE_QUEUE_PREFIX = "run.execute.";
 
@@ -65,6 +67,8 @@ export function requiredExecutorIds(run: {
 export type RunExecutePayload = { runId: string };
 export type ApprovalExpirePayload = { approvalId: string; runId: string };
 export type NotificationDeliverPayload = { deliveryId: string };
+export type ScheduleFirePayload = { scheduleId: string };
+export type TriggerFirePayload = { deliveryId: string };
 
 /**
  * The API's handle on the queue. Sends are deduplicated by singleton key
@@ -76,4 +80,18 @@ export type RunQueue = {
   enqueueRun(runId: string): Promise<void>;
   enqueueApprovalExpiry(payload: ApprovalExpirePayload, atMs: number): Promise<void>;
   enqueueNotificationDelivery(deliveryId: string): Promise<void>;
+  /**
+   * Register (or replace) a schedule's cron entry. pg-boss owns the calendar,
+   * including the timezone and its DST edges — the platform stores the same
+   * cron on `task_schedules` for display and for the boot reconciliation that
+   * repairs drift between the two.
+   */
+  registerSchedule(scheduleId: string, cron: string, timezone: string): Promise<void>;
+  unregisterSchedule(scheduleId: string): Promise<void>;
+  /**
+   * Hand an accepted inbound delivery to the worker. The request itself only
+   * records and acknowledges — submission happens here, so a slow or failing
+   * submit never becomes a timeout the sender retries into duplicate runs.
+   */
+  enqueueTriggerDelivery(deliveryId: string): Promise<void>;
 };

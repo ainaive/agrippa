@@ -27,9 +27,30 @@
     "title": "运行时离线",
     "body": "正在执行 {{projectName}} 中任务 #{{runNumber}}「{{taskTitle}}」的远程运行时「{{runtimeName}}」已停止上报。"
   },
+  "scheduleDisabled": {
+    "title": "定时计划已停用",
+    "body": "{{projectName}} 中的定时计划「{{scheduleName}}」已被停用，不会再触发：{{reason}}。"
+  },
+  "scheduleFailed": {
+    "title": "定时计划未能执行",
+    "body": "{{projectName}} 中的定时计划「{{scheduleName}}」本次未产生执行：{{error}}。计划仍处于启用状态，下次会再次尝试。"
+  },
+  "triggerDisabled": {
+    "title": "触发器已停用",
+    "body": "{{projectName}} 中的 Webhook 触发器「{{triggerName}}」已被停用，将不再接受请求：{{reason}}。"
+  },
+  "triggerFailed": {
+    "title": "触发器未能执行",
+    "body": "对 {{projectName}} 中 Webhook 触发器「{{triggerName}}」的一次请求未产生执行：{{error}}。发送方已收到确认，因此不会有其他人知晓此事。"
+  },
   "test": {
     "title": "测试通知",
     "body": "这是 Agrippa 为项目 {{projectName}} 发送的测试通知。"
   },
-  "openRun": "查看执行"
+  "openRun": "查看执行",
+  "reasons": {
+    "owner_lost_access": "创建者不再拥有本项目的访问权限",
+    "project_archived": "本项目已归档",
+    "task_type_gone": "对应的任务类型已不可用"
+  }
 }
