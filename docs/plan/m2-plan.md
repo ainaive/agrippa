@@ -26,7 +26,8 @@ BYO compute: a daemon on a user/team machine registers, reports which executors 
 
 ## Phase C — affinity + steering ☐
 
-- [ ] Workspace/session affinity: runs pin to the runtime that owns the workspace — fixes `workspace_lost` by ownership rather than cross-host migration
+- [x] **ADR first**: [ADR-0018](../adr/0018-followup-steering.md) — a follow-up is a new run inheriting a workspace and a session, not a reopened one; amends ADR-0014 (a follow-up deliberately does *not* re-resolve configuration) and defers a publication amendment to ADR-0012 (a follow-up advancing a published tip needs an expected-tip CAS)
+- [ ] Workspace/session affinity: runs pin to the runtime that owns the workspace — fixes `workspace_lost` by ownership rather than cross-host migration. *Remote affinity landed with ADR-0017 (`runs.runtime_id` is absolute); what remains is the central side, which has no host pin — a follow-up on a centrally-executed run can be claimed by a worker that does not hold the directory. Claim-time decline first, per-host queue as the real fix, dead pin fails `workspace_lost` and is never re-routed.*
 - [ ] Follow-up steering runs: a "follow-up" action on a finished run resumes the executor session in the same workspace with a user message; burst coalescing; fresh-session fallback prepends a context-loss disclosure to the prompt (Multica's pattern); executors that can't detect resume rejection fail closed
 - Verify: follow-up on a completed `swdev` run continues in the same branch/workspace with prior context; a forced resume failure produces a fresh session whose transcript opens with the disclosure
 
