@@ -17,7 +17,7 @@ import {
   secrets,
   tasks,
 } from "@agrippa/db";
-import { type NotificationCatalog, notificationMessages } from "@agrippa/i18n";
+import { disabledReasonText, type NotificationCatalog, notificationMessages } from "@agrippa/i18n";
 import { and, eq, sql } from "drizzle-orm";
 import { assertPublicHost, type HostLookup } from "./net";
 
@@ -80,12 +80,31 @@ function interpolate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? "");
 }
 
+/**
+ * `error` arrives in two shapes and both have to render.
+ *
+ * Engine events carry `{code, message}`; a schedule or trigger firing emits an
+ * already-formatted string (`schedule-fire.ts` composes `code: message`). The
+ * previous cast assumed the object, so a string was truthy, took the object
+ * branch, and produced `""` from `code`/`message` that were never there — with
+ * the string fallback beneath it unreachable.
+ */
+function formatError(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (raw !== null && typeof raw === "object") {
+    const { code, message } = raw as { code?: string; message?: string };
+    if (!code) return message ?? "";
+    return message ? `${code}: ${message}` : code;
+  }
+  return "";
+}
+
 /** Render the localized title/body for a delivery context. */
 export function renderMessage(ctx: NotificationContext): { title: string; body: string } {
   const catalog = notificationMessages(ctx.locale);
   const key = MESSAGE_KEYS[ctx.eventType] ?? "test";
   const entry = catalog[key] as { title: string; body: string };
-  const error = ctx.eventPayload.error as { code?: string; message?: string } | undefined;
+  const reason = ctx.eventPayload.reason;
   const vars = {
     runNumber: ctx.run ? String(ctx.run.number) : "",
     taskTitle: ctx.task?.title ?? "",
@@ -94,10 +113,10 @@ export function renderMessage(ctx: NotificationContext): { title: string; body: 
     runtimeName: String(ctx.eventPayload.runtimeName ?? ""),
     scheduleName: String(ctx.eventPayload.scheduleName ?? ""),
     triggerName: String(ctx.eventPayload.triggerName ?? ""),
-    reason: String(ctx.eventPayload.reason ?? ""),
-    error: error
-      ? `${error.code ?? ""}${error.message ? `: ${error.message}` : ""}`
-      : String(ctx.eventPayload.error ?? ""),
+    // the template reads as prose, so the raw `owner_lost_access` enum the
+    // emitters put on the payload has to become a sentence first
+    reason: reason ? disabledReasonText(String(reason), ctx.locale) : "",
+    error: formatError(ctx.eventPayload.error),
   };
   return { title: interpolate(entry.title, vars), body: interpolate(entry.body, vars) };
 }
@@ -418,6 +437,18 @@ export async function deliverNotification(
       eventPayload = eventRow.payload;
       occurredAt = eventRow.createdAt;
     }
+  } else if (delivery.payload) {
+    // A project-scoped event — a schedule or trigger that stopped — has no
+    // run to hang a `run_events` row on, so `insertProjectEventDeliveries`
+    // puts its payload here instead. Reading only the event row meant every
+    // variable in those templates interpolated empty, and the card an
+    // operator received read: `The schedule "" in Acme produced no run this
+    // time: .` The one channel that reaches a human when unattended work
+    // breaks, reaching them with nothing in it.
+    //
+    // Safe on a retry: only the success path overwrites this column with the
+    // request snapshot, and a succeeded delivery is never re-delivered.
+    eventPayload = delivery.payload;
   }
 
   const ctx: NotificationContext = {

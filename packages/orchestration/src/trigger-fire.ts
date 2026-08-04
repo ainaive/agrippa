@@ -10,6 +10,7 @@ import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
 import { enqueueProjectEventDeliveries, insertProjectEventDeliveries } from "./notifications";
 import { enqueueAfterCommit } from "./queue";
+import { SubmitError } from "./resolve";
 import { DuplicateFiringError, submitTaskIn } from "./submit";
 
 export type TriggerFireOutcome =
@@ -200,12 +201,13 @@ export async function fireTrigger(
         .where(eq(triggerDeliveries.id, deliveryId));
       return { kind: "skipped", reason: "already_handled" };
     }
-    const message =
-      err instanceof AppError
-        ? `${err.code}: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
+    // Only a submission the project can fix is recorded as a delivery failure.
+    // Infrastructure and bugs escape so pg-boss retries, as the engine does
+    // and as the worker's comment at the call site says: marking the delivery
+    // `failed` is terminal for the claim, so a deadlock or statement timeout
+    // would burn the webhook permanently and blame the sender's payload for it.
+    if (!(err instanceof AppError) && !(err instanceof SubmitError)) throw err;
+    const message = `${err.code}: ${err.message}`;
     // terminal mark and announcement together, for the reason the disable path
     // gives: `failed` is what makes the retry's claim reject, so a throw
     // between them would lose a notification no sweeper can reconstruct

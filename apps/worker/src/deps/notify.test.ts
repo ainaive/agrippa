@@ -66,6 +66,36 @@ describe("renderMessage", () => {
     expect(fallback.body).toContain("English only");
   });
 
+  it("renders a schedule failure with its name and cause, not an empty sentence", () => {
+    // The emitter sends `error` as a formatted STRING; the renderer used to
+    // cast it to {code,message}, so a truthy string took the object branch and
+    // produced "" — with the string fallback beneath it unreachable.
+    const msg = renderMessage(
+      ctx({
+        eventType: "schedule.failed",
+        eventPayload: { scheduleName: "Weekly report", error: "quota_exhausted: no headroom" },
+        run: null,
+        task: null,
+      }),
+    );
+    expect(msg.body).toContain("Weekly report");
+    expect(msg.body).toContain("quota_exhausted: no headroom");
+  });
+
+  it("renders a disabled reason as a sentence, not the raw enum", () => {
+    const msg = renderMessage(
+      ctx({
+        eventType: "schedule.disabled",
+        eventPayload: { scheduleName: "Weekly report", reason: "owner_lost_access" },
+        run: null,
+        task: null,
+      }),
+    );
+    expect(msg.body).toContain("Weekly report");
+    expect(msg.body).not.toContain("owner_lost_access");
+    expect(msg.body).toContain("no longer has access");
+  });
+
   it("includes the error on run.failed", () => {
     const msg = renderMessage(
       ctx({
@@ -214,6 +244,35 @@ describe.skipIf(!dbUp)("deliverNotification", () => {
       })
       .returning();
     signedEndpointId = endpoint?.id as string;
+  });
+
+  it("carries a project-scoped event's payload into the body it sends", async () => {
+    // A schedule or trigger that stopped has no run, so no `run_events` row to
+    // hang its payload on — `insertProjectEventDeliveries` puts it on the
+    // delivery instead. The renderer only ever read the event row, so every
+    // variable interpolated empty and the operator received: `The schedule ""
+    // in Widgets produced no run this time: .` The one channel that reaches a
+    // human when unattended work breaks, arriving with nothing in it.
+    const [row] = await db
+      .insert(notificationDeliveries)
+      .values({
+        endpointId: signedEndpointId,
+        projectId,
+        eventType: "schedule.failed",
+        payload: { scheduleName: "Weekly report", error: "quota_exhausted: no headroom" },
+      })
+      .returning({ id: notificationDeliveries.id });
+
+    let sent = "";
+    const fetchImpl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      sent = String(init?.body);
+      return new Response('{"ok":true}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await deliverNotification(db, row?.id as string, { fetchImpl, lookup: publicLookup });
+
+    expect(sent).toContain("Weekly report");
+    expect(sent).toContain("quota_exhausted: no headroom");
   });
 
   it("delivers, verifies the signature server-side, and finalizes the row", async () => {

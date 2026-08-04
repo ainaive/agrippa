@@ -122,6 +122,19 @@ describe.skipIf(!dbUp)("project API keys (Bearer agr_…)", () => {
     expect(row?.projectId).toBe(projectId);
   });
 
+  it("accepts the auth scheme in any case, as RFC 9110 requires", async () => {
+    // A lowercase scheme used to fall through to the session branch and answer
+    // a bare `unauthorized`, which sends an SDK author looking at their key
+    // rather than at their capitalization.
+    const key = await issueKey(["runs:read"]);
+    for (const scheme of ["Bearer", "bearer", "BEARER", "BeArEr"]) {
+      const res = await app.request(`/api/v1/projects/${projectId}/tasks`, {
+        headers: { authorization: `${scheme} ${key.key}` },
+      });
+      expect({ scheme, status: res.status }).toEqual({ scheme, status: 200 });
+    }
+  });
+
   it("rejects a key that grants nothing", async () => {
     const res = await admin.request(`/api/v1/projects/${projectId}/api-keys`, {
       method: "POST",

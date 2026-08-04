@@ -424,6 +424,85 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     expect((await rowOf(row.id))?.lastErrorAt).toBeNull();
   });
 
+  it("keeps a firing error that lands while it is reconciling", async () => {
+    // `healed` is computed from the rows snapshot, but the schedule.fire
+    // handler runs freely during every await in the reconciler. Filtering the
+    // clear by id alone wiped a genuine firing error committed in between, and
+    // the row then rendered healthy until the NEXT firing failed — a week, for
+    // a weekly schedule. Ownership has to be a SQL predicate, not a snapshot.
+    const row = await createSchedule({ cron: "0 5 * * 1" });
+    await db
+      .update(taskSchedules)
+      .set({ lastError: "calendar register failed: earlier blip" })
+      .where(eq(taskSchedules.id, row.id));
+
+    const calendar = new Map<string, { key: string; cron: string; timezone: string }>();
+    const view = {
+      list: async () => [...calendar.values()],
+      register: async (id: string, cron: string, timezone: string) => {
+        calendar.set(id, { key: id, cron, timezone });
+        // a real firing fails while the reconcile is mid-flight
+        if (id === row.id) {
+          await db
+            .update(taskSchedules)
+            .set({ lastError: "quota_exhausted: no headroom", lastErrorAt: new Date() })
+            .where(eq(taskSchedules.id, row.id));
+        }
+      },
+      unregister: async (id: string) => {
+        calendar.delete(id);
+      },
+    };
+
+    await reconcileScheduleCalendar(db, view);
+    expect((await rowOf(row.id))?.lastError).toBe("quota_exhausted: no headroom");
+  });
+
+  it("does not restore an old cron over an edit that lands mid-repair", async () => {
+    // The rows are read once and the loop is serial with a round trip per
+    // repair, so a row late in the list acts on a snapshot many seconds old.
+    // Registering from that snapshot would put the OLD cron back, and nothing
+    // downstream re-validates it — the job carries only the schedule id, so
+    // the firing looks legitimate and bills a run at a time the UI denies.
+    const row = await createSchedule({ cron: "0 4 * * 1" });
+    const calendar = new Map<string, { key: string; cron: string; timezone: string }>();
+    const view = {
+      list: async () => [...calendar.values()],
+      register: async (id: string, cron: string, timezone: string) => {
+        calendar.set(id, { key: id, cron, timezone });
+      },
+      unregister: async (id: string) => {
+        calendar.delete(id);
+      },
+    };
+    await reconcileScheduleCalendar(db, view);
+    calendar.delete(row.id); // the drift this pass will repair
+
+    // an edit commits between the rows read and the repair
+    await db.update(taskSchedules).set({ cron: "45 22 * * 5" }).where(eq(taskSchedules.id, row.id));
+    await reconcileScheduleCalendar(db, view);
+
+    expect(calendar.get(row.id)?.cron).toBe("45 22 * * 5");
+  });
+
+  it("rethrows an unexpected submit failure instead of spending the occurrence", async () => {
+    // fail() returns rather than throws, so the pg-boss job completes and the
+    // occurrence is gone. A deadlock or a statement timeout would cost a
+    // weekly schedule a week and blame the project in a notification, when
+    // pg-boss would have retried it seconds later.
+    const row = await createSchedule();
+    await db.execute(
+      `alter table tasks add constraint tmp_block_task_insert check (title <> '${row.name}') not valid`,
+    );
+    try {
+      await expect(fireSchedule(db, queue, row.id, fireKey())).rejects.toThrow();
+      // and it is not recorded as the schedule's own failure
+      expect((await rowOf(row.id))?.lastError).toBeNull();
+    } finally {
+      await db.execute(`alter table tasks drop constraint tmp_block_task_insert`);
+    }
+  });
+
   it("says unregister when it was an unregister that failed", async () => {
     // `failed` collects both verbs; reporting a teardown failure as a
     // registration failure tells the admin the opposite of what happened

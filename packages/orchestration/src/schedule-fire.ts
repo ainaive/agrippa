@@ -7,12 +7,13 @@ import {
   type ScheduleDisabledReason,
 } from "@agrippa/core";
 import { type Db, runs, taskSchedules } from "@agrippa/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { auditAs } from "./audit";
 import { checkWorkAuthority } from "./authority";
 import { requestRunCancellation } from "./engine/run-lifecycle";
 import { enqueueProjectEventDeliveries, insertProjectEventDeliveries } from "./notifications";
 import { enqueueAfterCommit } from "./queue";
+import { SubmitError } from "./resolve";
 import { DuplicateFiringError, submitTaskIn } from "./submit";
 
 /** Calendar keys are schedule ids; anything else cannot have a row. */
@@ -20,7 +21,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
  * Marks a `lastError` as the reconciler's rather than a firing's. The column
- * is shared, and only the writer that put a message there may clear it.
+ * is shared, and only the writer that put a message there may clear it — which
+ * is enforced as a SQL predicate on the clearing UPDATE, not by a snapshot
+ * read, so this constant carries an SQL contract as well as a JS one: adding a
+ * `%` or `_` to it would silently broaden that `LIKE`.
  */
 const CALENDAR_ERROR_PREFIX = "calendar ";
 
@@ -240,13 +244,16 @@ export async function fireSchedule(
     // shortage — quota exhausted, a revoked grant, no live worker for the
     // executor set. The schedule stays on so next week's firing can succeed;
     // the error is recorded and announced so the fix happens before then.
-    const message =
-      err instanceof AppError
-        ? `${err.code}: ${err.message}`
-        : err instanceof Error
-          ? err.message
-          : String(err);
-    return fail(message);
+    //
+    // Anything NOT in that class is infrastructure or a bug, and must escape:
+    // `fail()` returns rather than throws, so the pg-boss job completes and
+    // the occurrence is spent — a deadlock or a statement timeout would cost a
+    // weekly schedule a week, and announce it to the project as if the project
+    // were at fault. Rethrowing is what the engine does with unexpected errors
+    // (AGENTS.md), and what the worker's own comment at the call site already
+    // claims happens here.
+    if (!(err instanceof AppError) && !(err instanceof SubmitError)) throw err;
+    return fail(`${err.code}: ${err.message}`);
   }
 
   // outside the try: a send failure must not be recorded as a firing failure
@@ -289,10 +296,18 @@ export async function fireSchedule(
  *
  * What this buys is convergence within a tick, not mutual exclusion — no read
  * order can give the latter across two stores. The remaining window is between
- * the rows read and the repair itself, which is why each unregister
- * re-validates against the row immediately before tearing an entry out: that
- * is the only repair that can silence a live schedule, and it is rare enough
- * that one extra statement costs nothing.
+ * the rows read and the repair itself, and it is not small: the snapshot is
+ * taken once while the loop is serial with a round trip per repair, so a row
+ * late in the list acts on a reading many seconds old, unbounded if the
+ * calendar is slow rather than failing fast. **Every** repair therefore
+ * re-reads the row immediately before writing and acts on that, not on the
+ * snapshot. Both directions need it: an unregister on stale data silences a
+ * live schedule, and a register on stale data restores an old cron, which
+ * nothing downstream re-validates — the job carries only the schedule id, so
+ * the firing looks legitimate and bills a run at a time the UI does not show.
+ * Neither is durably worse than the other; both self-heal at the next tick.
+ * The cost is one indexed SELECT per repair, and a converged fleet repairs
+ * nothing.
  */
 export async function reconcileScheduleCalendar(
   db: Db,
@@ -326,18 +341,24 @@ export async function reconcileScheduleCalendar(
    * strength of a stale read, leaving an enabled schedule that never fires and
    * says nothing about it.
    */
-  const safeToUnregister = async (id: string): Promise<boolean> => {
-    // A key that cannot be a row id has no row to protect, and asking Postgres
-    // for it would raise rather than return empty — which would strand the
-    // junk entry in the calendar forever, waking a worker on every tick with
+  const currentState = async (
+    id: string,
+  ): Promise<{ cron: string; timezone: string; enabled: boolean } | null> => {
+    // A key that cannot be a row id has no row, and asking Postgres for it
+    // would raise rather than return empty — which would strand the junk
+    // entry in the calendar forever, waking a worker on every tick with
     // nothing to run. Shape-check instead of catching, so a database that is
-    // merely *down* still aborts the unregister rather than reaping the fleet.
-    if (!UUID_RE.test(id)) return true;
+    // merely *down* still aborts the repair rather than reaping the fleet.
+    if (!UUID_RE.test(id)) return null;
     const [row] = await db
-      .select({ enabled: taskSchedules.enabled })
+      .select({
+        cron: taskSchedules.cron,
+        timezone: taskSchedules.timezone,
+        enabled: taskSchedules.enabled,
+      })
       .from(taskSchedules)
       .where(eq(taskSchedules.id, id));
-    return !row?.enabled;
+    return row ?? null;
   };
 
   let registered = 0;
@@ -360,14 +381,28 @@ export async function reconcileScheduleCalendar(
     let verb: "register" | "unregister" = "register";
     try {
       const entry = live.get(row.id);
-      if (row.enabled) {
-        if (!entry || entry.cron !== row.cron || entry.timezone !== row.timezone) {
-          await calendar.register(row.id, row.cron, row.timezone);
-          registered += 1;
-        }
-      } else if (entry) {
-        verb = "unregister";
-        if (await safeToUnregister(row.id)) {
+      const drifted = row.enabled
+        ? !entry || entry.cron !== row.cron || entry.timezone !== row.timezone
+        : Boolean(entry);
+      // The snapshot decides only WHETHER to look; a fresh read decides what
+      // to write. The rows are read once and this loop is serial with a round
+      // trip per repair, so a row late in the list is acted on against a
+      // reading many seconds old — longer still if the calendar is slow rather
+      // than failing fast, since there is no per-call deadline. An API edit
+      // landing in that gap would otherwise be overwritten by the stale cron,
+      // and nothing downstream re-validates it: the job payload carries only
+      // the schedule id, so the firing is indistinguishable from a legitimate
+      // one and bills a real run at a time the UI does not show. Costs one
+      // indexed SELECT per *repair* — a converged fleet does none at all.
+      if (drifted) {
+        const now = await currentState(row.id);
+        if (now?.enabled) {
+          if (!entry || entry.cron !== now.cron || entry.timezone !== now.timezone) {
+            await calendar.register(row.id, now.cron, now.timezone);
+            registered += 1;
+          }
+        } else if (entry) {
+          verb = "unregister";
           await calendar.unregister(row.id);
           unregistered += 1;
         }
@@ -387,7 +422,7 @@ export async function reconcileScheduleCalendar(
   // snapshot is older than this loop, so confirm before tearing it out
   for (const key of live.keys()) {
     try {
-      if (await safeToUnregister(key)) {
+      if (!(await currentState(key))?.enabled) {
         await calendar.unregister(key);
         unregistered += 1;
       }
@@ -422,8 +457,16 @@ export async function reconcileScheduleCalendar(
   // a successful firing or a PATCH that happens to carry `enabled` does), and
   // a weekly one carries the banner for a week after the tick that fixed it.
   // Loud-forever decays into a banner nobody reads, which is the silence this
-  // was meant to replace, arrived at from the other side. Scoped by prefix so
-  // a real firing error is never cleared by a calendar repair.
+  // was meant to replace, arrived at from the other side.
+  //
+  // Ownership is enforced **in SQL**, not by the snapshot. Filtering on the
+  // ids alone would clear a genuine firing error that a concurrent `fail()`
+  // committed after the rows were read — and the schedule.fire handler runs
+  // freely during every await in this function, so that is an ordinary
+  // interleaving, not a corner. The prefix predicate is evaluated inside the
+  // UPDATE under the row lock, which makes `healed` a mere candidate list and
+  // puts correctness in the database. Keep BOTH terms: a bare prefix match
+  // would erase the failures written moments ago in the loop above.
   const healed = rows
     .filter((r) => r.lastError?.startsWith(CALENDAR_ERROR_PREFIX) && !failedRows.has(r.id))
     .map((r) => r.id);
@@ -431,7 +474,12 @@ export async function reconcileScheduleCalendar(
     await db
       .update(taskSchedules)
       .set({ lastError: null, lastErrorAt: null, updatedAt: new Date() })
-      .where(inArray(taskSchedules.id, healed))
+      .where(
+        and(
+          inArray(taskSchedules.id, healed),
+          like(taskSchedules.lastError, `${CALENDAR_ERROR_PREFIX}%`),
+        ),
+      )
       .catch(() => {});
   }
   return { considered: rows.length + orphans, registered, unregistered, failed };

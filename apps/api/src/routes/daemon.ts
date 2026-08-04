@@ -20,6 +20,7 @@ import {
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
+import { bearerToken } from "../lib/bearer-tokens";
 import {
   RUNTIME_TOKEN_PREFIX,
   runtimeTokenMatches,
@@ -50,8 +51,9 @@ export type DaemonEnv = {
  * a probe can't distinguish unknown, revoked, and malformed tokens.
  */
 const daemonAuth: MiddlewareHandler<DaemonEnv> = async (c, next) => {
-  const header = c.req.header("authorization") ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+  // the shared helper, not a second copy of the parse: `bearer-tokens.ts`
+  // calls itself the one implementation, and this had quietly diverged from it
+  const token = bearerToken(c.req.header("authorization")) ?? "";
   if (!token.startsWith(RUNTIME_TOKEN_PREFIX)) {
     throw new AppError("daemon_token_invalid", 401, "Invalid daemon token");
   }

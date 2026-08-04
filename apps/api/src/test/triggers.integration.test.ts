@@ -593,11 +593,19 @@ describe.skipIf(!dbUp)("inbound webhook triggers", () => {
        check (status <> 'succeeded') not valid`,
     );
     try {
-      // the bookkeeping write fails, so the whole submission rolls back with
+      // The bookkeeping write fails, so the whole submission rolls back with
       // it: no orphan run for a retry to duplicate, which is the
-      // duplicate-charge path
-      expect((await fireTrigger(db, queue, deliveryId)).kind).toBe("failed");
+      // duplicate-charge path. And a constraint violation is infrastructure,
+      // not something the sender can fix — so it propagates for pg-boss to
+      // retry rather than burning the delivery on a `failed` that is terminal
+      // for its claim.
+      await expect(fireTrigger(db, queue, deliveryId)).rejects.toThrow();
       expect((await db.select().from(runs)).length).toBe(runsBefore);
+      const [stillOpen] = await db
+        .select({ status: triggerDeliveries.status })
+        .from(triggerDeliveries)
+        .where(eq(triggerDeliveries.id, deliveryId));
+      expect(stillOpen?.status).toBe("pending");
     } finally {
       await db.execute(`alter table trigger_deliveries drop constraint tmp_block_succeeded`);
     }

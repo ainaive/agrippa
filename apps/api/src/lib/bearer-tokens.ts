@@ -50,9 +50,18 @@ export function issueToken(prefix: string): IssuedToken {
   return { token, tokenPrefix: tokenPrefixOf(token), tokenHash: hashToken(token) };
 }
 
-/** The bearer credential on a request, or null when the header is absent/other. */
+/**
+ * The bearer credential on a request, or null when the header is absent/other.
+ *
+ * The scheme is matched case-insensitively because RFC 9110 §11.1 says it is
+ * case-insensitive — and the failure was not a 401 that explained itself: an
+ * `authorization: bearer agr_…` fell through to the session branch and came
+ * back `unauthorized`, sending an SDK author looking at their key rather than
+ * at their capitalization.
+ */
 export function bearerToken(authorization: string | undefined): string | null {
-  if (!authorization?.startsWith("Bearer ")) return null;
-  const token = authorization.slice("Bearer ".length).trim();
+  const [scheme, ...rest] = (authorization ?? "").split(" ");
+  if (scheme?.toLowerCase() !== "bearer") return null;
+  const token = rest.join(" ").trim();
   return token === "" ? null : token;
 }
