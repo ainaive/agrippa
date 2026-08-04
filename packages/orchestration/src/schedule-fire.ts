@@ -75,6 +75,14 @@ export async function fireSchedule(
   queue: RunQueue | null,
   scheduleId: string,
   fireKey: string,
+  /**
+   * True when the queue has no retries left for this firing. Unexpected errors
+   * normally propagate so pg-boss can retry them, but on the last attempt that
+   * would end in silence — the job goes `failed` and nothing on the row or in
+   * the notification pipeline ever says so. On the last attempt they are
+   * recorded instead, the same shape the notification handler uses.
+   */
+  finalAttempt = false,
 ): Promise<ScheduleFireOutcome> {
   const [schedule] = await db.select().from(taskSchedules).where(eq(taskSchedules.id, scheduleId));
   if (!schedule?.enabled) return { kind: "skipped", reason: "disabled" };
@@ -245,15 +253,29 @@ export async function fireSchedule(
     // executor set. The schedule stays on so next week's firing can succeed;
     // the error is recorded and announced so the fix happens before then.
     //
-    // Anything NOT in that class is infrastructure or a bug, and must escape:
-    // `fail()` returns rather than throws, so the pg-boss job completes and
-    // the occurrence is spent — a deadlock or a statement timeout would cost a
-    // weekly schedule a week, and announce it to the project as if the project
-    // were at fault. Rethrowing is what the engine does with unexpected errors
-    // (AGENTS.md), and what the worker's own comment at the call site already
-    // claims happens here.
-    if (!(err instanceof AppError) && !(err instanceof SubmitError)) throw err;
-    return fail(`${err.code}: ${err.message}`);
+    // Anything NOT in that class is infrastructure or a bug, and escapes so
+    // pg-boss can retry it: `fail()` returns rather than throws, so recording
+    // one would complete the job and spend the occurrence — a deadlock or a
+    // statement timeout would cost a weekly schedule a week, and announce it
+    // to the project as if the project were at fault.
+    //
+    // Except on the last attempt. Retrying is only better than recording while
+    // there are retries left; after that the job goes `failed` and stops, and
+    // pg-boss does not emit on handler failure — so the row would keep a null
+    // `lastError`, no notification would go out, and the UI would show the
+    // schedule healthy. That is worse than the wrong attribution it replaced,
+    // and it is the exact silence this whole feature exists to prevent. It
+    // also catches the permanent-but-untyped cases (a template row that cannot
+    // be upgraded, params that fail a bare property read) which are the
+    // project's problem despite not being AppError.
+    if (!finalAttempt && !(err instanceof AppError) && !(err instanceof SubmitError)) throw err;
+    const message =
+      err instanceof AppError || err instanceof SubmitError
+        ? `${err.code}: ${err.message}`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    return fail(message);
   }
 
   // outside the try: a send failure must not be recorded as a firing failure
@@ -336,10 +358,9 @@ export async function reconcileScheduleCalendar(
     .from(taskSchedules);
 
   /**
-   * Re-read immediately before an unregister. An entry whose row was created
-   * or re-enabled after the rows snapshot would otherwise be torn out on the
-   * strength of a stale read, leaving an enabled schedule that never fires and
-   * says nothing about it.
+   * The row's calendar-relevant state right now, read immediately before
+   * **any** repair so the write acts on current truth rather than a snapshot
+   * the loop may have left minutes behind. Null means the row is gone.
    */
   const currentState = async (
     id: string,
@@ -378,9 +399,12 @@ export async function reconcileScheduleCalendar(
   for (const row of rows) {
     // isolated per row: this is a repair loop, and one unrepairable schedule
     // must not stop the others being repaired
-    let verb: "register" | "unregister" = "register";
+    const entry = live.get(row.id);
+    // seeded from the snapshot, because the re-read below can throw before
+    // either branch is reached — and a teardown reported as a registration
+    // failure tells the admin the opposite of what happened
+    let verb: "register" | "unregister" = !row.enabled && entry ? "unregister" : "register";
     try {
-      const entry = live.get(row.id);
       const drifted = row.enabled
         ? !entry || entry.cron !== row.cron || entry.timezone !== row.timezone
         : Boolean(entry);

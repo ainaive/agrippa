@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { createHmac, randomBytes } from "node:crypto";
+import { SCHEDULE_DISABLED_REASONS, TRIGGER_DISABLED_REASONS } from "@agrippa/core";
 import {
   createDb,
   encryptSecret,
@@ -12,6 +13,7 @@ import {
   secrets,
   users,
 } from "@agrippa/db";
+import { disabledReasonText } from "@agrippa/i18n";
 import { ProviderCredentialError } from "@agrippa/orchestration";
 import { eq, sql } from "drizzle-orm";
 import type { HostLookup } from "./net";
@@ -82,7 +84,7 @@ describe("renderMessage", () => {
     expect(msg.body).toContain("quota_exhausted: no headroom");
   });
 
-  it("renders a disabled reason as a sentence, not the raw enum", () => {
+  it("renders a disabled reason as a clause, not the raw enum and not a doubled sentence", () => {
     const msg = renderMessage(
       ctx({
         eventType: "schedule.disabled",
@@ -91,9 +93,28 @@ describe("renderMessage", () => {
         task: null,
       }),
     );
-    expect(msg.body).toContain("Weekly report");
-    expect(msg.body).not.toContain("owner_lost_access");
-    expect(msg.body).toContain("no longer has access");
+    // exact, not `toContain`: the settings catalog says these standalone
+    // ("Stopped: its owner…"), and pasting that into a sentence that already
+    // says the schedule was disabled reads "…will not run again: Stopped:
+    // … ." with two terminators. Only a whole-string match catches that.
+    expect(msg.body).toBe(
+      "The schedule “Weekly report” in Widgets was disabled and will not run again: its owner no longer has access to this project.",
+    );
+  });
+
+  it("renders every disabled reason in every locale", () => {
+    // the parity test compares locales against each other, never against the
+    // enums — so a fourth reason would ship rendering as a raw code with a
+    // green suite, which is the bug this catalog exists to prevent
+    for (const locale of ["en", "zh-CN"]) {
+      for (const reason of [...SCHEDULE_DISABLED_REASONS, ...TRIGGER_DISABLED_REASONS]) {
+        expect({ locale, reason, text: disabledReasonText(reason, locale) }).not.toEqual({
+          locale,
+          reason,
+          text: reason,
+        });
+      }
+    }
   });
 
   it("includes the error on run.failed", () => {
@@ -271,8 +292,12 @@ describe.skipIf(!dbUp)("deliverNotification", () => {
 
     await deliverNotification(db, row?.id as string, { fetchImpl, lookup: publicLookup });
 
-    expect(sent).toContain("Weekly report");
-    expect(sent).toContain("quota_exhausted: no headroom");
+    // the RENDERED message, not the raw body: the generic formatter echoes
+    // `payload` verbatim, so asserting on `sent` alone passes even when the
+    // message renders empty — it would pin the plumbing and nothing else
+    const body = (JSON.parse(sent) as { message: { title: string; body: string } }).message.body;
+    expect(body).toContain("Weekly report");
+    expect(body).toContain("quota_exhausted: no headroom");
   });
 
   it("delivers, verifies the signature server-side, and finalizes the row", async () => {

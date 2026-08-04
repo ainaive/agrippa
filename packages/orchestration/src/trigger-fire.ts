@@ -39,6 +39,8 @@ export async function fireTrigger(
   db: Db,
   queue: RunQueue | null,
   deliveryId: string,
+  /** See `fireSchedule`: on the last attempt, record rather than rethrow. */
+  finalAttempt = false,
 ): Promise<TriggerFireOutcome> {
   const [delivery] = await db
     .select()
@@ -206,8 +208,16 @@ export async function fireTrigger(
     // and as the worker's comment at the call site says: marking the delivery
     // `failed` is terminal for the claim, so a deadlock or statement timeout
     // would burn the webhook permanently and blame the sender's payload for it.
-    if (!(err instanceof AppError) && !(err instanceof SubmitError)) throw err;
-    const message = `${err.code}: ${err.message}`;
+    // …except on the last attempt, where escaping would leave the sweeper to
+    // exhaust the delivery into a generic "attempts exhausted" with the real
+    // cause discarded and no `trigger.failed` notification at all.
+    if (!finalAttempt && !(err instanceof AppError) && !(err instanceof SubmitError)) throw err;
+    const message =
+      err instanceof AppError || err instanceof SubmitError
+        ? `${err.code}: ${err.message}`
+        : err instanceof Error
+          ? err.message
+          : String(err);
     // terminal mark and announcement together, for the reason the disable path
     // gives: `failed` is what makes the retry's claim reject, so a throw
     // between them would lose a notification no sweeper can reconstruct

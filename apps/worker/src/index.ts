@@ -31,10 +31,12 @@ import {
   liveCentralWorkerSets,
   RedisEventBus,
   reconcileScheduleCalendar,
+  type ScheduleFireOutcome,
   sweepNotificationDeliveries,
   sweepOfflineRuntimes,
   sweepRunLeases,
   sweepTriggerDeliveries,
+  type TriggerFireOutcome,
 } from "@agrippa/orchestration";
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 import type { Job, JobWithMetadata } from "pg-boss";
@@ -271,43 +273,72 @@ await queue.boss.work(
  *
  * Logging `outcome.kind` alone printed `"failed"` with no cause — leaving the
  * operator's only signal for a lost firing to say that something went wrong
- * and nothing about what. The union carries `error` or `reason` on exactly the
- * branches where that matters.
+ * and nothing about what. The union carries `error`, `reason` or the ids on
+ * exactly the branches where each matters.
+ *
+ * Typed as the two unions and switched on the discriminant rather than taking
+ * a structural bag: a future member with a new informative field then fails to
+ * compile instead of being silently dropped, which is how the run id went
+ * missing from the success line in the first place.
  */
-function outcomeDetail(outcome: {
-  kind: string;
-  error?: string;
-  reason?: string;
-}): Record<string, string> {
-  return {
-    outcome: outcome.kind,
-    ...(outcome.error === undefined ? {} : { error: outcome.error }),
-    ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
-  };
+function outcomeDetail(outcome: ScheduleFireOutcome | TriggerFireOutcome): Record<string, string> {
+  switch (outcome.kind) {
+    case "submitted":
+      // the run id is the whole point of the success line: without it a firing
+      // cannot be correlated to the run it produced from the log alone
+      return { outcome: outcome.kind, runId: outcome.runId, taskId: outcome.taskId };
+    case "failed":
+      return { outcome: outcome.kind, error: outcome.error };
+    default:
+      return { outcome: outcome.kind, reason: outcome.reason };
+  }
 }
 
-await queue.boss.work(QUEUE_SCHEDULE_FIRE, async (jobs: Job<ScheduleFirePayload>[]) => {
-  for (const job of jobs) {
-    // fireSchedule never throws for a schedule-level problem: it records the
-    // outcome on the row and announces it. A throw here would mean an
-    // infrastructure fault, which pg-boss should retry.
-    // job.id, not the schedule id: it is this FIRING's identity. pg-boss keeps
-    // it when it re-inserts a retried job and mints a new one per cron tick, so
-    // it is exactly the key that tells a redelivery apart from an occurrence.
-    const outcome = await fireSchedule(db, queue, job.data.scheduleId, job.id);
-    deps.logger.info(`schedule ${job.data.scheduleId} fired`, outcomeDetail(outcome));
-  }
-});
+/**
+ * Is this the queue's last go at the job?
+ *
+ * A firing rethrows an unexpected error so pg-boss retries it — but only while
+ * retries remain. pg-boss does not emit on handler failure and no dead-letter
+ * queue is configured, so the last throw is a silent one: the job rests in
+ * `failed` and nothing on the row, in the notification pipeline, or in this log
+ * ever says so. Past the limit the firing records instead, the same shape the
+ * notification handler above uses.
+ */
+function isFinalAttempt(job: { retryCount?: number; retryLimit?: number }): boolean {
+  return (job.retryCount ?? 0) >= (job.retryLimit ?? 0);
+}
 
-await queue.boss.work(QUEUE_TRIGGER_FIRE, async (jobs: Job<TriggerFirePayload>[]) => {
-  for (const job of jobs) {
-    // like fireSchedule, this records its own outcome rather than throwing for
-    // a trigger-level problem — a throw here means infrastructure, which
-    // pg-boss should retry
-    const outcome = await fireTrigger(db, queue, job.data.deliveryId);
-    deps.logger.info(`trigger delivery ${job.data.deliveryId}`, outcomeDetail(outcome));
-  }
-});
+await queue.boss.work(
+  QUEUE_SCHEDULE_FIRE,
+  { includeMetadata: true } as const,
+  async (jobs: JobWithMetadata<ScheduleFirePayload>[]) => {
+    for (const job of jobs) {
+      // job.id, not the schedule id: it is this FIRING's identity. pg-boss keeps
+      // it when it re-inserts a retried job and mints a new one per cron tick, so
+      // it is exactly the key that tells a redelivery apart from an occurrence —
+      // and it is stable across the retries this handler now allows.
+      const outcome = await fireSchedule(
+        db,
+        queue,
+        job.data.scheduleId,
+        job.id,
+        isFinalAttempt(job),
+      );
+      deps.logger.info(`schedule ${job.data.scheduleId} fired`, outcomeDetail(outcome));
+    }
+  },
+);
+
+await queue.boss.work(
+  QUEUE_TRIGGER_FIRE,
+  { includeMetadata: true } as const,
+  async (jobs: JobWithMetadata<TriggerFirePayload>[]) => {
+    for (const job of jobs) {
+      const outcome = await fireTrigger(db, queue, job.data.deliveryId, isFinalAttempt(job));
+      deps.logger.info(`trigger delivery ${job.data.deliveryId}`, outcomeDetail(outcome));
+    }
+  },
+);
 
 /**
  * The calendar view the reconciler drives. Kept here rather than on `RunQueue`
@@ -366,18 +397,35 @@ await markConsumersReady(db, containerId);
  * Reconciliation sweeper: re-enqueues queued runs whose job got lost (e.g.
  * the API crashed between commit and send). Singleton keys make this safe.
  */
-let sweeping = false;
+/**
+ * Bounded, because an unbounded one is worse than the overlap it prevents.
+ *
+ * `setInterval` does not await the callback, so a slow sweep overlaps itself
+ * and wastes work. But nothing on this path has a timeout — no statement
+ * timeout, no pool acquisition deadline — so a stage wedged on a lock never
+ * returns, and a plain boolean would then disable *every* recovery mechanism
+ * (stragglers, leases, offline runtimes, checkpoints, both delivery sweeps,
+ * calendar drift) until someone restarts the worker. That is the same argument
+ * the per-stage isolation below makes, one level up: a recovery mechanism one
+ * hung call can switch off is not a recovery mechanism. Past the deadline a
+ * new tick takes over and says so at error level.
+ */
+const SWEEP_STALL_MS = 5 * 60_000;
+let sweepStartedAt: number | null = null;
 setInterval(async () => {
-  // `setInterval` does not await the callback, so a sweep that outruns its own
-  // period would overlap itself — two calendar reconciles at once, each acting
-  // on a snapshot the other has already invalidated, which is precisely the
-  // staleness the repair loop re-reads to avoid. Skipping a tick is free: the
-  // next one is 60s away and every stage is convergent.
-  if (sweeping) {
-    deps.logger.warn("sweeper still running from the previous tick — skipping this one");
-    return;
+  const startedAt = sweepStartedAt;
+  if (startedAt !== null) {
+    const stalledFor = Date.now() - startedAt;
+    if (stalledFor < SWEEP_STALL_MS) {
+      deps.logger.warn("sweeper still running from the previous tick — skipping this one");
+      return;
+    }
+    deps.logger.error("sweeper stalled — starting a new pass over the top", {
+      stalledForMs: String(stalledFor),
+    });
   }
-  sweeping = true;
+  const startedAtOwned = Date.now();
+  sweepStartedAt = startedAtOwned;
   try {
     // Each stage is isolated. The sweep used to be one try block, which meant a
     // single unenqueueable straggler took lease expiry, offline detection,
@@ -466,7 +514,9 @@ setInterval(async () => {
       logReconcileFailures(failed);
     });
   } finally {
-    sweeping = false;
+    // only if we still own it — a stalled predecessor finishing late must not
+    // clear the flag out from under the pass that took over
+    if (sweepStartedAt === startedAtOwned) sweepStartedAt = null;
   }
 }, 60_000);
 

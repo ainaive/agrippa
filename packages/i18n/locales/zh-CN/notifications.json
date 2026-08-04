@@ -47,5 +47,10 @@
     "title": "测试通知",
     "body": "这是 Agrippa 为项目 {{projectName}} 发送的测试通知。"
   },
-  "openRun": "查看执行"
+  "openRun": "查看执行",
+  "reasons": {
+    "owner_lost_access": "创建者不再拥有本项目的访问权限",
+    "project_archived": "本项目已归档",
+    "task_type_gone": "对应的任务类型已不可用"
+  }
 }

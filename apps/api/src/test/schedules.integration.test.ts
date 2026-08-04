@@ -475,14 +475,34 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
         calendar.delete(id);
       },
     };
+    const other = await createSchedule({ cron: "0 3 * * 1" });
     await reconcileScheduleCalendar(db, view);
-    calendar.delete(row.id); // the drift this pass will repair
+    // both drift, so both will be repaired in the same serial pass
+    calendar.delete(row.id);
+    calendar.delete(other.id);
 
-    // an edit commits between the rows read and the repair
-    await db.update(taskSchedules).set({ cron: "45 22 * * 5" }).where(eq(taskSchedules.id, row.id));
+    // The edit has to land AFTER the rows snapshot and BEFORE this row's
+    // repair, which is the only window the fix addresses — committing it
+    // before the call would just be read into the snapshot and prove nothing.
+    // The loop is serial, so repairing the *other* schedule is the hook.
+    // `rows` has no ORDER BY, so edit whichever of the two is still UNrepaired
+    // when the first repair runs — that one is then acted on with a snapshot
+    // that predates its edit, which is exactly the window.
+    let editedId: string | null = null;
+    view.register = async (id: string, cron: string, timezone: string) => {
+      calendar.set(id, { key: id, cron, timezone });
+      if (editedId === null) {
+        editedId = id === row.id ? other.id : row.id;
+        await db
+          .update(taskSchedules)
+          .set({ cron: "45 22 * * 5" })
+          .where(eq(taskSchedules.id, editedId));
+      }
+    };
     await reconcileScheduleCalendar(db, view);
 
-    expect(calendar.get(row.id)?.cron).toBe("45 22 * * 5");
+    expect(editedId).not.toBeNull();
+    expect(calendar.get(editedId as unknown as string)?.cron).toBe("45 22 * * 5");
   });
 
   it("rethrows an unexpected submit failure instead of spending the occurrence", async () => {
@@ -490,16 +510,58 @@ describe.skipIf(!dbUp)("task schedules (cron submission)", () => {
     // occurrence is gone. A deadlock or a statement timeout would cost a
     // weekly schedule a week and blame the project in a notification, when
     // pg-boss would have retried it seconds later.
-    const row = await createSchedule();
+    // a fixed name, not an interpolated one: this is the suite's only raw-DDL
+    // interpolation of a runtime value, and an apostrophe in a schedule name
+    // would break the statement (ALTER TABLE takes no bind parameters)
+    const row = await createSchedule({ name: "blocked-by-check" });
     await db.execute(
-      `alter table tasks add constraint tmp_block_task_insert check (title <> '${row.name}') not valid`,
+      `alter table tasks add constraint tmp_block_task_insert check (title <> 'blocked-by-check') not valid`,
     );
     try {
-      await expect(fireSchedule(db, queue, row.id, fireKey())).rejects.toThrow();
+      // matched on the driver's own wrapper, so a broken fixture throwing
+      // something else cannot masquerade as the escaping infrastructure error
+      // (drizzle keeps the constraint name on the cause, not the message)
+      await expect(fireSchedule(db, queue, row.id, fireKey())).rejects.toThrow(/Failed query/);
       // and it is not recorded as the schedule's own failure
       expect((await rowOf(row.id))?.lastError).toBeNull();
     } finally {
       await db.execute(`alter table tasks drop constraint tmp_block_task_insert`);
+    }
+  });
+
+  it("records the failure on the last attempt instead of vanishing", async () => {
+    // Retrying beats recording only while retries remain. Past the limit the
+    // job rests in `failed`, and pg-boss neither emits on handler failure nor
+    // dead-letters here — so escaping again would leave a null lastError, no
+    // notification, and a schedule the UI calls healthy. Silence is the one
+    // outcome this feature exists to prevent.
+    const row = await createSchedule({ name: "blocked-by-check-final" });
+    // an endpoint to announce to — without one there is nothing to deliver and
+    // the assertion below would pass or fail for the wrong reason
+    await db.insert(notificationEndpoints).values({
+      projectId,
+      kind: "generic",
+      name: "final-attempt-hook",
+      url: "https://example.com/final",
+      events: [],
+      createdBy: (await rowOf(row.id))?.createdBy as string,
+    });
+    await db.execute(
+      `alter table tasks add constraint tmp_block_final check (title <> 'blocked-by-check-final') not valid`,
+    );
+    try {
+      const outcome = await fireSchedule(db, queue, row.id, fireKey(), true);
+      expect(outcome.kind).toBe("failed");
+      // recorded at all is the property — the exact text is the driver's
+      expect((await rowOf(row.id))?.lastError).toContain("Failed query");
+      // and it is announced, not just written
+      const announced = await db
+        .select()
+        .from(notificationDeliveries)
+        .where(eq(notificationDeliveries.eventType, "schedule.failed"));
+      expect(announced.length).toBeGreaterThan(0);
+    } finally {
+      await db.execute(`alter table tasks drop constraint tmp_block_final`);
     }
   });
 

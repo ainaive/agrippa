@@ -361,8 +361,19 @@ export async function deliverNotification(
   if (!endpoint.enabled) {
     await db
       .update(notificationDeliveries)
+      // guarded on `pending` like its sibling below: without it, a duplicate
+      // job that read the row before the endpoint was disabled can stamp
+      // `failed` over a delivery another attempt has already SUCCEEDED — and
+      // a succeeded row carries the request snapshot in `payload`, so the
+      // retry an admin then clicks would re-render from that snapshot instead
+      // of the event, which is the empty-body bug one branch below
       .set({ status: "failed", lastError: "endpoint disabled" })
-      .where(eq(notificationDeliveries.id, deliveryId));
+      .where(
+        and(
+          eq(notificationDeliveries.id, deliveryId),
+          eq(notificationDeliveries.status, "pending"),
+        ),
+      );
     return;
   }
 
