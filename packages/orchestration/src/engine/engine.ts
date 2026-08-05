@@ -58,6 +58,7 @@ import {
   type TemplatePhaseV2,
   type TemplateStepV2,
 } from "../template-schema";
+import { releaseWorkspace } from "../workspace-retention";
 import {
   type EngineDeps,
   ProviderCredentialError,
@@ -2150,10 +2151,16 @@ class RunEngine {
       payload: eventPayload,
       createdAt: result.createdAt.toISOString(),
     });
+    // Release, don't delete (ADR-0018 Decision 4). The directory can outlive
+    // this run — a follow-up continues it — so finalize stamps an expiry and
+    // the collector deletes once EVERY run sharing the key has released it.
+    // The manager still drops whatever is this run's alone (a remote run's
+    // local staging dir); the workspace itself is now group-owned.
     try {
-      await this.deps.workspace.cleanup(this.run.id);
+      await releaseWorkspace(this.db, this.run.id);
+      await this.deps.workspace.release(this.run.id);
     } catch (err) {
-      this.deps.logger.warn("workspace cleanup failed", { err: String(err) });
+      this.deps.logger.warn("workspace release failed", { err: String(err) });
     }
   }
 }

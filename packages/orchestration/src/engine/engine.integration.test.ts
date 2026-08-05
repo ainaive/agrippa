@@ -37,6 +37,11 @@ import { startTestDaemonLoop, type TestDaemonLoop } from "../remote/test-daemon-
 import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
+import {
+  collectExpiredWorkspaces,
+  expiredWorkspaceKeys,
+  releaseWorkspace,
+} from "../workspace-retention";
 import { InProcessEventBus } from "./bus";
 import { type EngineDeps, ProviderCredentialError, type RunControlHandle } from "./deps";
 import { CONTEXT_LOSS_DISCLOSURE, ExecutorUnavailableError, executeRun } from "./engine";
@@ -421,8 +426,14 @@ for (const transport of TRANSPORTS) {
         expect(events.some((e) => e.type === "checkpoint.required")).toBe(true);
         expect(events.some((e) => e.type === "run.resumed")).toBe(true);
 
-        // workspace cleaned up on terminal state
-        expect(workspace.cleaned).toContain(runId);
+        // the workspace is RELEASED on terminal state, not deleted: the
+        // directory belongs to the workspace key, which a follow-up inherits
+        expect(workspace.released).toContain(runId);
+        const [released] = await db
+          .select({ expiresAt: runs.workspaceExpiresAt })
+          .from(runs)
+          .where(eq(runs.id, runId));
+        expect(released?.expiresAt).not.toBeNull();
       });
 
       it("rejecting the checkpoint fails the run with approval_rejected", async () => {
@@ -2483,6 +2494,113 @@ for (const transport of TRANSPORTS) {
     },
   );
 }
+
+describe.skipIf(!dbUp)("workspace retention (ADR-0018 Decision 4)", () => {
+  /** A second run sharing one workspace — a follow-up's shape. */
+  const shareWorkspace = async (db: Db, runId: string): Promise<string> => {
+    const [ancestor] = await db.select().from(runs).where(eq(runs.id, runId));
+    const [row] = await db
+      .insert(runs)
+      .values({
+        ...newRunIdentity(),
+        workspaceKey: ancestor?.workspaceKey as string,
+        kind: "followup",
+        parentRunId: runId,
+        taskId: ancestor?.taskId as string,
+        projectId: ancestor?.projectId as string,
+        number: (ancestor?.number ?? 1) + 1,
+        templateVersionId: ancestor?.templateVersionId as string,
+        faberId: ancestor?.faberId as string,
+        executorId: ancestor?.executorId as string,
+        paramsSnapshot: {},
+        modelResolution: {},
+        createdBy: ancestor?.createdBy as string,
+      })
+      .returning();
+    return row?.id as string;
+  };
+
+  it("a workspace is collectable only when the whole chain has released it", async () => {
+    const { db, runId } = await setupFixture();
+    const [before] = await db.select().from(runs).where(eq(runs.id, runId));
+    const key = before?.workspaceKey as string;
+
+    // live: nothing to collect
+    expect(await expiredWorkspaceKeys(db, { runtimeId: null })).not.toContain(key);
+
+    await releaseWorkspace(db, runId);
+    expect(await expiredWorkspaceKeys(db, { runtimeId: null })).toContain(key);
+
+    // a follow-up joins the group and holds the directory, even though its
+    // ancestor released long ago — the whole point of grouping by key
+    const followupId = await shareWorkspace(db, runId);
+    expect(await expiredWorkspaceKeys(db, { runtimeId: null })).not.toContain(key);
+
+    await releaseWorkspace(db, followupId);
+    expect(await expiredWorkspaceKeys(db, { runtimeId: null })).toContain(key);
+  });
+
+  it("release is idempotent and does not extend an expiry already stamped", async () => {
+    const { db, runId } = await setupFixture();
+    await releaseWorkspace(db, runId);
+    const [first] = await db.select().from(runs).where(eq(runs.id, runId));
+    await Bun.sleep(10);
+    await releaseWorkspace(db, runId);
+    const [second] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(second?.workspaceExpiresAt?.getTime()).toBe(
+      first?.workspaceExpiresAt?.getTime() as number,
+    );
+  });
+
+  it("the collector deletes each expired key once, and honors KEEP_WORKSPACES", async () => {
+    const { db, runId } = await setupFixture();
+    const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+    const key = row?.workspaceKey as string;
+    await releaseWorkspace(db, runId);
+
+    const removed: string[] = [];
+    const collected = new Set<string>();
+    const logger = { info: () => {}, warn: () => {} };
+
+    process.env.AGRIPPA_KEEP_WORKSPACES = "1";
+    expect(
+      await collectExpiredWorkspaces({
+        db,
+        remove: async (k) => {
+          removed.push(k);
+        },
+        collected,
+        logger,
+      }),
+    ).toBe(0);
+    process.env.AGRIPPA_KEEP_WORKSPACES = undefined as unknown as string;
+    delete process.env.AGRIPPA_KEEP_WORKSPACES;
+
+    expect(
+      await collectExpiredWorkspaces({
+        db,
+        remove: async (k) => {
+          removed.push(k);
+        },
+        collected,
+        logger,
+      }),
+    ).toBe(1);
+    expect(removed).toEqual([key]);
+    // a second tick names the same key again; the process-local set makes it free
+    expect(
+      await collectExpiredWorkspaces({
+        db,
+        remove: async (k) => {
+          removed.push(k);
+        },
+        collected,
+        logger,
+      }),
+    ).toBe(0);
+    expect(removed).toEqual([key]);
+  });
+});
 
 describe.skipIf(!dbUp)("execution lease (ADR-0017 Decision 4)", () => {
   const waitFor = async (probe: () => Promise<boolean>, timeoutMs = 5_000): Promise<void> => {

@@ -298,7 +298,7 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     runId = run?.id as string;
   });
 
-  it("names this runtime's spent workspaces so the daemon can reap them", async () => {
+  it("names this runtime's spent workspaces — and only once the whole chain released", async () => {
     // Affinity gives the daemon a run's workspace for the run's whole life, so
     // only the server — where the engine finalizes, even for a remote executor
     // — can say when the directory is spent. Without this every remote run
@@ -306,36 +306,64 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     const pinned = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
     expect(pinned.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
+    // finishing is no longer the criterion: the run must have RELEASED its
+    // workspace, which is what a follow-up's presence delays (ADR-0018)
     await db
       .update(runs)
       .set({ runtimeId, status: "succeeded", finishedAt: sql`now()` })
       .where(eq(runs.id, runId));
+    const finishedOnly = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(finishedOnly.reapableWorkspaceKeys ?? []).not.toContain(runId);
+
+    await db
+      .update(runs)
+      .set({ workspaceExpiresAt: sql`now() - interval '1 minute'` })
+      .where(eq(runs.id, runId));
     const done = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
     expect(done.reapableWorkspaceKeys).toContain(runId);
 
-    // never another runtime's, and never one that is still going
+    // never another runtime's
     const foreign = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(
       await daemonClaim(otherToken),
     );
     expect(foreign.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
-    await db.update(runs).set({ status: "running" }).where(eq(runs.id, runId));
-    const live = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
-    expect(live.reapableWorkspaceKeys ?? []).not.toContain(runId);
+    // A follow-up sharing the key holds the whole workspace: eligibility is a
+    // property of the GROUP, so one live run keeps the directory even though
+    // its ancestor released long ago. Reaping here would not cost a re-clone —
+    // it would silently drop the completed steps' work.
+    const [followup] = await db
+      .insert(runs)
+      .values({
+        ...newRunIdentity(),
+        workspaceKey: runId, // inherited
+        kind: "followup",
+        parentRunId: runId,
+        taskId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.taskId as string,
+        projectId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.projectId as string,
+        number: 2,
+        templateVersionId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]
+          ?.templateVersionId as string,
+        faberId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.faberId as string,
+        executorId: "fake",
+        paramsSnapshot: {},
+        modelResolution: {},
+        runtimeId,
+        createdBy: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.createdBy as string,
+      })
+      .returning();
+    const held = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(held.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
-    // The two coincide for an ordinary run, which is exactly why the field
-    // must be pinned against a run whose workspace key is NOT its id — a
-    // follow-up's shape (ADR-0018 Decision 3). Naming the run would tell the
-    // daemon to delete a directory it does not have while the one it does
-    // have leaks.
-    const inherited = crypto.randomUUID();
+    // and it is collectable again once the follow-up releases too
     await db
       .update(runs)
-      .set({ workspaceKey: inherited, status: "succeeded", finishedAt: sql`now()` })
-      .where(eq(runs.id, runId));
-    const followup = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
-    expect(followup.reapableWorkspaceKeys).toContain(inherited);
-    expect(followup.reapableWorkspaceKeys).not.toContain(runId);
+      .set({ workspaceExpiresAt: sql`now() - interval '1 second'` })
+      .where(eq(runs.id, followup?.id as string));
+    const collectable = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(collectable.reapableWorkspaceKeys).toContain(runId);
+    await db.delete(runs).where(eq(runs.id, followup?.id as string));
+    await db.update(runs).set({ workspaceExpiresAt: null }).where(eq(runs.id, runId));
   });
 
   it("claim is atomic, oldest-first, and scoped to the runtime", async () => {

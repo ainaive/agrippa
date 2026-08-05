@@ -25,3 +25,4 @@ export * from "./template-schema";
 export * from "./trigger-fire";
 export * from "./usage";
 export * from "./worker-executors";
+export * from "./workspace-retention";

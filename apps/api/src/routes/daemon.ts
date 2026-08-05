@@ -9,16 +9,16 @@ import {
   dispatchCompleteSchema,
   dispatchEventBatchSchema,
   dispatchFailSchema,
-  TERMINAL_RUN_STATUSES,
 } from "@agrippa/core";
-import { auditLogs, type Db, dispatchEvents, dispatches, runs, runtimes } from "@agrippa/db";
+import { auditLogs, type Db, dispatchEvents, dispatches, runtimes } from "@agrippa/db";
 import {
   ArtifactTooLargeError,
   DiskArtifactStore,
+  expiredWorkspaceKeys,
   isSafeArtifactKey,
   type RunEventBus,
 } from "@agrippa/orchestration";
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { bearerToken } from "../lib/bearer-tokens";
@@ -32,12 +32,13 @@ import { validate } from "../lib/validate";
 type RuntimeRow = typeof runtimes.$inferSelect;
 
 /**
- * How far back the claim poll looks for finished runs to reap, and how many it
- * names at once. Long enough that a daemon offline for a working day still
- * hears about its runs; short enough that the answer stays small. What falls
- * out the far end is not lost — the daemon sweeps very old directories itself.
+ * How far back the claim poll looks for spent workspaces to reap, and how many
+ * it names at once. Long enough that a daemon offline for a working day still
+ * hears about its directories; short enough that the answer stays small. What
+ * falls out the far end is not lost — the daemon sweeps very old directories
+ * itself, which is also what covers a daemon that was down all week.
  */
-const REAPABLE_WINDOW = "24 hours";
+const REAPABLE_WINDOW_HOURS = 24;
 const REAPABLE_LIMIT = 100;
 
 /**
@@ -210,29 +211,25 @@ export const daemonRoutes = new Hono<DaemonEnv>()
           eq(dispatches.abortRequested, true),
         ),
       );
-    // Workspaces of runs pinned here that have finalized: the daemon holds the
-    // directories and cannot tell on its own that they are done, because the
+    // Workspaces pinned here that nothing needs any more: the daemon holds the
+    // directories and cannot tell on its own when they are spent, because the
     // engine runs centrally even when the executor is remote. Named by
-    // workspace key rather than run id (ADR-0018 Decision 3) — the directory
-    // is what gets deleted, and distinct so a chain sharing one workspace does
-    // not repeat it. Bounded by a recency window rather than an
-    // acknowledgement: removal is idempotent, so repeating a key costs
-    // nothing, and anything older is collected by the daemon's backstop sweep.
-    const reapable = await c.var.db
-      .selectDistinct({ workspaceKey: runs.workspaceKey })
-      .from(runs)
-      .where(
-        and(
-          eq(runs.runtimeId, c.var.runtime.id),
-          inArray(runs.status, [...TERMINAL_RUN_STATUSES]),
-          gt(runs.finishedAt, sql`now() - ${REAPABLE_WINDOW}::interval`),
-        ),
-      )
-      .limit(REAPABLE_LIMIT);
+    // workspace key rather than run id, and gated on the whole GROUP having
+    // been released rather than on one run finishing (ADR-0018 Decisions 3–4)
+    // — a follow-up holds its ancestor's directory, and reaping it would not
+    // merely cost a re-clone but silently drop the completed steps' work.
+    // Bounded by a recency window rather than an acknowledgement: removal is
+    // idempotent, so repeating a key costs nothing, and anything older is
+    // collected by the daemon's own age-based sweep.
+    const reapable = await expiredWorkspaceKeys(c.var.db, {
+      runtimeId: c.var.runtime.id,
+      windowHours: REAPABLE_WINDOW_HOURS,
+      limit: REAPABLE_LIMIT,
+    });
     const response: DaemonClaimResponse = {
       dispatch: claimed,
       abortedDispatchIds: aborted.map((r) => r.id),
-      reapableWorkspaceKeys: reapable.map((r) => r.workspaceKey),
+      reapableWorkspaceKeys: reapable,
     };
     return c.json(response);
   })

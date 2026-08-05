@@ -16,7 +16,7 @@ import type {
 export class FakeWorkspaceManager implements WorkspaceManager {
   readonly dirs = new Map<string, string>();
   readonly checkouts: Array<{ runId: string; spec: unknown }> = [];
-  readonly cleaned: string[] = [];
+  readonly released: string[] = [];
   diffOutput = "diff --git a/fake b/fake\n";
   diffError: Error | null = null;
 
@@ -45,8 +45,8 @@ export class FakeWorkspaceManager implements WorkspaceManager {
     return this.intact;
   }
 
-  async cleanup(runId: string): Promise<void> {
-    this.cleaned.push(runId);
+  async release(runId: string): Promise<void> {
+    this.released.push(runId);
     this.dirs.delete(runId);
   }
 }

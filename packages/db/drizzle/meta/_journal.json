@@ -211,6 +211,13 @@
       "when": 1785894068525,
       "tag": "0029_runtime_features",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1785894643901,
+      "tag": "0030_workspace_retention",
+      "breakpoints": true
     }
   ]
 }

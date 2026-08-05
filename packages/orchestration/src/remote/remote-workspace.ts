@@ -172,7 +172,13 @@ export class RemoteWorkspaceManager implements WorkspaceManager {
     return dbNow.getTime() - row.lastSeenAt.getTime() < RUNTIME_LIVE_MS;
   }
 
-  async cleanup(runId: string): Promise<void> {
+  /**
+   * The real workspace is the daemon's and outlives this run (the daemon
+   * collects it when the server says the key expired). What is local — the
+   * staging dir the resource materializer wrote skill files into — is scratch
+   * a follow-up rebuilds, so dropping it now costs nothing.
+   */
+  async release(runId: string): Promise<void> {
     await rm(this.stagingDir(await workspaceKeyOf(this.db, runId)), {
       recursive: true,
       force: true,

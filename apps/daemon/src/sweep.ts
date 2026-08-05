@@ -17,6 +17,22 @@ import type { Logger } from "@agrippa/executor-core";
 export const STALE_WORKSPACE_DAYS = 30;
 
 /**
+ * How often the local sweep repeats. It runs at boot too, but boot-only was a
+ * backstop for the server's signal rather than a policy of its own: retention
+ * belongs to the server, the filesystem belongs to this machine (ADR-0018
+ * Decision 4), and a laptop that has not reached the server in weeks must
+ * still bound its own disk use. Six hours is far below the 30-day floor, so
+ * the repetition costs a directory listing and nothing else.
+ */
+export const STALE_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Env override for the floor above, in days; anything unparseable keeps 30. */
+export function staleWorkspaceDays(env: Record<string, string | undefined>): number {
+  const raw = Number(env.AGRIPPA_DAEMON_WORKSPACE_TTL_DAYS ?? "");
+  return Number.isFinite(raw) && raw > 0 ? raw : STALE_WORKSPACE_DAYS;
+}
+
+/**
  * Delete workspace directories untouched for `days`.
  *
  * Deliberately dumb: it does not ask the server which runs exist, because the

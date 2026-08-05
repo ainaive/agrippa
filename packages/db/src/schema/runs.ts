@@ -97,6 +97,16 @@ export const runs = pgTable(
      * keeps older daemons correct when the wire starts carrying keys.
      */
     workspaceKey: uuid("workspace_key").notNull(),
+    /**
+     * When this run stops needing its workspace (ADR-0018 Decision 4). NULL
+     * while the run is live — which is what protects the directory: collection
+     * groups by `workspace_key` and takes the group's LATEST expiry, so one
+     * unfinished run in the chain keeps the whole workspace, and a follow-up
+     * extends its ancestor's simply by existing. Stamped at finalize instead
+     * of deleting, because deleting was keyed on a run and the directory now
+     * outlives one.
+     */
+    workspaceExpiresAt: tstz("workspace_expires_at"),
     usageTotals: jsonb("usage_totals").$type<Record<string, unknown>>().notNull().default({}),
     // atomic per-run event-seq allocator (UPDATE … RETURNING); avoids max(seq)+1 races
     nextEventSeq: integer("next_event_seq").notNull().default(0),
@@ -142,6 +152,10 @@ export const runs = pgTable(
     // every workspace question is asked by key, not by run: who else shares
     // this directory, and is any of them still alive (ADR-0018 Decisions 3–4)
     index("runs_workspace_key_idx").on(t.workspaceKey),
+    // the collector scans only expired rows, never the whole table
+    index("runs_workspace_expiry_idx")
+      .on(t.workspaceExpiresAt)
+      .where(sql`${t.workspaceExpiresAt} is not null`),
     // the expiry sweep scans only running runs
     index("runs_lease_sweep_idx").on(t.leaseExpiresAt).where(sql`${t.status} = 'running'`),
     // the daemon claim poll asks "which of my pinned runs are finished?" on

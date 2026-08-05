@@ -18,6 +18,7 @@ import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
 import {
   appendRunEvent,
+  collectExpiredWorkspaces,
   createRunQueue,
   DiskArtifactStore,
   dbRunExecutorResolver,
@@ -52,8 +53,15 @@ import {
 } from "./deps/readiness";
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitScmService } from "./deps/scm";
-import { GitWorkspaceManager } from "./deps/workspace";
+import { GitWorkspaceManager, removeWorkspace } from "./deps/workspace";
 import { selectRunQueues } from "./run-queues";
+
+/**
+ * Workspace keys this process has already collected, so a key named on every
+ * tick for the rest of its window costs one `has` rather than an `rm -rf`.
+ * Bounded by that window; a restart simply re-collects, which is a no-op.
+ */
+const collectedWorkspaces = new Set<string>();
 
 const db = createDb();
 // inside a compose container the hostname IS the container id — the identity
@@ -492,6 +500,25 @@ setInterval(async () => {
       for (const runId of await findStrandedCheckpointRuns(db)) {
         await enqueueAfterCommit(() => queue.enqueueRun(runId), `stranded ${runId}`);
       }
+    });
+
+    // Workspace collection (ADR-0018 Decision 4). Deleting used to be a
+    // finalize side effect, which cannot work once a directory outlives the
+    // run that made it: a key is collected only when every run sharing it has
+    // released it and the group's latest expiry has passed. Every worker runs
+    // this — the deletes are idempotent, and a worker that does not hold a
+    // directory removes nothing, so a fleet with a shared volume collects once
+    // and a fleet without one still collects on whichever host has the files.
+    await stage("workspaces", async () => {
+      await collectExpiredWorkspaces({
+        db,
+        remove: removeWorkspace,
+        collected: collectedWorkspaces,
+        logger: {
+          info: (msg: string) => deps.logger.info(msg),
+          warn: (msg: string) => deps.logger.warn(msg),
+        },
+      });
     });
 
     // delivery backstops: backfill missed events, re-enqueue stale rows

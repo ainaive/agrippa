@@ -3,7 +3,6 @@ import { type Db, decryptSecret, loadSecretKey, repoConnections, secrets } from 
 import { type WorkspaceManager, type WorkspaceSpec, workspaceKeyOf } from "@agrippa/orchestration";
 import {
   checkoutFromUrl,
-  removeWorkspace,
   stagePlatformSnapshot,
   workspaceDirFor,
   workspaceIntact,
@@ -23,6 +22,9 @@ export {
   platformDirFor,
   platformGit,
   platformGitDirFor,
+  // the collector deletes by workspace key — no run row involved, because by
+  // then every run that shared the directory is finished (ADR-0018)
+  removeWorkspace,
   stagePlatformSnapshot,
   workspaceDirFor,
 } from "@agrippa/workspace";
@@ -111,8 +113,11 @@ export class GitWorkspaceManager implements WorkspaceManager {
     return await workspaceIntact(await this.key(runId));
   }
 
-  async cleanup(runId: string): Promise<void> {
-    if (process.env.AGRIPPA_KEEP_WORKSPACES === "1") return;
-    await removeWorkspace(await this.key(runId));
-  }
+  /**
+   * Nothing to drop: the checkout belongs to the workspace key, and a
+   * follow-up may still continue it. The engine's expiry stamp plus the
+   * worker's collector own deletion now (ADR-0018 Decision 4) — deleting here
+   * would race exactly the case retention exists to serve.
+   */
+  async release(): Promise<void> {}
 }
