@@ -147,6 +147,8 @@ export type RunTemplate = {
   }>;
   limits: RunLimits;
   modelRoles: Record<string, { tier: string; fallback: string[] }>;
+  /** Whether the template declares a workspace — see Run.usesWorkspace. */
+  usesWorkspace: boolean;
 };
 
 export type RunAgentBinding = {
@@ -176,6 +178,13 @@ export type Run = {
    * offering it rather than letting the API answer 409.
    */
   workspaceExpiresAt: string | null;
+  /**
+   * Whether this run has a workspace at all. A template with no `workspace:`
+   * block never had a directory to lose, so the expiry above says nothing
+   * about whether it can still be steered — the API permits those past the
+   * window, and the UI must not hide what the API allows.
+   */
+  usesWorkspace: boolean;
   status: RunStatus;
   templateVersionId: string;
   faberId: string;

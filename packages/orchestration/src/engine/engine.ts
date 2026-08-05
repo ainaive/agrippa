@@ -12,6 +12,7 @@ import {
   type RunStatus,
   reviewReportSchema,
   type StepStatus,
+  TERMINAL_RUN_STATUSES,
 } from "@agrippa/core";
 import {
   artifacts,
@@ -45,7 +46,7 @@ import {
   UsageLimitExceededError,
   UsageMeter,
 } from "@agrippa/executor-core";
-import { and, eq, gte, inArray, max, ne, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, max, ne, notInArray, sql } from "drizzle-orm";
 import { upgradeCompiledTemplate } from "../compile";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
 import {
@@ -182,6 +183,24 @@ export class ExecutorUnavailableError extends Error {
   ) {
     super(`executor '${executorId}' ${reason}`);
     this.name = "ExecutorUnavailableError";
+  }
+}
+
+/**
+ * Raised when another run still holds this run's workspace (ADR-0018).
+ *
+ * A follow-up requested while one is running becomes the next in the chain —
+ * which only works if the next one waits. Nothing else serializes them: jobs
+ * and leases are keyed by run id, and one worker runs several slots, so two
+ * links would otherwise edit one directory at the same time and each report
+ * success. Declined rather than failed, because the wait is the whole point:
+ * the blocker finishing is what makes this run ready.
+ */
+export class WorkspaceBusyError extends Error {
+  readonly code = "workspace_busy";
+  constructor(runId: string, holderRunId: string) {
+    super(`run ${runId}: its workspace is held by run ${holderRunId} — waiting for it to finish`);
+    this.name = "WorkspaceBusyError";
   }
 }
 
@@ -353,6 +372,29 @@ export async function executeRun(
         }
       }
     }
+  }
+
+  // One live run per workspace (ADR-0018). A follow-up requested while another
+  // is running becomes the NEXT one — a queueing rule the first implementation
+  // stated and did not enforce: jobs and leases are keyed by run id, workers
+  // have several slots, so both would have executed in one directory at once.
+  // Probed before the claim, like the affinity check below, so a decline costs
+  // no status change and no retry; unlike that one it needs no grace window,
+  // because the blocker finishing is what releases it (and a blocker that
+  // wedges is already the lease sweeper's problem).
+  if (run.kind === "followup" && run.status === "queued") {
+    const holder = await db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(
+        and(
+          eq(runs.workspaceKey, run.workspaceKey),
+          ne(runs.id, run.id),
+          notInArray(runs.status, [...TERMINAL_RUN_STATUSES]),
+        ),
+      )
+      .limit(1);
+    if (holder.length > 0) throw new WorkspaceBusyError(run.id, holder[0]?.id as string);
   }
 
   // Central host affinity (ADR-0018). A follow-up continues a directory that

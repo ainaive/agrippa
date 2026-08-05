@@ -28,7 +28,7 @@ import { formatTime, lt, submitChord } from "@/lib/format";
 import type { Artifact, Checkpoint, Run } from "@/lib/types";
 import { CheckpointPanel } from "./CheckpointPanel";
 
-type TurnItem = {
+export type TurnItem = {
   kind: "turn";
   seq: number;
   stepId: string;
@@ -49,7 +49,8 @@ type TimelineItem =
   | { kind: "system"; seq: number; icon: "workspace" | "branch" | "loop" | "skip"; label: string }
   | { kind: "pr"; seq: number; url: string; branch: string };
 
-function buildTimeline(
+/** Exported for test: the two-starts-per-step rule is worth pinning directly. */
+export function buildTimeline(
   events: RunEvent[],
   run: Run,
   t: (key: string, opts?: Record<string, unknown>) => string,
@@ -81,6 +82,13 @@ function buildTimeline(
         break;
       }
       case "step.started": {
+        // A step can start twice under one key: a crash-resume re-runs the
+        // attempt, and a rejected resume re-invokes it disclosed. The earlier
+        // turn is over either way — without closing it the timeline keeps a
+        // spinner that nothing will ever complete, because step.completed
+        // resolves through the map below and finds only the newer turn.
+        const superseded = openTurns.get(stepKey);
+        if (superseded) superseded.done = true;
         const turn: TurnItem = {
           kind: "turn",
           seq: event.seq,
@@ -365,7 +373,10 @@ export function RunTimeline({
     const timer = setTimeout(() => setExpiryTick((n) => n + 1), remaining);
     return () => clearTimeout(timer);
   }, [run.workspaceExpiresAt]);
-  const steerable = isTerminalRunStatus(run.status) && runHoldsWorkspace(run);
+  // expiry only governs runs that HAVE a workspace: one without a directory
+  // never loses it, and the API steers those past the window
+  const steerable =
+    isTerminalRunStatus(run.status) && (!run.usesWorkspace || runHoldsWorkspace(run));
   const sendFollowup = useMutation({
     mutationFn: () =>
       api<{ runId: string; number: number; coalesced: boolean }>(`/runs/${runId}/followup`, {

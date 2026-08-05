@@ -45,6 +45,16 @@ export type FollowupSeed = {
   /** A patch-kind artifact key to re-diff into, when the base declares one. */
   patchArtifactKey: string | null;
   /**
+   * What the agent's own step declared: subagents, skills, MCP servers.
+   *
+   * Forced empty at first, which made the follow-up a differently-equipped
+   * agent wearing the same name — a `swdev` continuation without
+   * `code-locator` or `test-runner`, while the manual promised inheritance.
+   * The run's `resource_manifest` still bounds what is PERMITTED; this only
+   * decides what is requested.
+   */
+  resources: { subagents: string[]; skills: string[]; mcpServers: string[] };
+  /**
    * What the parent's steps produced, in order — the follow-up's prior
    * context.
    *
@@ -84,12 +94,29 @@ export async function followupSeed(
         .where(and(eq(runSteps.runId, parentRunId), eq(runSteps.status, "succeeded")))
         .orderBy(desc(runSteps.seq), desc(runSteps.attempt))
     : [];
-  const lastAgentRow = rows.find((row) => agentStepIds.has(row.stepId));
-  const templateStep = lastAgentRow ? agentStepIds.get(lastAgentRow.stepId) : undefined;
-
+  // A CHAINED follow-up's parent ran the synthetic `steer` step, which is not
+  // in the base template — so matching on template step ids alone found
+  // nothing and the seed silently fell back to the first slot and first model
+  // role. The row itself carries the slot, which is the durable fact; the
+  // model role then comes from that slot's last agent step in the base.
+  const lastAgentRow = rows.find(
+    (row) => agentStepIds.has(row.stepId) || row.stepId === FOLLOWUP_STEER_STEP_ID,
+  );
   const slots = Object.keys(base.spec.agents);
-  const slot = templateStep?.agent ?? lastAgentRow?.agentRef ?? (slots[0] as string);
-  const modelRole = templateStep?.model.role ?? (Object.keys(base.spec.models.roles)[0] as string);
+  const slot =
+    (lastAgentRow?.stepId === FOLLOWUP_STEER_STEP_ID
+      ? lastAgentRow.agentRef
+      : (agentStepIds.get(lastAgentRow?.stepId ?? "")?.agent ?? lastAgentRow?.agentRef)) ??
+    (slots[0] as string);
+  // Prefer the step the parent ACTUALLY ran — its model role and its declared
+  // resources are what that agent was given. Only a chained follow-up, whose
+  // parent ran the synthetic step, needs a proxy: the slot's last declared
+  // step in the base, which is the nearest thing to "what this agent does".
+  const slotStep =
+    agentStepIds.get(lastAgentRow?.stepId ?? "") ??
+    [...agentStepIds.values()].reverse().find((step) => (step.agent ?? slots[0]) === slot) ??
+    [...agentStepIds.values()].at(-1);
+  const modelRole = slotStep?.model.role ?? (Object.keys(base.spec.models.roles)[0] as string);
 
   // The session belongs to the agent's last conversation, which is not
   // necessarily its last SUCCEEDED step — a crashed attempt carries one too.
@@ -131,6 +158,11 @@ export async function followupSeed(
     modelRole,
     sessionId: sessionRow?.sessionId ?? null,
     patchArtifactKey: patch?.key ?? null,
+    resources: {
+      subagents: [...(slotStep?.subagents ?? [])],
+      skills: [...(slotStep?.skills ?? [])],
+      mcpServers: [...(slotStep?.mcpServers ?? [])],
+    },
     priorOutputs: [...latestOutput].map(([stepId, output]) => ({ stepId, output })),
   };
 }
@@ -156,9 +188,9 @@ export function followupTemplate(base: CompiledTemplate, seed: FollowupSeed): Co
       "request of the person who read your result. Their message follows. Do " +
       "what it asks and nothing beyond it; if it cannot be done, say so plainly " +
       "rather than doing something adjacent.",
-    subagents: [],
-    skills: [],
-    mcpServers: [],
+    subagents: seed.resources.subagents,
+    skills: seed.resources.skills,
+    mcpServers: seed.resources.mcpServers,
     produces,
     onFailure: "fail",
   };

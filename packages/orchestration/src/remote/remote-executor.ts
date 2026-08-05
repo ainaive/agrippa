@@ -39,6 +39,8 @@ export type RemoteExecutorOpts = {
   envAuthProviders?: readonly string[];
   /** Resolved by the remote workspace manager at checkout; null = no repo workspace. */
   workspaceSpec: () => Promise<DispatchWorkspaceSpec | null>;
+  /** True for a follow-up: the daemon must attach to the workspace, not clone one. */
+  mustAttach?: boolean;
   logger: Logger;
   pollMs?: number;
   deadmanMs?: number;
@@ -301,6 +303,9 @@ export class RemoteExecutor implements Executor {
       workspace: await this.opts.workspaceSpec(),
       skills,
       workspaceKey: await workspaceKeyOf(this.opts.db, request.runId),
+      // a follow-up continues a directory that must already be there; the
+      // daemon cannot ask the server whether it is (ADR-0018)
+      ...(this.opts.mustAttach ? { mustAttach: true } : {}),
     };
   }
 

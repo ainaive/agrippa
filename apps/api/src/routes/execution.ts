@@ -10,6 +10,7 @@ import {
   isTerminalRunStatus,
   type Question,
   type ReviewFinding,
+  TERMINAL_RUN_STATUSES,
   taskSubmitSchema,
 } from "@agrippa/core";
 import {
@@ -46,7 +47,7 @@ import {
   verifyRepoRefs,
   workspaceCollectable,
 } from "@agrippa/orchestration";
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
@@ -557,6 +558,9 @@ export const executionRoutes = new Hono<AppEnv>()
           }),
           limits: spec.limits,
           modelRoles: spec.models.roles,
+          // the client applies workspace-expiry rules only where there IS a
+          // workspace; it cannot infer that from the phase plan (ADR-0018)
+          usesWorkspace: spec.workspace !== undefined,
         };
       }
     }
@@ -582,6 +586,10 @@ export const executionRoutes = new Hono<AppEnv>()
     return c.json({
       ...runView,
       parentRunNumber,
+      // whether this run has a workspace at all — the client cannot infer it
+      // from the template plan, and without it the UI applied workspace
+      // expiry to runs that never had one and hid follow-ups the API allows
+      usesWorkspace: template?.usesWorkspace ?? false,
       template,
       agents,
       checkpoints: checkpointRows.map(({ row, deciderName }) => ({ ...row, deciderName })),
@@ -891,6 +899,25 @@ export const executionRoutes = new Hono<AppEnv>()
       // Decision 2). Deliberately NOT re-resolved: the inherited session and
       // workspace only mean anything against the executor and manifest that
       // produced them.
+      //
+      // Parented to the ACTIVE LINK, not to the run the reader was looking at.
+      // Reaching here means a follow-up already started, so the conversation
+      // to continue is the one it is holding — parenting to the ancestor would
+      // inherit a session two links stale and describe the chain wrongly in
+      // the timeline. The workspace-busy probe in the engine is what keeps the
+      // two from executing at once; this only decides what it continues.
+      const [activeLink] = await tx
+        .select({ id: runs.id })
+        .from(runs)
+        .where(
+          and(
+            eq(runs.workspaceKey, parent.workspaceKey),
+            eq(runs.kind, "followup"),
+            notInArray(runs.status, [...TERMINAL_RUN_STATUSES]),
+          ),
+        )
+        .orderBy(desc(runs.number))
+        .limit(1);
       const [head] = await tx
         .select({ number: runs.number })
         .from(runs)
@@ -903,7 +930,7 @@ export const executionRoutes = new Hono<AppEnv>()
           ...newRunIdentity(),
           workspaceKey: parent.workspaceKey,
           kind: "followup",
-          parentRunId: parent.id,
+          parentRunId: activeLink?.id ?? parent.id,
           steeringMessage: message,
           taskId: parent.taskId,
           projectId: parent.projectId,

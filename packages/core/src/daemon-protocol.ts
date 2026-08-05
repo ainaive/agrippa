@@ -162,6 +162,20 @@ export type DispatchPayload = {
    * repository still gets a scratch directory that a follow-up must inherit.
    */
   workspaceKey: string;
+  /**
+   * This dispatch must ATTACH to an existing workspace, never create one.
+   *
+   * True for a follow-up, and it is the daemon's half of the invariant the
+   * central engine enforces with `isIntact`: remotely, "the workspace is
+   * present" cannot be checked from the server (it only knows the runtime is
+   * alive), so a daemon that finds the directory gone must fail rather than
+   * clone the pinned base and continue — which would silently drop everything
+   * the ancestor did while reporting success.
+   *
+   * Absent on an older daemon's payload, which is why a follow-up is only
+   * dispatched to runtimes advertising `workspace-key` in the first place.
+   */
+  mustAttach?: boolean;
 };
 
 export type ClaimedDispatch = {

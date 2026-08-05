@@ -30,14 +30,15 @@ import {
   type FakeResumeReport,
   type FakeStepBehavior,
 } from "@agrippa/executor-core";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { compileTemplate, upgradeCompiledTemplate } from "../compile";
-import { followupSeed } from "../followup";
+import { followupSeed, followupTemplate } from "../followup";
 import { RemoteExecutor } from "../remote/remote-executor";
 import { startTestDaemonLoop, type TestDaemonLoop } from "../remote/test-daemon-loop";
 import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
+import { flattenPhases } from "../template-schema";
 import { collectExpiredWorkspaces, expiredWorkspaceKeys } from "../workspace-retention";
 import { InProcessEventBus } from "./bus";
 import { type EngineDeps, ProviderCredentialError, type RunControlHandle } from "./deps";
@@ -792,6 +793,14 @@ for (const transport of TRANSPORTS) {
         message: string,
       ): Promise<typeof runs.$inferSelect> => {
         const [parent] = await db.select().from(runs).where(eq(runs.id, runId));
+        // numbered from the TASK head, like the endpoint — numbering from the
+        // parent collides the moment one parent has two follow-ups
+        const [head] = await db
+          .select({ number: runs.number })
+          .from(runs)
+          .where(eq(runs.taskId, parent?.taskId as string))
+          .orderBy(desc(runs.number))
+          .limit(1);
         const [row] = await db
           .insert(runs)
           .values({
@@ -803,7 +812,7 @@ for (const transport of TRANSPORTS) {
             steeringMessage: message,
             taskId: parent?.taskId as string,
             projectId: parent?.projectId as string,
-            number: (parent?.number ?? 1) + 1,
+            number: (head?.number ?? parent?.number ?? 1) + 1,
             templateVersionId: parent?.templateVersionId as string,
             faberId: parent?.faberId as string,
             executorId: parent?.executorId as string,
@@ -968,6 +977,39 @@ for (const transport of TRANSPORTS) {
           expect(request?.instructions).toContain("one more thing");
         },
       );
+
+      it("a follow-up waits while another link holds the workspace", async () => {
+        // "A message arriving while a follow-up is running becomes the next
+        // one" is a queueing rule, and it only holds if the next one WAITS:
+        // jobs and leases are keyed by run id and a worker has several slots,
+        // so without this both links would edit one directory at once and each
+        // report success.
+        const { db, runId, makeDeps } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const first = await followupOf(db, runId, "first");
+        const second = await followupOf(db, runId, "second");
+
+        // the first link is live (claimed, mid-flight)
+        expect(await claimRunLease(db, first.id, "w1")).toBe(true);
+
+        const deps = makeDeps(HAPPY_SCRIPT);
+        await expect(executeRun(deps, second.id)).rejects.toThrow("workspace is held by run");
+        // declined with no side effects — still queued, nothing invoked
+        const [queued] = await db.select().from(runs).where(eq(runs.id, second.id));
+        expect(queued?.status).toBe("queued");
+        expect(deps.executor.requests.filter((r) => r.stepId === "steer")).toHaveLength(0);
+
+        // and it proceeds once the holder finishes: waiting, not failing
+        await finalizeRun(db, {
+          runId: first.id,
+          from: "running",
+          to: "succeeded",
+          error: null,
+          usageTotals: {},
+          eventPayload: {},
+        });
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), second.id)).toBe("succeeded");
+      });
 
       it("a follow-up cannot exist without a parent — the database says so", async () => {
         // The engine keys the synthetic flow on `kind` alone, so a parentless
@@ -1906,6 +1948,80 @@ for (const transport of TRANSPORTS) {
       beforeEach(() => {
         currentTransport = transport;
       });
+      it("a chained follow-up keeps its own slot, model role and session", async () => {
+        // The parent of a chained follow-up ran the SYNTHETIC step, which is
+        // not in the base template — so matching on template step ids alone
+        // found nothing and the seed fell back to the first slot and first
+        // model role, and (since the session query filters by slot) found no
+        // session at all. Single-slot fixtures cannot show this: the fallback
+        // is accidentally correct there.
+        const fx = await setupV2Fixture();
+        const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        const [version] = await fx.db
+          .select()
+          .from(templateVersions)
+          .where(eq(templateVersions.id, run?.templateVersionId as string));
+        const base = upgradeCompiledTemplate(version?.compiled);
+
+        // the first link ran as the REVIEWER — the non-default slot
+        await fx.db.insert(runSteps).values({
+          runId: fx.runId,
+          phaseId: "followup",
+          stepId: "steer",
+          iteration: 1,
+          attempt: 1,
+          seq: 1,
+          status: "succeeded",
+          agentRef: "reviewer",
+          executorSessionId: "sess-chained-reviewer",
+          output: "first follow-up done",
+        });
+
+        const seed = await followupSeed(fx.db, fx.runId, base);
+        expect(seed.slot).toBe("reviewer");
+        expect(seed.sessionId).toBe("sess-chained-reviewer");
+        // and the model role is the reviewer's, not the template's first
+        expect(seed.modelRole).toBe("review");
+      });
+
+      it("the steer step carries the parent step's declared resources", async () => {
+        // Forced empty at first, so a follow-up was a differently-equipped
+        // agent wearing the same name — the manual promised inheritance while
+        // the executor got none of the skills its parent step had. Uses the
+        // bugfix template, whose steps actually declare skills (implement-fix
+        // takes git-workflow, run-tests takes test-runner).
+        const { db, runId } = await setupFixture();
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        const [version] = await db
+          .select()
+          .from(templateVersions)
+          .where(eq(templateVersions.id, run?.templateVersionId as string));
+        const base = upgradeCompiledTemplate(version?.compiled);
+        const declared = [...flattenPhases(base.spec.phases)]
+          .flatMap(({ phase }) => phase.steps)
+          .filter((step) => step.kind === "agent" && step.skills.length > 0)
+          .at(-1) as { id: string; agent?: string; skills: string[] } | undefined;
+        expect(declared?.skills.length).toBeGreaterThan(0);
+
+        await db.insert(runSteps).values({
+          runId,
+          phaseId: "verify",
+          stepId: declared?.id as string,
+          iteration: 1,
+          attempt: 1,
+          seq: 1,
+          status: "succeeded",
+          agentRef: declared?.agent ?? Object.keys(base.spec.agents)[0],
+        });
+
+        const seed = await followupSeed(db, runId, base);
+        const synthetic = followupTemplate(base, seed);
+        const [steer] = synthetic.spec.phases.flatMap((p) =>
+          "steps" in p ? p.steps : [],
+        ) as Array<{ skills: string[] }>;
+        expect(steer?.skills).toEqual(declared?.skills as string[]);
+      });
+
       it("binds the inherited session to the follow-up's OWN slot", async () => {
         // Multi-slot templates are where "the last session" and "the last
         // agent" come apart: a reviewer step succeeds last while a later

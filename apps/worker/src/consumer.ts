@@ -14,6 +14,7 @@ import {
   renewRunLeases,
   routeRun,
   syncRunNotifications,
+  WorkspaceBusyError,
   WorkspaceElsewhereError,
 } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
@@ -208,7 +209,10 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
         // a central follow-up whose workspace is on another worker: declining
         // lets the host that HAS the directory take it (ADR-0018), bounded by
         // the engine's grace window so nobody-has-it fails honestly instead
-        err instanceof WorkspaceElsewhereError
+        err instanceof WorkspaceElsewhereError ||
+        // another link in this chain still holds the workspace: waiting is the
+        // correct answer, and the blocker finishing is what ends the wait
+        err instanceof WorkspaceBusyError
       ) {
         const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
         if (run && (run.status === "queued" || run.status === "waiting_approval")) {

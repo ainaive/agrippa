@@ -26,6 +26,19 @@ import type { DaemonApi } from "./client";
 const FLUSH_MS = 500;
 
 /**
+ * The workspace a dispatch was told to attach to is not here. Carries the code
+ * the central engine uses for the same condition, so a run fails identically
+ * whichever side noticed (ADR-0018).
+ */
+class WorkspaceLostError extends Error {
+  readonly code = "workspace_lost";
+  constructor(workspaceKey: string) {
+    super(`workspace ${workspaceKey} is not on this machine — it cannot be continued here`);
+    this.name = "WorkspaceLostError";
+  }
+}
+
+/**
  * What this binary claims at register. Hard-coded rather than derived, because
  * the claim is about THIS build's behaviour: `workspace-key` says the runner
  * below keys directories by `payload.workspaceKey`, so the server may send a
@@ -148,6 +161,14 @@ export class DaemonRunner {
       if (dispatch.payload.workspace) {
         const spec = dispatch.payload.workspace;
         if (!(await workspaceIntact(workspaceKey))) {
+          // A follow-up ATTACHES; it never creates. Cloning here would start
+          // from the pinned base and report success, silently dropping
+          // everything the ancestor did — the failure mode this whole feature
+          // is built to prevent, and the one the server cannot catch remotely
+          // (its `isIntact` only proves this runtime is alive).
+          if (dispatch.payload.mustAttach) {
+            throw new WorkspaceLostError(workspaceKey);
+          }
           logger.info(`cloning ${spec.repoUrl} for run ${runId} (ambient git auth)`);
           await checkoutFromUrl(workspaceKey, {
             cloneUrl: spec.repoUrl,
@@ -162,6 +183,9 @@ export class DaemonRunner {
           // idempotent: -B resets to the branch if it exists locally already
           await git(["checkout", "-B", spec.workBranch], workspaceDir, {}, "ambient");
         }
+      } else if (dispatch.payload.mustAttach && !(await workspaceIntact(workspaceKey))) {
+        // scratch workspaces are directories too, and a follow-up inherits one
+        throw new WorkspaceLostError(workspaceKey);
       } else {
         await mkdir(workspaceDir, { recursive: true });
       }
@@ -203,7 +227,12 @@ export class DaemonRunner {
     } catch (err) {
       logger.error(`dispatch ${dispatch.id} failed`, { err: String(err) });
       await api
-        .fail(dispatch.id, { code: "internal", message: String(err).slice(0, 1000) })
+        .fail(dispatch.id, {
+          // a typed condition keeps its code: the server turns the dispatch
+          // result into the step failure, so `workspace_lost` must survive
+          code: (err as { code?: string }).code ?? "internal",
+          message: String(err).slice(0, 1000),
+        })
         .catch((failErr) => logger.warn("fail() report lost", { err: String(failErr) }));
     } finally {
       this.activeAborts.delete(dispatch.id);

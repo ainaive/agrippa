@@ -822,6 +822,42 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       ]);
     });
 
+    it("the run payload says whether the run has a workspace at all", async () => {
+      // The client applies expiry rules only where there IS a workspace, and
+      // it cannot infer that from the phase plan — without this it hid the
+      // Continue button on exactly the runs the API still steers.
+      // its own run, not the suite's: a test that depends on an earlier test
+      // having run passes in file order and lies in isolation
+      const backed = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+          method: "POST",
+          json: submitBody(),
+        }),
+      );
+      const withWorkspace = await jsonOf<{ usesWorkspace: boolean }>(
+        await admin.request(`/api/v1/runs/${backed.runId}`),
+      );
+      expect(withWorkspace.usesWorkspace).toBe(true);
+
+      const pmTypes = await jsonOf<Array<{ id: string; slug: string }>>(
+        await admin.request("/api/v1/scenarios/project-management/task-types"),
+      );
+      const weekly = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+          method: "POST",
+          json: {
+            taskTypeId: pmTypes.find((t) => t.slug === "weekly-report")?.id,
+            title: "Weekly report",
+            params: { dateRange: "2026.08.01-2026.08.05", rawNotes: "notes" },
+          },
+        }),
+      );
+      const without = await jsonOf<{ usesWorkspace: boolean }>(
+        await admin.request(`/api/v1/runs/${weekly.runId}`),
+      );
+      expect(without.usesWorkspace).toBe(false);
+    });
+
     it("a workspace-less run stays steerable past the retention window", async () => {
       // Retention stamps an expiry on every run, so gating the 409 on it alone
       // made a template with no `workspace:` block — a weekly report — expire
@@ -926,6 +962,32 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       // both messages are on it, in whichever order they committed
       expect(followups[0]?.steeringMessage).toContain("one");
       expect(followups[0]?.steeringMessage).toContain("two");
+    });
+
+    it("a message sent while a follow-up runs parents to the ACTIVE link", async () => {
+      // The message becomes the next link in the chain, so what it continues
+      // is the conversation currently in flight — parenting to the run the
+      // reader happened to be looking at would inherit a session a link stale.
+      const { runId: parentId } = await finishedRun();
+      const first = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "first" },
+        }),
+      );
+      // the first link starts, so the coalescing CAS can no longer absorb
+      await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, first.runId));
+
+      const second = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "second" },
+        }),
+      );
+      expect(second.coalesced).toBe(false);
+      const [row] = await db.select().from(runs).where(eq(runs.id, second.runId));
+      expect(row?.parentRunId).toBe(first.runId);
+      expect(row?.parentRunId).not.toBe(parentId);
     });
 
     it("refuses an unfinished run, and one whose workspace has been collected", async () => {
