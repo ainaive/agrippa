@@ -18,6 +18,7 @@ import type {
   StepExecutionRequest,
 } from "@agrippa/executor-core";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { workspaceKeyOf } from "../engine/run-lifecycle";
 
 /** How often the engine-side stream polls dispatch_events / dispatch status. */
 const POLL_MS = 500;
@@ -38,6 +39,8 @@ export type RemoteExecutorOpts = {
   envAuthProviders?: readonly string[];
   /** Resolved by the remote workspace manager at checkout; null = no repo workspace. */
   workspaceSpec: () => Promise<DispatchWorkspaceSpec | null>;
+  /** True for a follow-up: the daemon must attach to the workspace, not clone one. */
+  mustAttach?: boolean;
   logger: Logger;
   pollMs?: number;
   deadmanMs?: number;
@@ -299,6 +302,10 @@ export class RemoteExecutor implements Executor {
       request: wireRequest as unknown as Record<string, unknown>,
       workspace: await this.opts.workspaceSpec(),
       skills,
+      workspaceKey: await workspaceKeyOf(this.opts.db, request.runId),
+      // a follow-up continues a directory that must already be there; the
+      // daemon cannot ask the server whether it is (ADR-0018)
+      ...(this.opts.mustAttach ? { mustAttach: true } : {}),
     };
   }
 

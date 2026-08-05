@@ -31,7 +31,14 @@ export interface WorkspaceManager {
    * than run against an empty directory.
    */
   isIntact(runId: string): Promise<boolean>;
-  cleanup(runId: string): Promise<void>;
+  /**
+   * This run is finished with the workspace (ADR-0018 Decision 4). NOT a
+   * delete: the directory is owned by the workspace key, which a follow-up
+   * inherits, so the engine stamps an expiry and the collector removes it once
+   * every run sharing the key has released it. Implementations drop only what
+   * belongs to this run alone — a remote run's local staging dir, say.
+   */
+  release(runId: string): Promise<void>;
 }
 
 /**

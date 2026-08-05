@@ -1,4 +1,9 @@
-import { providerAuthPolicy, requiredExecutorIds } from "@agrippa/core";
+import {
+  providerAuthPolicy,
+  type RuntimeFeature,
+  requiredExecutorIds,
+  runtimeAdvertises,
+} from "@agrippa/core";
 import {
   type Db,
   loadProviderCatalog,
@@ -134,6 +139,40 @@ const adsOf = (executors: ExecutorAd[] | null | undefined): Map<string, Executor
   new Map((executors ?? []).map((e) => [e.id, e]));
 
 /**
+ * Raised when the host a run is pinned to cannot serve it *yet* — today only a
+ * daemon too old to honor workspace keys. Deliberately the deferral shape
+ * rather than a failure: the worker declines the job, appends `run.deferred`
+ * so the timeline says why the run is waiting, and the sweepers re-enqueue —
+ * so upgrading the daemon makes the run proceed rather than requiring anyone
+ * to notice and retry it.
+ */
+export class RuntimeFeatureUnavailableError extends Error {
+  readonly code = "runtime_feature_unavailable";
+  constructor(
+    readonly feature: RuntimeFeature,
+    runtimeName: string,
+  ) {
+    super(
+      `runtime '${runtimeName}' does not support '${feature}' — upgrade the daemon on that machine`,
+    );
+    this.name = "RuntimeFeatureUnavailableError";
+  }
+}
+
+/**
+ * A follow-up dispatched to a daemon that ignores the workspace key would be
+ * handed a fresh clone and report success, silently losing the work it exists
+ * to continue. That is a correctness hazard rather than a compatibility one,
+ * so it is refused (ADR-0018) — the one case where an unknown-to-the-daemon
+ * field cannot simply be ignored.
+ */
+function assertCanServeFollowUp(run: RunRow, runtime: RuntimeRow): void {
+  if (run.kind !== "followup") return;
+  if (runtimeAdvertises(runtime.features, "workspace-key")) return;
+  throw new RuntimeFeatureUnavailableError("workspace-key", runtime.name);
+}
+
+/**
  * Where a run executes (ADR-0017 Decisions 3 + 7). Deterministic given the
  * run row and registry state, with the persisted pin absolute — a resume must
  * re-derive the identical decision or the workspace and the engine diverge.
@@ -159,9 +198,19 @@ const adsOf = (executors: ExecutorAd[] | null | undefined): Map<string, Executor
 export async function routeRun(db: Db, run: RunRow): Promise<RouteDecision> {
   if (run.runtimeId) {
     const [pinned] = await db.select().from(runtimes).where(eq(runtimes.id, run.runtimeId));
-    if (pinned) return { kind: "remote", runtime: pinned };
+    if (pinned) {
+      assertCanServeFollowUp(run, pinned);
+      return { kind: "remote", runtime: pinned };
+    }
     return { kind: "central" }; // pin row deleted — engine will fail it honestly
   }
+
+  // A follow-up's placement is INHERITED, never re-decided: it continues a
+  // workspace that already exists on exactly one host class. With no pin, that
+  // host was central — placing it on a daemon would hand the agent an empty
+  // directory and let it report success (ADR-0018; the central-side affinity
+  // within that class is a separate problem).
+  if (run.kind === "followup") return { kind: "central" };
 
   // Placement is sticky. `runtimeId === null` on a STARTED run does not mean
   // "not yet routed" — remote execution always pins pre-claim, so a started

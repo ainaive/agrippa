@@ -37,7 +37,10 @@ const ID = "[0-9a-fA-F-]{36}";
 const RUN_READS = "(?:steps|checkpoints|comments|artifacts|events)";
 
 export const API_KEY_ROUTES: readonly ApiKeyRouteRule[] = [
-  // ── submit and steer work ──────────────────────────────────────────────────
+  // ── submit, retry, cancel ──────────────────────────────────────────────────
+  // NOT follow-up steering (`POST /runs/:id/followup`): continuing a finished
+  // run is a judgement about work someone already read, which is a human's to
+  // make. Its absence here is a decision, not an oversight.
   { method: "POST", pattern: new RegExp(`^/api/v1/projects/${ID}/tasks$`), scope: "tasks:write" },
   { method: "POST", pattern: new RegExp(`^/api/v1/tasks/${ID}/retry$`), scope: "tasks:write" },
   { method: "POST", pattern: new RegExp(`^/api/v1/runs/${ID}/cancel$`), scope: "tasks:write" },

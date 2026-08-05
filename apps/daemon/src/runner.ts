@@ -8,6 +8,7 @@ import {
   DISPATCH_EVENT_BATCH_MAX_EVENTS,
   DISPATCH_EVIDENCE_KEY,
   DISPATCH_WORKSPACE_PLACEHOLDER,
+  type RuntimeFeature,
 } from "@agrippa/core";
 import type { Executor, ExecutorEvent, Logger, StepExecutionRequest } from "@agrippa/executor-core";
 import {
@@ -23,6 +24,28 @@ import type { DaemonApi } from "./client";
 
 /** Event-batch flush cadence: sub-second UI latency without per-event HTTP. */
 const FLUSH_MS = 500;
+
+/**
+ * The workspace a dispatch was told to attach to is not here. Carries the code
+ * the central engine uses for the same condition, so a run fails identically
+ * whichever side noticed (ADR-0018).
+ */
+class WorkspaceLostError extends Error {
+  readonly code = "workspace_lost";
+  constructor(workspaceKey: string) {
+    super(`workspace ${workspaceKey} is not on this machine — it cannot be continued here`);
+    this.name = "WorkspaceLostError";
+  }
+}
+
+/**
+ * What this binary claims at register. Hard-coded rather than derived, because
+ * the claim is about THIS build's behaviour: `workspace-key` says the runner
+ * below keys directories by `payload.workspaceKey`, so the server may send a
+ * follow-up here knowing it will continue the right workspace rather than
+ * clone a fresh one and call it success (ADR-0018).
+ */
+const DAEMON_FEATURES: readonly RuntimeFeature[] = ["workspace-key"];
 
 export type RunnerOpts = {
   api: DaemonApi;
@@ -49,14 +72,18 @@ export class DaemonRunner {
   private hints: DaemonProtocolHints = DAEMON_PROTOCOL_HINTS;
   private stopped = false;
   private readonly activeAborts = new Map<string, AbortController>();
-  /** Runs executing here right now — never reap one of these. */
-  private readonly activeRunIds = new Set<string>();
+  /** Workspaces being executed in right now — never reap one of these. */
+  private readonly activeWorkspaceKeys = new Set<string>();
   /**
-   * Already deleted this process, so a run named on every poll for the rest of
-   * its 24-hour window costs one `has` rather than an `rm -rf` each time.
-   * Bounded by that window; a restart simply re-reaps, which is a no-op.
+   * Already deleted this process, and when — so a workspace named on every
+   * poll for the rest of its 24-hour window costs a lookup rather than an
+   * `rm -rf` each time, and the map is pruned to that window rather than
+   * growing with the daemon's uptime (a laptop daemon runs for weeks). A
+   * restart simply re-reaps, a no-op.
    */
-  private readonly reaped = new Set<string>();
+  private readonly reaped = new Map<string, number>();
+  /** The server's own reap window — past it, remembering a key buys nothing. */
+  private static readonly REAP_MEMORY_MS = 24 * 60 * 60 * 1000;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly opts: RunnerOpts) {}
@@ -69,6 +96,10 @@ export class DaemonRunner {
         id,
         ...(executor.envAuthProviders ? { envAuthProviders: [...executor.envAuthProviders] } : {}),
       })),
+      // What THIS build can do, not what the protocol knows how to ask for:
+      // the server refuses work whose correctness depends on a claim this
+      // binary cannot make (ADR-0018).
+      features: [...DAEMON_FEATURES],
     });
     this.hints = hints;
     this.opts.logger.info(`registered as runtime ${runtimeId}`, {
@@ -97,7 +128,7 @@ export class DaemonRunner {
       for (const dispatchId of claim.abortedDispatchIds) {
         this.activeAborts.get(dispatchId)?.abort("server requested abort");
       }
-      await this.reapWorkspaces(claim.reapableRunIds ?? []);
+      await this.reapWorkspaces(claim.reapableWorkspaceKeys ?? []);
       if (claim.dispatch) await this.executeDispatch(claim.dispatch);
     }
   }
@@ -114,20 +145,32 @@ export class DaemonRunner {
     const { api, logger } = this.opts;
     const controller = new AbortController();
     this.activeAborts.set(dispatch.id, controller);
-    this.activeRunIds.add(dispatch.runId);
+    this.activeWorkspaceKeys.add(dispatch.payload.workspaceKey ?? dispatch.runId);
     try {
       const executor = this.opts.executors[dispatch.payload.executorId];
       if (!executor) {
         throw new Error(`executor '${dispatch.payload.executorId}' is not available here`);
       }
 
+      // Directories are keyed by workspace, not by run (ADR-0018 Decision 3):
+      // a follow-up inherits its parent's key so it continues that work rather
+      // than cloning beside it. Equal to the run id for every other run.
       const runId = dispatch.runId;
-      const workspaceDir = workspaceDirFor(runId);
+      const workspaceKey = dispatch.payload.workspaceKey ?? runId;
+      const workspaceDir = workspaceDirFor(workspaceKey);
       if (dispatch.payload.workspace) {
         const spec = dispatch.payload.workspace;
-        if (!(await workspaceIntact(runId))) {
+        if (!(await workspaceIntact(workspaceKey))) {
+          // A follow-up ATTACHES; it never creates. Cloning here would start
+          // from the pinned base and report success, silently dropping
+          // everything the ancestor did — the failure mode this whole feature
+          // is built to prevent, and the one the server cannot catch remotely
+          // (its `isIntact` only proves this runtime is alive).
+          if (dispatch.payload.mustAttach) {
+            throw new WorkspaceLostError(workspaceKey);
+          }
           logger.info(`cloning ${spec.repoUrl} for run ${runId} (ambient git auth)`);
-          await checkoutFromUrl(runId, {
+          await checkoutFromUrl(workspaceKey, {
             cloneUrl: spec.repoUrl,
             displayUrl: spec.repoUrl,
             ...(spec.ref !== undefined ? { ref: spec.ref } : {}),
@@ -140,6 +183,9 @@ export class DaemonRunner {
           // idempotent: -B resets to the branch if it exists locally already
           await git(["checkout", "-B", spec.workBranch], workspaceDir, {}, "ambient");
         }
+      } else if (dispatch.payload.mustAttach && !(await workspaceIntact(workspaceKey))) {
+        // scratch workspaces are directories too, and a follow-up inherits one
+        throw new WorkspaceLostError(workspaceKey);
       } else {
         await mkdir(workspaceDir, { recursive: true });
       }
@@ -167,7 +213,7 @@ export class DaemonRunner {
         // uploaded like any artifact — the server hashes it at store time
         let result: { baseSha?: string; treeSha?: string } = {};
         if (dispatch.payload.workspace && dispatch.payload.workspace.access === "readWrite") {
-          const snapshot = await stagePlatformSnapshot(runId);
+          const snapshot = await stagePlatformSnapshot(workspaceKey);
           await api.uploadArtifact(dispatch.id, DISPATCH_EVIDENCE_KEY, snapshot.patch);
           result = { baseSha: snapshot.baseSha, treeSha: snapshot.treeSha };
         }
@@ -181,11 +227,16 @@ export class DaemonRunner {
     } catch (err) {
       logger.error(`dispatch ${dispatch.id} failed`, { err: String(err) });
       await api
-        .fail(dispatch.id, { code: "internal", message: String(err).slice(0, 1000) })
+        .fail(dispatch.id, {
+          // a typed condition keeps its code: the server turns the dispatch
+          // result into the step failure, so `workspace_lost` must survive
+          code: (err as { code?: string }).code ?? "internal",
+          message: String(err).slice(0, 1000),
+        })
         .catch((failErr) => logger.warn("fail() report lost", { err: String(failErr) }));
     } finally {
       this.activeAborts.delete(dispatch.id);
-      this.activeRunIds.delete(dispatch.runId);
+      this.activeWorkspaceKeys.delete(dispatch.payload.workspaceKey ?? dispatch.runId);
     }
   }
 
@@ -204,14 +255,18 @@ export class DaemonRunner {
    * belt and braces — the server only names terminal runs — but it keeps a
    * stale response from deleting a directory out from under a live dispatch.
    */
-  private async reapWorkspaces(runIds: readonly string[]): Promise<void> {
-    for (const runId of runIds) {
-      if (this.activeRunIds.has(runId) || this.reaped.has(runId)) continue;
+  private async reapWorkspaces(workspaceKeys: readonly string[]): Promise<void> {
+    const cutoff = Date.now() - DaemonRunner.REAP_MEMORY_MS;
+    for (const [key, at] of this.reaped) {
+      if (at < cutoff) this.reaped.delete(key);
+    }
+    for (const key of workspaceKeys) {
+      if (this.activeWorkspaceKeys.has(key) || this.reaped.has(key)) continue;
       try {
-        await removeWorkspace(runId);
-        this.reaped.add(runId);
+        await removeWorkspace(key);
+        this.reaped.set(key, Date.now());
       } catch (err) {
-        this.opts.logger.warn(`workspace reap failed for run ${runId}`, { err: String(err) });
+        this.opts.logger.warn(`workspace reap failed for ${key}`, { err: String(err) });
       }
     }
   }

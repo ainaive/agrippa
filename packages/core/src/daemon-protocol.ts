@@ -53,10 +53,36 @@ export const daemonExecutorAdSchema = z.object({
   envAuthProviders: z.array(z.string().min(1).max(100)).max(20).optional(),
 });
 
+/**
+ * Behaviours a daemon build claims at register, beyond which executors it has.
+ *
+ * Version skew across the daemon fleet is a compatibility problem until a
+ * change makes an old build silently WRONG rather than merely limited — which
+ * is what the workspace key does (ADR-0018): a daemon that ignores it clones
+ * into a fresh directory and reports success, so a follow-up loses exactly the
+ * work it was meant to continue, invisibly. Runtimes therefore say what they
+ * can do, and the platform refuses rather than degrades.
+ *
+ * Unknown strings are accepted and stored: a newer daemon claiming something
+ * this server has never heard of is forward compatibility, not an error.
+ */
+export const RUNTIME_FEATURES = ["workspace-key"] as const;
+export type RuntimeFeature = (typeof RUNTIME_FEATURES)[number];
+
+/** Does an advertisement claim this behaviour? Absent list = an older daemon. */
+export function runtimeAdvertises(
+  features: readonly string[] | null | undefined,
+  feature: RuntimeFeature,
+): boolean {
+  return (features ?? []).includes(feature);
+}
+
 export const daemonRegisterSchema = z.object({
   hostname: z.string().min(1).max(255),
   version: z.string().max(100).nullish(),
   executors: z.array(daemonExecutorAdSchema).max(16),
+  // bounded but not enumerated — see RUNTIME_FEATURES
+  features: z.array(z.string().min(1).max(64)).max(32).default([]),
 });
 export type DaemonRegisterBody = z.infer<typeof daemonRegisterSchema>;
 
@@ -124,6 +150,32 @@ export type DispatchPayload = {
   request: Record<string, unknown>;
   workspace: DispatchWorkspaceSpec | null;
   skills: DispatchSkillContent[];
+  /**
+   * Which directory on the daemon holds this run's work (ADR-0018 Decision 3).
+   * Equal to the run id for everything but a follow-up, which inherits its
+   * parent's — so a daemon that keys directories by run id silently clones
+   * fresh and reports success, losing the work it was meant to continue. That
+   * is why runtimes advertise features and a follow-up is refused to one that
+   * does not claim this: the failure is invisible rather than loud.
+   *
+   * Lives on the payload rather than inside `workspace` because a run with no
+   * repository still gets a scratch directory that a follow-up must inherit.
+   */
+  workspaceKey: string;
+  /**
+   * This dispatch must ATTACH to an existing workspace, never create one.
+   *
+   * True for a follow-up, and it is the daemon's half of the invariant the
+   * central engine enforces with `isIntact`: remotely, "the workspace is
+   * present" cannot be checked from the server (it only knows the runtime is
+   * alive), so a daemon that finds the directory gone must fail rather than
+   * clone the pinned base and continue — which would silently drop everything
+   * the ancestor did while reporting success.
+   *
+   * Absent on an older daemon's payload, which is why a follow-up is only
+   * dispatched to runtimes advertising `workspace-key` in the first place.
+   */
+  mustAttach?: boolean;
 };
 
 export type ClaimedDispatch = {
@@ -137,7 +189,7 @@ export type DaemonClaimResponse = {
   /** Piggybacked abort flags for this runtime's other live dispatches. */
   abortedDispatchIds: string[];
   /**
-   * Runs pinned here whose workspace is now safe to delete, piggybacked on the
+   * Workspaces pinned here that are now safe to delete, piggybacked on the
    * same poll for the same reason the aborts are.
    *
    * The daemon cannot work this out for itself. Affinity gives it the
@@ -148,8 +200,12 @@ export type DaemonClaimResponse = {
    * finalized, because the engine runs centrally even when the executor does
    * not. Absent on an older server, which an older daemon also ignores; either
    * way the backstop sweep still collects the directory eventually.
+   *
+   * Keyed by WORKSPACE, not by run (ADR-0018 Decision 3): the directory is
+   * what gets deleted, and a run is no longer the only thing that can name
+   * one. The two coincide for every run that is not a follow-up.
    */
-  reapableRunIds?: string[];
+  reapableWorkspaceKeys?: string[];
 };
 
 export const dispatchEventBatchSchema = z.object({

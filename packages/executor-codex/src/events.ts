@@ -65,7 +65,11 @@ export class CodexEventCollector {
   /** Last item-level error text — the item nearest the death is the most specific. */
   itemErrorMessage: string | null = null;
 
-  constructor(private readonly providerModelId: string) {}
+  constructor(
+    private readonly providerModelId: string,
+    /** The thread this invocation asked to continue, if any — see thread.started. */
+    private readonly resumeSessionId?: string | undefined,
+  ) {}
 
   mapLine(line: string): ExecutorEvent[] {
     const trimmed = line.trim();
@@ -83,7 +87,19 @@ export class CodexEventCollector {
     switch (event.type) {
       case "thread.started": {
         this.sessionId = event.thread_id ?? null;
-        return [{ type: "step.started", sessionId: event.thread_id }];
+        // `codex resume <thread>` announces the thread it actually opened, so
+        // resume is verifiable by comparison (ADR-0018 Decision 5): a
+        // different id means the CLI started a new thread and the
+        // conversation is gone, whatever the exit code says afterwards.
+        return [
+          {
+            type: "step.started",
+            sessionId: event.thread_id,
+            ...(this.resumeSessionId
+              ? { resumed: event.thread_id === this.resumeSessionId ? "honored" : "rejected" }
+              : {}),
+          },
+        ];
       }
       case "item.started": {
         const item = event.item;

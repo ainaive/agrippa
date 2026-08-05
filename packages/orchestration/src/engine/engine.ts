@@ -12,6 +12,7 @@ import {
   type RunStatus,
   reviewReportSchema,
   type StepStatus,
+  TERMINAL_RUN_STATUSES,
 } from "@agrippa/core";
 import {
   artifacts,
@@ -38,15 +39,22 @@ import {
   type ProviderAuth,
   type ResolvedMcpServer,
   type ResolvedModel,
+  type ResumeOutcome,
   type SecretRedactor,
   type StepExecutionRequest,
   type UsageDelta,
   UsageLimitExceededError,
   UsageMeter,
 } from "@agrippa/executor-core";
-import { and, eq, gte, inArray, max, ne, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, max, ne, notInArray, sql } from "drizzle-orm";
 import { upgradeCompiledTemplate } from "../compile";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
+import {
+  FOLLOWUP_STEER_STEP_ID,
+  type FollowupSeed,
+  followupSeed,
+  followupTemplate,
+} from "../followup";
 import type { ModelResolutionEntry } from "../resolve";
 import {
   type CompiledTemplate,
@@ -80,6 +88,39 @@ type SystemStep = TemplateStepV2 & { kind: "system" };
 type CheckpointStep = TemplateStepV2 & { kind: "checkpoint" };
 
 type AbortReason = "cancelled" | "timed_out" | "usage_limit_exceeded" | "drained" | "lease_lost";
+
+/**
+ * Told to an agent whose session could not be resumed (ADR-0018 Decision 6).
+ * It goes into the step's `instructions` — the volatile channel — and never
+ * into `systemPrompt` (a registry row shared across runs) or a workspace file
+ * (reset before every attempt, so it would be erased before it was read).
+ */
+export const CONTEXT_LOSS_DISCLOSURE =
+  "Your previous conversation for this step could not be restored, so you are starting " +
+  "without it. Treat nothing from that conversation as known, and say so if that leaves " +
+  "you unable to continue.";
+
+/** Appended only when there IS prior context — see withContextLossDisclosure. */
+export const CONTEXT_LOSS_PRIOR_CONTEXT_HINT =
+  " Re-read the workspace and the prior step summaries above before acting.";
+
+/**
+ * Compose the disclosure into a step's instructions. Concatenation, not
+ * interpolation: whatever the instructions contain is already fully resolved,
+ * and re-scanning them here would evaluate template syntax that a later
+ * feature (an operator's steering message) legitimately puts in this string.
+ *
+ * The "prior step summaries above" clause is conditional, because it was
+ * written for a crash-resume — which always has them — and a follow-up's own
+ * run has a single step. Telling an agent to consult something that is not
+ * there is how a disclosure meant to be honest becomes noise.
+ */
+export function withContextLossDisclosure(instructions: string, hasPriorContext: boolean): string {
+  const disclosure = hasPriorContext
+    ? CONTEXT_LOSS_DISCLOSURE + CONTEXT_LOSS_PRIOR_CONTEXT_HINT
+    : CONTEXT_LOSS_DISCLOSURE;
+  return `${disclosure}\n\n${instructions}`;
+}
 
 /** A run's per-slot execution binding, resolved once at pickup. */
 type SlotBinding = {
@@ -144,6 +185,52 @@ export class ExecutorUnavailableError extends Error {
     this.name = "ExecutorUnavailableError";
   }
 }
+
+/**
+ * Raised when another run still holds this run's workspace (ADR-0018).
+ *
+ * A follow-up requested while one is running becomes the next in the chain —
+ * which only works if the next one waits. Nothing else serializes them: jobs
+ * and leases are keyed by run id, and one worker runs several slots, so two
+ * links would otherwise edit one directory at the same time and each report
+ * success. Declined rather than failed, because the wait is the whole point:
+ * the blocker finishing is what makes this run ready.
+ */
+export class WorkspaceBusyError extends Error {
+  readonly code = "workspace_busy";
+  constructor(runId: string, holderRunId: string) {
+    super(`run ${runId}: its workspace is held by run ${holderRunId} — waiting for it to finish`);
+    this.name = "WorkspaceBusyError";
+  }
+}
+
+/**
+ * Raised when a follow-up's workspace is not on THIS host and might still be
+ * on another (ADR-0018 Consequences: central host affinity).
+ *
+ * Remote runs are pinned, so affinity is free for them. A central run has no
+ * pin, and workspaces are host-local — so on a multi-worker fleet the run can
+ * land on a worker that does not hold the directory. Declining lets the
+ * sweeper re-enqueue and another worker try, which is bounded on purpose: past
+ * the grace window the honest answer is that nobody has it, and the engine
+ * fails `workspace_lost` rather than ping-ponging the run forever. The real
+ * fix is a per-host queue, the same route-by-capability shape Phase B took.
+ */
+export class WorkspaceElsewhereError extends Error {
+  readonly code = "workspace_on_another_host";
+  constructor(runId: string) {
+    super(`run ${runId}: its workspace is not on this host — declining so a host that has it can`);
+    this.name = "WorkspaceElsewhereError";
+  }
+}
+
+/**
+ * How long a central follow-up may bounce between workers looking for its
+ * workspace. The straggler sweep re-enqueues a queued run every ~30s, so this
+ * is roughly ten attempts across the fleet — enough for every worker to have
+ * had a turn, short enough that a directory nobody has fails quickly.
+ */
+const WORKSPACE_AFFINITY_GRACE_MS = 5 * 60_000;
 
 /** Normalize runs.model_resolution (flat legacy or slot-keyed) to one slot's entries. */
 function slotResolutionEntries(raw: Record<string, unknown>, slot: string): ModelResolutionEntry[] {
@@ -214,7 +301,19 @@ export async function executeRun(
     .from(templateVersions)
     .where(eq(templateVersions.id, run.templateVersionId));
   if (!versionRow) throw new Error(`template version for run ${runId} not found`);
-  const template = upgradeCompiledTemplate(versionRow.compiled);
+  const base = upgradeCompiledTemplate(versionRow.compiled);
+  // A follow-up executes a synthetic flow built from the base template, never
+  // the compiled flow itself (ADR-0018 Decision 7): re-entry would replay
+  // answered checkpoints, reopen closed loops, and — in the obvious target
+  // templates — reach `git.push` again.
+  //
+  // Keyed on `kind` ALONE, deliberately. Pairing it with a parent-id check
+  // reads as defensive and is the opposite: a follow-up row with no parent
+  // would fall through to the base flow and re-run the whole pipeline inside
+  // an ancestor's workspace, publishing included. Missing parentage costs the
+  // inherited session (an honest fresh start); it must never cost the flow.
+  const seed = run.kind === "followup" ? await followupSeed(db, run.parentRunId, base) : null;
+  const template = seed ? followupTemplate(base, seed) : base;
 
   const [task] = await db.select().from(tasks).where(eq(tasks.id, run.taskId));
   const [project] = await db.select().from(projects).where(eq(projects.id, run.projectId));
@@ -275,6 +374,46 @@ export async function executeRun(
     }
   }
 
+  // One live run per workspace (ADR-0018). A follow-up requested while another
+  // is running becomes the NEXT one — a queueing rule the first implementation
+  // stated and did not enforce: jobs and leases are keyed by run id, workers
+  // have several slots, so both would have executed in one directory at once.
+  // Probed before the claim, like the affinity check below, so a decline costs
+  // no status change and no retry; unlike that one it needs no grace window,
+  // because the blocker finishing is what releases it (and a blocker that
+  // wedges is already the lease sweeper's problem).
+  if (run.kind === "followup" && run.status === "queued") {
+    const holder = await db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(
+        and(
+          eq(runs.workspaceKey, run.workspaceKey),
+          ne(runs.id, run.id),
+          notInArray(runs.status, [...TERMINAL_RUN_STATUSES]),
+        ),
+      )
+      .limit(1);
+    if (holder.length > 0) throw new WorkspaceBusyError(run.id, holder[0]?.id as string);
+  }
+
+  // Central host affinity (ADR-0018). A follow-up continues a directory that
+  // exists on exactly one host; remote runs carry a pin, central ones do not.
+  // Probed BEFORE the claim so a decline costs nothing — no status change, no
+  // retry burned — and bounded, so a workspace nobody holds becomes an honest
+  // `workspace_lost` from the check inside initialize rather than a run that
+  // circulates forever.
+  if (
+    run.kind === "followup" &&
+    run.runtimeId === null &&
+    template.spec.workspace !== undefined &&
+    run.status === "queued" &&
+    Date.now() - run.queuedAt.getTime() < WORKSPACE_AFFINITY_GRACE_MS &&
+    !(await deps.workspace.isIntact(run.id))
+  ) {
+    throw new WorkspaceElsewhereError(run.id);
+  }
+
   const engine = new RunEngine(
     deps,
     run,
@@ -286,6 +425,7 @@ export async function executeRun(
       project: { id: project.id, slug: project.slug, name: project.name },
     },
     catalog,
+    seed,
   );
   return await engine.execute(control);
 }
@@ -331,6 +471,14 @@ class RunEngine {
       project: { id: string; slug: string; name: string };
     },
     private readonly catalog: ProviderCatalog,
+    /**
+     * What this follow-up continues (ADR-0018): the parent's last executor
+     * session, handed to the steer step's first attempt, and the parent's step
+     * outputs, which become the follow-up's prior context. Null for everything
+     * else — and a follow-up whose parent left no session starts honestly
+     * fresh rather than pretending otherwise.
+     */
+    private readonly followup: FollowupSeed | null = null,
   ) {
     this.leaseOwner = deps.lease?.owner ?? `engine-${Bun.randomUUIDv7()}`;
     this.leaseTtlMs = deps.lease?.ttlMs ?? RUN_LEASE_TTL_MS;
@@ -464,8 +612,21 @@ class RunEngine {
     }
     this.run.status = "running";
     if (run.startedAt === null) {
-      await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, run.id));
+      // This write is what closes the coalescing window: the API appends
+      // steering messages to a follow-up for exactly as long as `started_at`
+      // is null (ADR-0018 Decision 8). The run row was read at the top of
+      // executeRun — before routing, the claim and the pin verify — so a
+      // message committed anywhere in that stretch is in the row and not in
+      // our copy, and it would reach neither this agent nor a later follow-up.
+      // Taking it back from the same statement that shuts the window is the
+      // one read that cannot be stale.
+      const [started] = await db
+        .update(runs)
+        .set({ startedAt: new Date() })
+        .where(eq(runs.id, run.id))
+        .returning({ steeringMessage: runs.steeringMessage });
       this.run.startedAt = new Date();
+      this.run.steeringMessage = started?.steeringMessage ?? this.run.steeringMessage;
     }
     await this.emit(resuming ? "run.resumed" : "run.started", {
       taskId: run.taskId,
@@ -586,10 +747,17 @@ class RunEngine {
     const checkoutSucceeded = [...this.stepRows.values()].some(
       (row) => row.status === "succeeded" && this.isCheckoutStep(row.stepId),
     );
-    if (checkoutSucceeded && !(await this.deps.workspace.isIntact(run.id))) {
+    // A follow-up never checks out — it attaches to the workspace its ancestor
+    // left (ADR-0018 Decision 7). Same assertion, one step earlier: without it
+    // the agent would work in an empty directory and report success, which is
+    // the failure mode the whole feature is built to avoid.
+    const attaches = this.run.kind === "followup" && this.template.spec.workspace !== undefined;
+    if ((checkoutSucceeded || attaches) && !(await this.deps.workspace.isIntact(run.id))) {
       throw new RunFailure(
         "workspace_lost",
-        "the run's workspace is gone (worker host changed or files were removed) — it cannot resume here",
+        attaches
+          ? "the workspace this follow-up continues is gone (collected, or the host changed) — submit a new task instead"
+          : "the run's workspace is gone (worker host changed or files were removed) — it cannot resume here",
       );
     }
   }
@@ -1070,8 +1238,21 @@ class RunEngine {
 
     for (let attempt = startAttempt; attempt <= maxAttempts; attempt++) {
       await this.checkInterrupts();
-      // resume the crashed executor session on the first recovery attempt only
-      const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? null) : null;
+      // Resume the crashed executor session on the first recovery attempt
+      // only — or, on a follow-up's steer step, the PARENT's session, which
+      // is the whole point of steering (ADR-0018). A later attempt starts
+      // fresh either way: whatever went wrong, the conversation is suspect.
+      // `attempt === 1`, not `=== startAttempt`: startAttempt is derived from
+      // the persisted rows, so on any re-entry it is already >1 and the
+      // parent's session would be offered to an attempt that has failed once —
+      // which is the case the comment above says must not happen. Crash
+      // recovery keeps `startAttempt`, because there the previous attempt was
+      // interrupted rather than tried.
+      const inherited =
+        attempt === 1 && step.id === FOLLOWUP_STEER_STEP_ID
+          ? (this.followup?.sessionId ?? null)
+          : null;
+      const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? inherited) : null;
       const row = await this.insertStepRow(phase, step, attempt, resumeSessionId);
       this.currentStepRowId = row.id;
       try {
@@ -1308,51 +1489,45 @@ class RunEngine {
   ): Promise<string> {
     const binding = this.bindingFor(step);
     const request = await this.buildRequest(step, row, attempt);
-    // narrowed to { signal, logger } by ADR-0017 Decision 2: usage flows only
-    // through usage events, secrets only through the resource materializer
-    const ctx: ExecutionContext = {
-      signal: this.abort.signal,
-      logger: this.deps.logger,
-    };
 
-    let output: string | null = null;
-    let failure: StepFailed | null = null;
+    let result = await this.invokeExecutor(phase, step, row, attempt, binding, request);
 
-    for await (const event of binding.executor.executeStep(request, ctx)) {
-      await this.persistExecutorEvent(phase, step, row, event);
-      if (event.type === "step.completed") output = event.output;
-      if (event.type === "step.failed") {
-        failure = new StepFailed(event.error.message, {
-          code: event.error.code,
-          message: event.error.message,
+    // Resume accounting, only for an invocation that was actually handed a
+    // session id — which by the gate in buildRequest means a `verified`
+    // executor, from which a report is mandatory.
+    if (request.resumeSessionId !== undefined && !result.failure) {
+      if (result.resumed === "rejected") {
+        this.deps.logger.warn("executor session did not resume — disclosing context loss", {
+          runId: this.run.id,
+          stepId: step.id,
+          executorId: binding.executorId,
         });
-      }
-      if (event.type === "usage") {
-        try {
-          await this.recordUsage(event, row, attempt);
-        } catch (err) {
-          // Abort so the executor stops streaming, then propagate as a step
-          // failure. Propagating matters because the step-boundary
-          // checkInterrupts is NOT reached after the run's final step (runFlow
-          // goes straight to finalize), so swallowing this would let a run that
-          // blew its limit finish as 'succeeded'. Propagating *as StepFailed*
-          // matters because that is the only branch executeStepWithRetry closes
-          // the row out on — and its abortReason check fires before the retry
-          // and onFailure:continue branches, so a blown limit is never retried
-          // nor shrugged off.
-          if (err instanceof UsageLimitExceededError) {
-            this.triggerAbort("usage_limit_exceeded");
-            throw new StepFailed(err.message, {
-              code: "usage_limit_exceeded",
-              message: err.message,
-            });
-          }
-          throw err;
-        }
+        // One re-invocation, told plainly that its context is gone, and with
+        // the dead session id withheld so it cannot be re-offered. The first
+        // invocation was aborted the moment it reported the rejection, so this
+        // is a second start rather than a second full step.
+        const { resumeSessionId: _dead, ...fresh } = request;
+        result = await this.invokeExecutor(phase, step, row, attempt, binding, {
+          ...fresh,
+          instructions: withContextLossDisclosure(
+            request.instructions,
+            request.priorContext.length > 0,
+          ),
+        });
+      } else if (result.resumed === undefined) {
+        // Fails closed: an executor that claims `verified`, is given a session
+        // id, and reports nothing has told us only that we cannot know whether
+        // the conversation continued. Proceeding would be exactly the silent
+        // fresh-start-as-continuity this capability exists to prevent.
+        throw new StepFailed(`executor '${binding.executorId}' did not report a resume outcome`, {
+          code: "contract_violation",
+          message: `executor '${binding.executorId}' advertises verified resume but reported no outcome for a resumed session`,
+        });
       }
     }
 
-    if (failure) throw failure;
+    if (result.failure) throw result.failure;
+    const output = result.output;
     if (output === null) {
       throw new StepFailed("executor stream ended without a terminal event", {
         code: "internal",
@@ -1388,6 +1563,91 @@ class RunEngine {
 
     this.stepOutputs[step.id] = { outputs: { result: output } };
     return output;
+  }
+
+  /**
+   * One executor invocation: persist its events, meter its usage, and report
+   * how it ended. Separate from the step because a rejected resume costs a
+   * second invocation of the SAME attempt — the retry budget belongs to work
+   * that failed, and losing a conversation is not the step failing.
+   *
+   * The signal is per-invocation and chained to the run's, so a rejected
+   * resume can be stopped without aborting the run. Stopping it immediately
+   * matters: `step.started` arrives before the model does any work, so the
+   * abandoned invocation costs a process start rather than a whole step.
+   */
+  private async invokeExecutor(
+    phase: TemplatePhaseV2,
+    step: AgentStep,
+    row: StepRow,
+    attempt: number,
+    binding: SlotBinding,
+    request: StepExecutionRequest,
+  ): Promise<{ output: string | null; failure: StepFailed | null; resumed?: ResumeOutcome }> {
+    const invocation = new AbortController();
+    const onRunAbort = () => invocation.abort();
+    if (this.abort.signal.aborted) invocation.abort();
+    this.abort.signal.addEventListener("abort", onRunAbort, { once: true });
+
+    // narrowed to { signal, logger } by ADR-0017 Decision 2: usage flows only
+    // through usage events, secrets only through the resource materializer
+    const ctx: ExecutionContext = {
+      signal: invocation.signal,
+      logger: this.deps.logger,
+    };
+
+    let output: string | null = null;
+    let failure: StepFailed | null = null;
+    let resumed: ResumeOutcome | undefined;
+
+    try {
+      for await (const event of binding.executor.executeStep(request, ctx)) {
+        await this.persistExecutorEvent(phase, step, row, event);
+        if (event.type === "step.started" && event.resumed) {
+          resumed = event.resumed;
+          if (event.resumed === "rejected") {
+            // whatever it does next, it does without the context this step
+            // was built on — stop it here and start again, disclosed
+            invocation.abort();
+            break;
+          }
+        }
+        if (event.type === "step.completed") output = event.output;
+        if (event.type === "step.failed") {
+          failure = new StepFailed(event.error.message, {
+            code: event.error.code,
+            message: event.error.message,
+          });
+        }
+        if (event.type === "usage") {
+          try {
+            await this.recordUsage(event, row, attempt);
+          } catch (err) {
+            // Abort so the executor stops streaming, then propagate as a step
+            // failure. Propagating matters because the step-boundary
+            // checkInterrupts is NOT reached after the run's final step (runFlow
+            // goes straight to finalize), so swallowing this would let a run that
+            // blew its limit finish as 'succeeded'. Propagating *as StepFailed*
+            // matters because that is the only branch executeStepWithRetry closes
+            // the row out on — and its abortReason check fires before the retry
+            // and onFailure:continue branches, so a blown limit is never retried
+            // nor shrugged off.
+            if (err instanceof UsageLimitExceededError) {
+              this.triggerAbort("usage_limit_exceeded");
+              throw new StepFailed(err.message, {
+                code: "usage_limit_exceeded",
+                message: err.message,
+              });
+            }
+            throw err;
+          }
+        }
+      }
+    } finally {
+      this.abort.signal.removeEventListener("abort", onRunAbort);
+    }
+
+    return { output, failure, resumed };
   }
 
   /**
@@ -1482,13 +1742,22 @@ class RunEngine {
       });
     }
 
-    const priorContext: PriorStepSummary[] = Object.entries(this.stepOutputs).map(
-      ([stepId, value]) => ({
+    // A follow-up's own run has one step, so its prior context is what the
+    // PARENT produced (ADR-0018). Without this a rejected resume left the
+    // agent with a message and no account of the work it was continuing —
+    // and the context-loss disclosure pointed at summaries that were not there.
+    const priorContext: PriorStepSummary[] = [
+      ...(this.followup?.priorOutputs ?? []).map((prior) => ({
+        stepId: prior.stepId,
+        output: prior.output,
+        artifactKeys: [],
+      })),
+      ...Object.entries(this.stepOutputs).map(([stepId, value]) => ({
         stepId,
         output: String(value.outputs.result ?? ""),
         artifactKeys: [],
-      }),
-    );
+      })),
+    ];
 
     // slot resolution is single-provider, so the step model's provider also
     // covers every subagent model in this request
@@ -1498,7 +1767,7 @@ class RunEngine {
       stepId: step.id,
       iteration: this.currentIteration,
       agentSlot: slot,
-      instructions: interpolate(step.instructions, ctx),
+      instructions: this.withSteeringMessage(step, interpolate(step.instructions, ctx)),
       systemPrompt: binding.systemPrompt,
       model,
       providerAuth: await this.providerAuthFor(model.provider, {
@@ -1525,13 +1794,34 @@ class RunEngine {
       },
       limits: { maxTurns: 50 },
       workspaceDir: this.workspaceDir,
-      resumeSessionId: row.executorSessionId ?? undefined,
+      // Only a `verified` executor is trusted with a session id (ADR-0018
+      // Decision 5). One that cannot prove the context loaded would present a
+      // silent fresh start as continuity — so it is handed nothing, and the
+      // run is honestly a fresh conversation rather than falsely a resumed one.
+      resumeSessionId:
+        binding.executor.capabilities.resume === "verified"
+          ? (row.executorSessionId ?? undefined)
+          : undefined,
       priorContext,
       expectedArtifacts: step.produces.map((key) => ({
         key,
         kind: this.template.spec.outputs.artifacts.find((a) => a.key === key)?.kind ?? "markdown",
       })),
     };
+  }
+
+  /**
+   * Append the operator's steering message to a follow-up's steer step.
+   *
+   * AFTER interpolation, deliberately and load-bearingly (ADR-0018 Decision
+   * 6): a steering message is untrusted text on the same footing as a task
+   * parameter, so interpolating it would evaluate whatever `${...}` it
+   * happens to contain against the run's expression context. Concatenating it
+   * here means the message is delivered verbatim and read once.
+   */
+  private withSteeringMessage(step: AgentStep, instructions: string): string {
+    if (step.id !== FOLLOWUP_STEER_STEP_ID || !this.run.steeringMessage) return instructions;
+    return `${instructions}\n\n<message-from-operator>\n${this.run.steeringMessage}\n</message-from-operator>`;
   }
 
   /**
@@ -2044,10 +2334,15 @@ class RunEngine {
       payload: eventPayload,
       createdAt: result.createdAt.toISOString(),
     });
+    // Release, don't delete (ADR-0018 Decision 4). The expiry itself was
+    // stamped by finalizeRun above, inside the CAS — every finalization path
+    // needs it, not just this one. What is left here is the manager dropping
+    // whatever belongs to THIS run alone (a remote run's local staging dir);
+    // the workspace itself is group-owned and outlives the run.
     try {
-      await this.deps.workspace.cleanup(this.run.id);
+      await this.deps.workspace.release(this.run.id);
     } catch (err) {
-      this.deps.logger.warn("workspace cleanup failed", { err: String(err) });
+      this.deps.logger.warn("workspace release failed", { err: String(err) });
     }
   }
 }

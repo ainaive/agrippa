@@ -9,16 +9,16 @@ import {
   dispatchCompleteSchema,
   dispatchEventBatchSchema,
   dispatchFailSchema,
-  TERMINAL_RUN_STATUSES,
 } from "@agrippa/core";
-import { auditLogs, type Db, dispatchEvents, dispatches, runs, runtimes } from "@agrippa/db";
+import { auditLogs, type Db, dispatchEvents, dispatches, runtimes } from "@agrippa/db";
 import {
   ArtifactTooLargeError,
   DiskArtifactStore,
+  expiredWorkspaceKeys,
   isSafeArtifactKey,
   type RunEventBus,
 } from "@agrippa/orchestration";
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { bearerToken } from "../lib/bearer-tokens";
@@ -32,12 +32,13 @@ import { validate } from "../lib/validate";
 type RuntimeRow = typeof runtimes.$inferSelect;
 
 /**
- * How far back the claim poll looks for finished runs to reap, and how many it
- * names at once. Long enough that a daemon offline for a working day still
- * hears about its runs; short enough that the answer stays small. What falls
- * out the far end is not lost — the daemon sweeps very old directories itself.
+ * How far back the claim poll looks for spent workspaces to reap, and how many
+ * it names at once. Long enough that a daemon offline for a working day still
+ * hears about its directories; short enough that the answer stays small. What
+ * falls out the far end is not lost — the daemon sweeps very old directories
+ * itself, which is also what covers a daemon that was down all week.
  */
-const REAPABLE_WINDOW = "24 hours";
+const REAPABLE_WINDOW_HOURS = 24;
 const REAPABLE_LIMIT = 100;
 
 /**
@@ -104,6 +105,10 @@ export const daemonRoutes = new Hono<DaemonEnv>()
         hostname: body.hostname,
         version: body.version ?? null,
         executors: body.executors,
+        // overwritten every register, so an upgrade (or a downgrade) takes
+        // effect the moment the daemon reconnects — a run refused for a
+        // missing feature proceeds as soon as the machine can serve it
+        features: body.features,
         lastSeenAt: sql`now()`,
         registeredAt: sql`coalesce(${runtimes.registeredAt}, now())`,
       })
@@ -111,7 +116,11 @@ export const daemonRoutes = new Hono<DaemonEnv>()
     // once per daemon boot — heartbeats are deliberately not audited
     await daemonAudit(c, {
       action: "runtime.register",
-      payload: { hostname: body.hostname, executors: body.executors.map((e) => e.id) },
+      payload: {
+        hostname: body.hostname,
+        executors: body.executors.map((e) => e.id),
+        features: body.features,
+      },
     });
     return c.json({ runtimeId: c.var.runtime.id, hints: DAEMON_PROTOCOL_HINTS });
   })
@@ -202,27 +211,25 @@ export const daemonRoutes = new Hono<DaemonEnv>()
           eq(dispatches.abortRequested, true),
         ),
       );
-    // Runs pinned here that have finalized: the daemon holds their workspaces
-    // and cannot tell on its own that they are done, because the engine runs
-    // centrally even when the executor is remote. Bounded by a recency window
-    // rather than an acknowledgement — removal is idempotent, so repeating an
-    // id costs nothing, and anything older than the window is collected by the
-    // daemon's own backstop sweep.
-    const reapable = await c.var.db
-      .select({ id: runs.id })
-      .from(runs)
-      .where(
-        and(
-          eq(runs.runtimeId, c.var.runtime.id),
-          inArray(runs.status, [...TERMINAL_RUN_STATUSES]),
-          gt(runs.finishedAt, sql`now() - ${REAPABLE_WINDOW}::interval`),
-        ),
-      )
-      .limit(REAPABLE_LIMIT);
+    // Workspaces pinned here that nothing needs any more: the daemon holds the
+    // directories and cannot tell on its own when they are spent, because the
+    // engine runs centrally even when the executor is remote. Named by
+    // workspace key rather than run id, and gated on the whole GROUP having
+    // been released rather than on one run finishing (ADR-0018 Decisions 3–4)
+    // — a follow-up holds its ancestor's directory, and reaping it would not
+    // merely cost a re-clone but silently drop the completed steps' work.
+    // Bounded by a recency window rather than an acknowledgement: removal is
+    // idempotent, so repeating a key costs nothing, and anything older is
+    // collected by the daemon's own age-based sweep.
+    const reapable = await expiredWorkspaceKeys(c.var.db, {
+      runtimeId: c.var.runtime.id,
+      windowHours: REAPABLE_WINDOW_HOURS,
+      limit: REAPABLE_LIMIT,
+    });
     const response: DaemonClaimResponse = {
       dispatch: claimed,
       abortedDispatchIds: aborted.map((r) => r.id),
-      reapableRunIds: reapable.map((r) => r.id),
+      reapableWorkspaceKeys: reapable,
     };
     return c.json(response);
   })

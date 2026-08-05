@@ -6,7 +6,7 @@ import type { Executor, Logger } from "@agrippa/executor-core";
 import { HttpDaemonApi } from "./client";
 import { loadConfig } from "./config";
 import { DaemonRunner } from "./runner";
-import { STALE_WORKSPACE_DAYS, sweepStaleWorkspaces } from "./sweep";
+import { STALE_SWEEP_INTERVAL_MS, staleWorkspaceDays, sweepStaleWorkspaces } from "./sweep";
 
 const logger: Logger = {
   info: (msg, extra) => console.log(`[daemon] ${msg}`, extra ?? ""),
@@ -69,7 +69,15 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 // The floor is deliberately far beyond any legitimate pause — a run waiting on
 // a checkpoint still owns its workspace, and deleting it would not merely cost
 // a re-clone but silently drop the completed steps' work.
-await sweepStaleWorkspaces(config.workspaceRoot, STALE_WORKSPACE_DAYS, logger);
+const ttlDays = staleWorkspaceDays(process.env);
+await sweepStaleWorkspaces(config.workspaceRoot, ttlDays, logger);
+// ...and on a cadence thereafter, because the server's signal is the thing
+// that may be missing: retention is the server's policy, but the filesystem
+// is this machine's, and a laptop that has not reached the server in weeks
+// must still bound its own disk (ADR-0018 Decision 4).
+setInterval(() => {
+  void sweepStaleWorkspaces(config.workspaceRoot, ttlDays, logger);
+}, STALE_SWEEP_INTERVAL_MS).unref();
 
 logger.info(`agrippa-daemon connecting to ${config.serverUrl}`);
 await runner.start();

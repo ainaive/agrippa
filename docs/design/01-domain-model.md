@@ -207,7 +207,12 @@ tasks     (id pk, org_id fk, project_id fk, task_type_id fk,
 
 runs      (id pk, task_id fk,
            project_id fk,                                     -- denormalized for quota/usage queries
-           number int, unique (task_id, number),              -- run #1, #2 (retries)
+           number int, unique (task_id, number),              -- run #1, #2 (retries, follow-ups)
+           kind text not null default 'initial',              -- 'initial' | 'followup' (ADR-0018)
+           parent_run_id fk runs null,                        -- the run a follow-up continues
+           workspace_key uuid not null,                       -- WHICH DIRECTORY holds the work: the
+                                                              -- run's own id, inherited unchanged by a
+                                                              -- follow-up so a chain shares one
            status text check in ('queued','running','waiting_approval',
                                  'succeeded','failed','cancelled','timed_out'),
            template_version_id fk,                            -- pinned
@@ -269,6 +274,7 @@ audit_logs (id pk, org_id fk, project_id fk null,
 - **Why `run_events` + `run_steps` both**: events give a replayable, gap-free timeline (SSE resume via `Last-Event-ID` = per-run `seq`); steps give cheap queryability (current status, per-step usage) without scanning events. The engine writes the event first, then updates the projection.
 - **Why `params_snapshot` on runs** when `tasks.params` exists: a retry may happen after the task type's template was republished with different inputs; the run must be self-contained and auditable.
 - **Why `model_resolution` frozen at run start**: role→tier→model resolution depends on project grants, which can change mid-run; freezing makes runs reproducible and usage attribution unambiguous. The freeze is per **run**, never per task — a retry re-resolves against current configuration and freezes its own resolution (ADR-0014).
+- **Why `workspace_key` is not just the run id** (ADR-0018): three identities were conflated in one row — run identity (the unit of billing, audit, SSE and the state machine), workspace identity (a directory on some host), and session identity (an executor's conversation handle, on `run_steps.executor_session_id`). Steering a finished run needs the second and third to outlive the first, and terminal is absorbing, so a follow-up is a **new run** that inherits its predecessor's key. For every other run the key is the run's own id, which is what makes the change invisible to everything that came before it. Writer-assigned, because Postgres cannot default a column to another column of the same row.
 - **Why `token_usage.attempt`**: a retried step consumes tokens again; rows keyed by `(run_id, step_id, attempt)` let the usage meter sum persisted totals on resume without double-counting a partially-executed attempt (the attempt's rows are written incrementally and summed as-is — the tokens were really spent even when the attempt failed).
 - **Why `mcp_servers.config_revision`**: MCP config is mutable head state (no full versioning in M1 — configs are small and secrets rotate); runs record the revision they resolved so audits can detect drift.
 - **Storage**: text/JSON artifacts ≤ 64 KiB are stored `inline` (jsonb/text); larger ones — and `file`-kind (possibly binary) artifacts of **any** size — go to a disk-backed store at `storage_ref` (a Docker volume path in M1; the indirection allows S3 later). Either way a single artifact is capped at `AGRIPPA_MAX_ARTIFACT_BYTES` (25 MB default). Checkpoint-driving (interaction) artifacts get a raised inline allowance — `INTERACTION_ARTIFACT_MAX_BYTES`, 2 MiB, sized to dominate any schema-valid payload — because resume re-reads them from the row; an artifact that only exists on disk cannot drive its checkpoint. Patch artifacts have no such allowance: every row carries a store-time `sha256`, and at `git.push` a larger-than-inline patch is verified against that digest — never against the disk bytes, which live on an agent-writable volume (the digest is tamper-resistance within the deployment posture, not a boundary — see the sandboxing residual in [08](08-deployment.md)).

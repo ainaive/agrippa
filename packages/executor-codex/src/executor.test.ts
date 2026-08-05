@@ -2,8 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
+import type {
+  ExecutionContext,
+  ExecutorEvent,
+  ResumeOutcome,
+  StepExecutionRequest,
+} from "@agrippa/executor-core";
 import { probeCodexCli } from "./cli";
+import { CodexEventCollector } from "./events";
 import { createCodexExecutor } from "./executor";
 
 const FIXTURE = path.resolve(import.meta.dirname, "../test/fixtures/fake-codex.ts");
@@ -121,6 +127,31 @@ describe("codex executor", () => {
     const argv2 = JSON.parse(done2?.type === "step.completed" ? done2.output : "[]") as string[];
     expect(argv2.slice(argv2.indexOf("--sandbox"))[1]).toBe("read-only");
     expect(argv2.slice(argv2.indexOf("resume"))[1]).toBe("sess-9");
+  });
+
+  // ADR-0018 Decision 5: `codex resume <thread>` announces the thread it
+  // actually opened, which is what makes this executor's `verified` claim
+  // real — a different id means the conversation is gone, whatever the CLI
+  // reports afterwards.
+  it.each([
+    ["thr-1", "honored"],
+    ["thr-other", "rejected"],
+  ] as Array<[string, ResumeOutcome]>)(
+    "reports a resume of thr-1 that opened %s as %s",
+    (opened, outcome) => {
+      const collector = new CodexEventCollector("gpt-5-codex", "thr-1");
+      expect(collector.map({ type: "thread.started", thread_id: opened })).toEqual([
+        { type: "step.started", sessionId: opened, resumed: outcome },
+      ]);
+    },
+  );
+
+  it("reports no resume outcome when it was not asked to resume", () => {
+    const collector = new CodexEventCollector("gpt-5-codex");
+    // absent, not "honored": there was no thread to continue
+    expect(collector.map({ type: "thread.started", thread_id: "thr-1" })).toEqual([
+      { type: "step.started", sessionId: "thr-1" },
+    ]);
   });
 
   it("assembles the prompt from role, prior context, instructions, and artifact directions", async () => {
@@ -267,14 +298,36 @@ describe("codex executor", () => {
     expect(argv).not.toContain("model_provider=agrippa");
   });
 
+  it("a second run in the same workspace gets the same CODEX_HOME", async () => {
+    // Resume threads live under CODEX_HOME, so its scope must follow the
+    // WORKSPACE, not the run (ADR-0018): a follow-up is a new run continuing
+    // the same workspace, and keyed by run it would look for its own thread in
+    // an empty home, start fresh, and report success as though it had resumed.
+    savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const workspaceDir = makeWorkspace("env");
+    const auth = { provider: "openai", apiKey: "sk-openai-project" };
+    const homeOf = async (runId: string): Promise<string | null> => {
+      const events = await collect(makeReq(workspaceDir, { runId, providerAuth: auth }));
+      const done = events.find((e) => e.type === "step.completed");
+      const seen = JSON.parse(done?.type === "step.completed" ? done.output : "{}") as {
+        codexHome: string | null;
+      };
+      return seen.codexHome;
+    };
+    const first = await homeOf("run-ancestor");
+    expect(first).toContain("agrippa-codex-home");
+    expect(await homeOf("run-followup")).toBe(first as string);
+  });
+
   it("project credential replaces env auth and redirects CODEX_HOME", async () => {
     savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     savedEnv.CODEX_HOME = process.env.CODEX_HOME;
     process.env.OPENAI_API_KEY = "sk-worker-env";
     process.env.CODEX_HOME = "/home/worker/.codex";
 
+    const workspaceDir = makeWorkspace("env");
     const events = await collect(
-      makeReq(makeWorkspace("env"), {
+      makeReq(workspaceDir, {
         providerAuth: {
           provider: "openai",
           apiKey: "sk-openai-project",
@@ -292,7 +345,7 @@ describe("codex executor", () => {
     expect(seen.openaiBaseUrl).toBe("https://proxy.example.com/v1");
     // ambient auth.json under the worker's CODEX_HOME must not outrank the key
     expect(seen.codexHome).toContain("agrippa-codex-home");
-    expect(seen.codexHome).toContain("run-1");
+    expect(seen.codexHome).toContain(path.basename(workspaceDir));
   });
 
   it("scrubs the subprocess environment down to the allow-list", async () => {

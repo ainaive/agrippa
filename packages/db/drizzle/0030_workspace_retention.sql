@@ -1,0 +1,2 @@
+ALTER TABLE "runs" ADD COLUMN "workspace_expires_at" timestamp with time zone;--> statement-breakpoint
+CREATE INDEX "runs_workspace_expiry_idx" ON "runs" USING btree ("workspace_expires_at") WHERE "runs"."workspace_expires_at" is not null;

@@ -9,10 +9,13 @@ import {
   executeRun,
   finalizeRun,
   type RunControlHandle,
+  RuntimeFeatureUnavailableError,
   remoteEngineDeps,
   renewRunLeases,
   routeRun,
   syncRunNotifications,
+  WorkspaceBusyError,
+  WorkspaceElsewhereError,
 } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
 import type { JobWithMetadata, PgBoss } from "pg-boss";
@@ -192,11 +195,24 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
       // decision. The re-enqueue routes to the correct set queue. A `running`
       // run (crash-recovery pickup) still rethrows: the lease sweeper
       // re-enqueues it once the dead owner's lease expires.
+      //
+      // A pinned daemon too old to honor workspace keys defers the same way
+      // (ADR-0018): the machine may serve this run perfectly well after an
+      // upgrade, and refusing-then-recovering beats failing a run the operator
+      // would have to notice and resubmit.
       if (
         (typeof err === "object" &&
           err !== null &&
           (err as { code?: string }).code === "executor_unavailable_on_worker") ||
-        err instanceof ExecutorUnavailableError
+        err instanceof ExecutorUnavailableError ||
+        err instanceof RuntimeFeatureUnavailableError ||
+        // a central follow-up whose workspace is on another worker: declining
+        // lets the host that HAS the directory take it (ADR-0018), bounded by
+        // the engine's grace window so nobody-has-it fails honestly instead
+        err instanceof WorkspaceElsewhereError ||
+        // another link in this chain still holds the workspace: waiting is the
+        // correct answer, and the blocker finishing is what ends the wait
+        err instanceof WorkspaceBusyError
       ) {
         const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
         if (run && (run.status === "queued" || run.status === "waiting_approval")) {

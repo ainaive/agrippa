@@ -71,6 +71,8 @@ const dispatchFor = (
   runId,
   payload: {
     executorId: executor,
+    // for everything but a follow-up the workspace key IS the run id
+    workspaceKey: runId,
     request: {
       runId,
       stepId: "step-1",
@@ -190,6 +192,33 @@ describe("daemon runner", () => {
     expect(api.completed).toBeNull();
   });
 
+  it("fails workspace_lost rather than re-cloning a follow-up's missing workspace", async () => {
+    // The central engine catches this with isIntact; remotely the server can
+    // only prove the runtime is alive, so the daemon has to. Cloning would
+    // start from the pinned base and report success, dropping everything the
+    // ancestor did — invisibly, which is the whole reason follow-ups are
+    // refused to daemons that cannot make this promise.
+    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-attach-"));
+    const api = new MockApi();
+    const runner = makeRunner(api, new FakeExecutor({}));
+    await runner.register();
+
+    const runId = Bun.randomUUIDv7();
+    const dispatch = dispatchFor("fake", runId, {
+      mustAttach: true,
+      workspaceKey: Bun.randomUUIDv7(), // a directory this machine does not have
+      workspace: {
+        repoUrl: "https://example.invalid/repo.git",
+        baseSha: "0".repeat(40),
+        access: "readWrite",
+      },
+    });
+    await runner.executeDispatch(dispatch);
+
+    expect(api.failed?.code).toBe("workspace_lost");
+    expect(api.completed).toBeNull();
+  });
+
   it("fails a dispatch naming an executor this machine lacks", async () => {
     const api = new MockApi();
     const runner = makeRunner(api, new FakeExecutor({}));
@@ -250,9 +279,9 @@ describe("daemon runner config isolation", () => {
     const runner = makeRunner(api, new FakeExecutor({}));
     await runner.register();
     api.claimQueue = [
-      { dispatch: null, abortedDispatchIds: [], reapableRunIds: [finished] },
+      { dispatch: null, abortedDispatchIds: [], reapableWorkspaceKeys: [finished] },
       // second poll ends the loop, so start() returns
-      { dispatch: null, abortedDispatchIds: [], reapableRunIds: [] },
+      { dispatch: null, abortedDispatchIds: [], reapableWorkspaceKeys: [] },
     ];
     const loop = runner.start();
     while (api.claimCalls < 2) await Bun.sleep(5);

@@ -27,5 +27,16 @@ export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 export const CHECKPOINT_KINDS = ["approval", "input", "review-gate"] as const;
 export type CheckpointKind = (typeof CHECKPOINT_KINDS)[number];
 
+/**
+ * What a run is, which is not the same question as what state it is in
+ * (ADR-0018 Decision 1). `initial` covers a first submission and a retry of
+ * one — a retry re-resolves configuration and starts clean. A `followup`
+ * continues its parent: same workspace, same executor session, configuration
+ * copied verbatim rather than re-resolved, and therefore unable to heal a
+ * configuration failure. It is a NEW run because terminal is absorbing.
+ */
+export const RUN_KINDS = ["initial", "followup"] as const;
+export type RunKind = (typeof RUN_KINDS)[number];
+
 export const REVIEW_SEVERITIES = ["blocker", "major", "minor", "info"] as const;
 export type ReviewSeverity = (typeof REVIEW_SEVERITIES)[number];

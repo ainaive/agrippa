@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD CONSTRAINT "runs_followup_has_parent" CHECK ("runs"."kind" <> 'followup' or "runs"."parent_run_id" is not null);

@@ -1,6 +1,7 @@
 import { type CheckpointStoredResponse, canTransitionRun, type RunStatus } from "@agrippa/core";
 import { checkpoints, type Db, type DbOrTx, runEvents, runs } from "@agrippa/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { workspaceExpiryAt } from "../workspace-retention";
 
 /**
  * Run-lifecycle module (docs/design/04, ADR-0007): the one place that mutates
@@ -21,6 +22,23 @@ export type RunEventInput = {
 };
 
 export type AppendedRunEvent = { seq: number; createdAt: Date };
+
+/**
+ * The directory identity behind a run (ADR-0018 Decision 3). The engine and
+ * the SCM service still speak in run ids — a run is what they orchestrate —
+ * so the translation lives here, at the one boundary where "which run" becomes
+ * "which directory". Read fresh rather than cached: workspace operations are
+ * rare next to the git work they precede, and a stale answer would point a
+ * clone, a diff, or a delete at the wrong directory.
+ */
+export async function workspaceKeyOf(db: DbOrTx, runId: string): Promise<string> {
+  const [row] = await db
+    .select({ workspaceKey: runs.workspaceKey })
+    .from(runs)
+    .where(eq(runs.id, runId));
+  if (!row) throw new Error(`run ${runId} not found — cannot resolve its workspace`);
+  return row.workspaceKey;
+}
 
 /**
  * Move a run from `from` to `to` iff it is still in `from` (compare-and-swap).
@@ -292,6 +310,14 @@ export async function finalizeRun(db: Db, input: FinalizeRunInput): Promise<Fina
         // finalization path (engine, worker retry-exhaustion, API cancel)
         leaseOwner: null,
         leaseExpiresAt: null,
+        // …and it stops holding its workspace, for exactly the same reason and
+        // on exactly the same paths (ADR-0018 Decision 4). Written here rather
+        // than by the engine afterwards: a cancelled or retry-exhausted run
+        // got no retention window at all that way — and a failed run's
+        // directory is the one most worth keeping — while a lost follow-up
+        // write left a workspace nothing would ever collect. Inside the CAS it
+        // happens exactly once, with the terminal write, or not at all.
+        workspaceExpiresAt: workspaceExpiryAt(),
       })
       .where(and(...conds))
       .returning({ id: runs.id });

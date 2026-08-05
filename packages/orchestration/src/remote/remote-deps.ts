@@ -92,7 +92,7 @@ const NO_CAPABILITIES: ExecutorCapabilities = {
   subagents: false,
   mcp: false,
   skills: false,
-  resume: false,
+  resume: "none",
   streaming: false,
 };
 
@@ -126,6 +126,9 @@ export function remoteEngineDeps(
       capabilities,
       ...(envAuthProviders !== undefined ? { envAuthProviders } : {}),
       workspaceSpec: () => workspace.workspaceSpec(run.id),
+      // a follow-up continues a directory the daemon already has; finding it
+      // absent must fail rather than re-clone (ADR-0018)
+      ...(run.kind === "followup" ? { mustAttach: true } : {}),
       logger: base.logger,
     });
   }

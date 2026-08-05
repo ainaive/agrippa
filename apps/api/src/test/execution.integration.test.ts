@@ -1,6 +1,14 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
-import { auditLogs, fabri, mcpServers, repoConnections, runs, skillVersions } from "@agrippa/db";
+import {
+  auditLogs,
+  fabri,
+  mcpServers,
+  repoConnections,
+  runComments,
+  runs,
+  skillVersions,
+} from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import {
   type EngineDeps,
@@ -11,7 +19,7 @@ import {
   InProcessEventBus,
   silentLogger,
 } from "@agrippa/orchestration";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
 import {
@@ -58,9 +66,13 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   const enqueued: string[] = [];
   const bus = new InProcessEventBus();
 
+  const delayed: Array<{ runId: string; delaySeconds: number }> = [];
   const fakeQueue: RunQueue = makeFakeQueue({
     enqueueRun: async (id) => {
       enqueued.push(id);
+    },
+    enqueueRunAfter: async (runId, delaySeconds) => {
+      delayed.push({ runId, delaySeconds });
     },
   });
 
@@ -710,5 +722,320 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect((await jsonOf<{ code: string }>(res)).code).toBe("repo_not_in_project");
 
     if (conn) await db.insert(repoConnections).values(conn);
+  });
+
+  // ── Follow-up steering (ADR-0018) ─────────────────────────────────────────
+  describe("follow-up steering", () => {
+    /** A finished run of its own task, so these tests never fight the retry ones. */
+    const finishedRun = async (): Promise<{ runId: string; taskId: string }> => {
+      const res = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+        method: "POST",
+        json: submitBody(),
+      });
+      const body = await jsonOf<{ taskId: string; runId: string }>(res);
+      // finalize does two things: it stamps finishedAt AND releases the
+      // workspace with a retention window. A fixture that fakes only the
+      // first produces a run the platform reads as already collected.
+      await db
+        .update(runs)
+        .set({
+          status: "succeeded",
+          finishedAt: new Date(),
+          workspaceExpiresAt: sql`now() + interval '1 hour'`,
+        })
+        .where(eq(runs.id, body.runId));
+      return { runId: body.runId, taskId: body.taskId };
+    };
+
+    it("creates a follow-up that inherits workspace, session context and config", async () => {
+      const { runId: parentId, taskId: parentTask } = await finishedRun();
+      const [parent] = await db.select().from(runs).where(eq(runs.id, parentId));
+
+      const res = await admin.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "also handle the empty-list case" },
+      });
+      expect(res.status).toBe(202);
+      const body = await jsonOf<{ runId: string; number: number; coalesced: boolean }>(res);
+      expect(body.coalesced).toBe(false);
+
+      const [followup] = await db.select().from(runs).where(eq(runs.id, body.runId));
+      expect(followup?.kind).toBe("followup");
+      expect(followup?.parentRunId).toBe(parentId);
+      // the identities that make it a continuation
+      expect(followup?.workspaceKey).toBe(parent?.workspaceKey as string);
+      expect(followup?.workBranch).toBe(parent?.workBranch ?? null);
+      expect(followup?.steeringMessage).toBe("also handle the empty-list case");
+      // configuration copied VERBATIM — the divergence from retry (ADR-0014)
+      expect(followup?.templateVersionId).toBe(parent?.templateVersionId as string);
+      expect(followup?.modelResolution).toEqual(parent?.modelResolution ?? {});
+      expect(followup?.resourceManifest).toEqual(parent?.resourceManifest);
+
+      // the message is on the PARENT's thread immediately, whatever the queue does
+      const comments = await db.select().from(runComments).where(eq(runComments.runId, parentId));
+      expect(comments.map((c) => c.body)).toContain("also handle the empty-list case");
+      // and the enqueue is DELAYED — the delay is the burst window
+      expect(delayed.at(-1)?.runId).toBe(body.runId);
+      expect(delayed.at(-1)?.delaySeconds).toBeGreaterThan(0);
+
+      const task = await jsonOf<{ runs: Array<{ number: number }> }>(
+        await admin.request(`/api/v1/tasks/${parentTask}`),
+      );
+      expect(task.runs.map((r) => r.number)).toEqual([2, 1]);
+    });
+
+    it("a burst becomes one follow-up; a message after it starts becomes the next", async () => {
+      const { runId: parentId } = await finishedRun();
+      const first = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "first thought" },
+        }),
+      );
+      const second = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "second thought" },
+        }),
+      );
+      expect(second.coalesced).toBe(true);
+      expect(second.runId).toBe(first.runId);
+      const [coalesced] = await db.select().from(runs).where(eq(runs.id, first.runId));
+      expect(coalesced?.steeringMessage).toBe("first thought\n\nsecond thought");
+
+      // once it starts, the window is closed: the next message is its own run
+      await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, first.runId));
+      const third = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "third thought" },
+        }),
+      );
+      expect(third.coalesced).toBe(false);
+      expect(third.runId).not.toBe(first.runId);
+      // and both messages are on the thread regardless of how they were routed
+      const comments = await db.select().from(runComments).where(eq(runComments.runId, parentId));
+      expect(comments.map((c) => c.body).sort()).toEqual([
+        "first thought",
+        "second thought",
+        "third thought",
+      ]);
+    });
+
+    it("the run payload says whether the run has a workspace at all", async () => {
+      // The client applies expiry rules only where there IS a workspace, and
+      // it cannot infer that from the phase plan — without this it hid the
+      // Continue button on exactly the runs the API still steers.
+      // its own run, not the suite's: a test that depends on an earlier test
+      // having run passes in file order and lies in isolation
+      const backed = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+          method: "POST",
+          json: submitBody(),
+        }),
+      );
+      const withWorkspace = await jsonOf<{ usesWorkspace: boolean }>(
+        await admin.request(`/api/v1/runs/${backed.runId}`),
+      );
+      expect(withWorkspace.usesWorkspace).toBe(true);
+
+      const pmTypes = await jsonOf<Array<{ id: string; slug: string }>>(
+        await admin.request("/api/v1/scenarios/project-management/task-types"),
+      );
+      const weekly = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+          method: "POST",
+          json: {
+            taskTypeId: pmTypes.find((t) => t.slug === "weekly-report")?.id,
+            title: "Weekly report",
+            params: { dateRange: "2026.08.01-2026.08.05", rawNotes: "notes" },
+          },
+        }),
+      );
+      const without = await jsonOf<{ usesWorkspace: boolean }>(
+        await admin.request(`/api/v1/runs/${weekly.runId}`),
+      );
+      expect(without.usesWorkspace).toBe(false);
+    });
+
+    it("a workspace-less run stays steerable past the retention window", async () => {
+      // Retention stamps an expiry on every run, so gating the 409 on it alone
+      // made a template with no `workspace:` block — a weekly report — expire
+      // for a directory it never had. The engine would have run that follow-up
+      // fine: its attach assertion is gated on the same `spec.workspace`, and
+      // what such a follow-up continues is the session.
+      const pmTypes = await jsonOf<Array<{ id: string; slug: string }>>(
+        await admin.request("/api/v1/scenarios/project-management/task-types"),
+      );
+      const weeklyId = pmTypes.find((t) => t.slug === "weekly-report")?.id as string;
+      expect(weeklyId).toBeDefined();
+
+      const submitted = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+          method: "POST",
+          json: {
+            taskTypeId: weeklyId,
+            title: "Weekly report",
+            params: { dateRange: "2026.08.01-2026.08.05", rawNotes: "shipped Phase C" },
+          },
+        }),
+      );
+      // finished, and its workspace long past collection — for a run whose
+      // template declares no workspace at all
+      await db
+        .update(runs)
+        .set({
+          status: "succeeded",
+          finishedAt: new Date(),
+          workspaceExpiresAt: sql`now() - interval '1 day'`,
+        })
+        .where(eq(runs.id, submitted.runId));
+
+      const res = await admin.request(`/api/v1/runs/${submitted.runId}/followup`, {
+        method: "POST",
+        json: { message: "also cover the infra work" },
+      });
+      expect(res.status).toBe(202);
+    });
+
+    it("a cancelled follow-up does not swallow the next message", async () => {
+      // Cancelling a queued run finalizes it directly and leaves started_at
+      // null forever, so a predicate of "unstarted" matched a dead row: every
+      // later message was absorbed into it, accepted, and never executed —
+      // and it never self-healed, because that row can no longer start.
+      const { runId: parentId } = await finishedRun();
+      const first = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "first" },
+        }),
+      );
+      expect(
+        (await admin.request(`/api/v1/runs/${first.runId}/cancel`, { method: "POST" })).status,
+      ).toBe(200);
+      const [cancelled] = await db.select().from(runs).where(eq(runs.id, first.runId));
+      expect(cancelled?.status).toBe("cancelled");
+      expect(cancelled?.startedAt).toBeNull(); // the shape that made this a trap
+
+      const second = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "second" },
+        }),
+      );
+      expect(second.coalesced).toBe(false);
+      expect(second.runId).not.toBe(first.runId);
+      const [fresh] = await db.select().from(runs).where(eq(runs.id, second.runId));
+      expect(fresh?.status).toBe("queued");
+      expect(fresh?.steeringMessage).toBe("second");
+    });
+
+    it("two messages sent at once produce one follow-up, not two", async () => {
+      // Honest about its reach: this asserts the OUTCOME of a burst, not the
+      // lock that guarantees it. Both orderings of the task-row `for update`
+      // pass here — two in-process requests do not reliably interleave their
+      // transactions — so the lock-before-read ordering is argued in the
+      // handler's comment rather than demonstrated below. Kept because the
+      // outcome is still worth pinning, and labelled because a test that reads
+      // as race coverage without being it is worse than no test at all.
+      const { runId: parentId } = await finishedRun();
+      const [a, b] = await Promise.all([
+        admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "one" },
+        }),
+        admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "two" },
+        }),
+      ]);
+      expect([a?.status, b?.status]).toEqual([202, 202]);
+
+      const [parent] = await db.select().from(runs).where(eq(runs.id, parentId));
+      const followups = await db
+        .select()
+        .from(runs)
+        .where(
+          and(eq(runs.workspaceKey, parent?.workspaceKey as string), eq(runs.kind, "followup")),
+        );
+      expect(followups).toHaveLength(1);
+      // both messages are on it, in whichever order they committed
+      expect(followups[0]?.steeringMessage).toContain("one");
+      expect(followups[0]?.steeringMessage).toContain("two");
+    });
+
+    it("a message sent while a follow-up runs parents to the ACTIVE link", async () => {
+      // The message becomes the next link in the chain, so what it continues
+      // is the conversation currently in flight — parenting to the run the
+      // reader happened to be looking at would inherit a session a link stale.
+      const { runId: parentId } = await finishedRun();
+      const first = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "first" },
+        }),
+      );
+      // the first link starts, so the coalescing CAS can no longer absorb
+      await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, first.runId));
+
+      const second = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "second" },
+        }),
+      );
+      expect(second.coalesced).toBe(false);
+      const [row] = await db.select().from(runs).where(eq(runs.id, second.runId));
+      expect(row?.parentRunId).toBe(first.runId);
+      expect(row?.parentRunId).not.toBe(parentId);
+    });
+
+    it("refuses an unfinished run, and one whose workspace has been collected", async () => {
+      const { runId: parentId } = await finishedRun();
+      await db.update(runs).set({ status: "running" }).where(eq(runs.id, parentId));
+      const active = await admin.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "too soon" },
+      });
+      expect(active.status).toBe(409);
+      expect((await jsonOf<{ code: string }>(active)).code).toBe("run_active");
+
+      // released and past its retention: the workspace may already be gone, so
+      // the honest answer is a 409 rather than a charged run that fails
+      // workspace_lost on a worker
+      await db
+        .update(runs)
+        .set({
+          status: "succeeded",
+          finishedAt: new Date(),
+          workspaceExpiresAt: sql`now() - interval '1 minute'`,
+        })
+        .where(eq(runs.id, parentId));
+      const expired = await admin.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "too late" },
+      });
+      expect(expired.status).toBe(409);
+      expect((await jsonOf<{ code: string }>(expired)).code).toBe("workspace_expired");
+    });
+
+    it("audits the follow-up and requires project membership", async () => {
+      const { runId: parentId } = await finishedRun();
+      const stranger = await signUp(app, "Stranger", `out-${Bun.randomUUIDv7()}@example.com`);
+      const denied = await stranger.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "not mine" },
+      });
+      expect(denied.status).toBe(403);
+
+      const res = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "mine" },
+        }),
+      );
+      const audits = await db.select().from(auditLogs).where(eq(auditLogs.action, "run.followup"));
+      expect(audits.some((a) => a.resourceId === res.runId)).toBe(true);
+    });
   });
 });

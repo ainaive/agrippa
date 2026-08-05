@@ -33,6 +33,13 @@ export const runtimes = pgTable(
     version: text("version"),
     /** Same advertisement shape central workers write to worker_heartbeats. */
     executors: jsonb("executors").$type<WorkerExecutorAd[]>().notNull().default([]),
+    /**
+     * Behaviours this daemon build claims (RUNTIME_FEATURES in @agrippa/core).
+     * Empty means an older build — which is not the same as a limited one: a
+     * daemon that ignores the workspace key clones fresh and reports success,
+     * so work that depends on the claim is refused rather than degraded.
+     */
+    features: jsonb("features").$type<string[]>().notNull().default([]),
     /** Bumped by register and heartbeat — the routing liveness watermark. */
     lastSeenAt: tstz("last_seen_at"),
     /** Set on first successful register (null = token issued, daemon never connected). */

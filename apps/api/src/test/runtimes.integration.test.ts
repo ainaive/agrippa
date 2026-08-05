@@ -4,6 +4,7 @@ import {
   auditLogs,
   dispatchEvents,
   dispatches,
+  newRunIdentity,
   orchestrationTemplates,
   projects,
   runSteps,
@@ -100,6 +101,7 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
       hostname: "mba.local",
       version: "0.1.0",
       executors: [{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }],
+      features: ["workspace-key", "some-future-thing"],
     });
     expect(res.status).toBe(200);
     const body = await jsonOf<{ runtimeId: string; hints: { keepaliveSec: number } }>(res);
@@ -111,6 +113,9 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     expect(row?.registeredAt).not.toBeNull();
     expect(row?.lastSeenAt).not.toBeNull();
     expect(row?.executors.map((e) => e.id)).toEqual(["claude-agent-sdk"]);
+    // stored verbatim, unknown members included: a newer daemon claiming
+    // something this server has not heard of is forward compatibility
+    expect(row?.features).toEqual(["workspace-key", "some-future-thing"]);
 
     const audits = await db
       .select()
@@ -119,6 +124,15 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     expect(audits).toHaveLength(1);
     expect(audits[0]?.actorRuntimeId).toBe(runtimeId);
     expect(audits[0]?.actorUserId).toBeNull();
+
+    // an older daemon omits the field entirely and registers fine — it simply
+    // claims nothing, and work that depends on a claim is refused there
+    await daemonRequest("/register", {
+      hostname: "mba.local",
+      executors: [{ id: "claude-agent-sdk" }],
+    });
+    const [older] = await db.select().from(runtimes).where(eq(runtimes.id, runtimeId));
+    expect(older?.features).toEqual([]);
   });
 
   it("register rejects queue-unsafe and non-catalog executor ids", async () => {
@@ -151,7 +165,10 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     const [after] = await db.select().from(runtimes).where(eq(runtimes.id, runtimeId));
     expect(after?.lastSeenAt?.getTime()).toBeGreaterThan(before?.lastSeenAt?.getTime() ?? 0);
     const audits = await db.select().from(auditLogs).where(eq(auditLogs.resourceType, "runtime"));
-    expect(audits.map((a) => a.action).sort()).toEqual(["runtime.create", "runtime.register"]);
+    expect([...new Set(audits.map((a) => a.action))].sort()).toEqual([
+      "runtime.create",
+      "runtime.register",
+    ]);
   });
 
   it("revoke kills the token immediately", async () => {
@@ -266,6 +283,7 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     const [run] = await db
       .insert(runs)
       .values({
+        ...newRunIdentity(),
         taskId: task?.id as string,
         projectId: project?.id as string,
         number: 1,
@@ -280,28 +298,90 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     runId = run?.id as string;
   });
 
-  it("names this runtime's finished runs so the daemon can reap their workspaces", async () => {
+  it("names this runtime's spent workspaces — and only once the whole chain released", async () => {
     // Affinity gives the daemon a run's workspace for the run's whole life, so
     // only the server — where the engine finalizes, even for a remote executor
     // — can say when the directory is spent. Without this every remote run
     // leaves a clone on the daemon host permanently.
-    const pinned = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
-    expect(pinned.reapableRunIds ?? []).not.toContain(runId);
+    const pinned = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(pinned.reapableWorkspaceKeys ?? []).not.toContain(runId);
+
+    // Released, and the window passed: now the directory is spent.
+    await db
+      .update(runs)
+      .set({
+        runtimeId,
+        status: "succeeded",
+        finishedAt: sql`now()`,
+        workspaceExpiresAt: sql`now() + interval '1 hour'`,
+      })
+      .where(eq(runs.id, runId));
+    const withinWindow = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(withinWindow.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
     await db
       .update(runs)
-      .set({ runtimeId, status: "succeeded", finishedAt: sql`now()` })
+      .set({ workspaceExpiresAt: sql`now() - interval '1 minute'` })
       .where(eq(runs.id, runId));
-    const done = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
-    expect(done.reapableRunIds).toContain(runId);
+    const done = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(done.reapableWorkspaceKeys).toContain(runId);
 
-    // never another runtime's, and never one that is still going
-    const foreign = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim(otherToken));
-    expect(foreign.reapableRunIds ?? []).not.toContain(runId);
+    // A finished run with NO expiry counts as released too — it either
+    // predates retention (the engine deleted its workspace on the spot) or
+    // lost the release write, and both must reclaim rather than leak forever.
+    await db.update(runs).set({ workspaceExpiresAt: null }).where(eq(runs.id, runId));
+    const legacy = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(legacy.reapableWorkspaceKeys).toContain(runId);
 
-    await db.update(runs).set({ status: "running" }).where(eq(runs.id, runId));
-    const live = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
-    expect(live.reapableRunIds ?? []).not.toContain(runId);
+    // never another runtime's
+    const foreign = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(
+      await daemonClaim(otherToken),
+    );
+    expect(foreign.reapableWorkspaceKeys ?? []).not.toContain(runId);
+
+    // A follow-up sharing the key holds the whole workspace: eligibility is a
+    // property of the GROUP, so one live run keeps the directory even though
+    // its ancestor released long ago. Reaping here would not cost a re-clone —
+    // it would silently drop the completed steps' work.
+    const [followup] = await db
+      .insert(runs)
+      .values({
+        ...newRunIdentity(),
+        workspaceKey: runId, // inherited
+        kind: "followup",
+        parentRunId: runId,
+        taskId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.taskId as string,
+        projectId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.projectId as string,
+        number: 2,
+        templateVersionId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]
+          ?.templateVersionId as string,
+        faberId: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.faberId as string,
+        executorId: "fake",
+        paramsSnapshot: {},
+        modelResolution: {},
+        runtimeId,
+        createdBy: (await db.select().from(runs).where(eq(runs.id, runId)))[0]?.createdBy as string,
+      })
+      .returning();
+    const held = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(held.reapableWorkspaceKeys ?? []).not.toContain(runId);
+
+    // and it is collectable again once the follow-up releases too
+    await db
+      .update(runs)
+      .set({ workspaceExpiresAt: sql`now() - interval '1 second'` })
+      .where(eq(runs.id, followup?.id as string));
+    const collectable = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(collectable.reapableWorkspaceKeys).toContain(runId);
+    // restore the whole pre-test shape, not just the expiry: this test itself
+    // establishes that a FINISHED run with a null expiry is reapable, so
+    // leaving status/finishedAt/runtimeId set would hand every later test in
+    // this file a permanently reapable, runtime-pinned run
+    await db.delete(runs).where(eq(runs.id, followup?.id as string));
+    await db
+      .update(runs)
+      .set({ workspaceExpiresAt: null, finishedAt: null, runtimeId: null, status: "queued" })
+      .where(eq(runs.id, runId));
   });
 
   it("claim is atomic, oldest-first, and scoped to the runtime", async () => {

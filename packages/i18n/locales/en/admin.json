@@ -100,6 +100,8 @@
       "lastSeen": "Last seen {{time}}",
       "neverConnected": "Never connected",
       "offline": "Offline",
+      "outdated": "Upgrade needed",
+      "outdatedHint": "This daemon is an older build. Follow-up runs are refused here rather than risk continuing in the wrong workspace — rebuild and restart it to enable them.",
       "revoked": "Revoked",
       "revoke": "Revoke token"
     }

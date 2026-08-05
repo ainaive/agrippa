@@ -1,3 +1,4 @@
+import type { ResumeCapability } from "@agrippa/core";
 import type { ExecutionContext, Executor, ExecutorEvent, StepExecutionRequest } from "./types";
 
 export type FakeStepBehavior =
@@ -14,6 +15,19 @@ export type FakeStepBehavior =
   | { kind: "script"; events: ExecutorEvent[] };
 
 export type FakeUsage = { inputTokens: number; outputTokens: number };
+
+/**
+ * What the fake claims about a resume it was asked to perform — scripted per
+ * step, orthogonal to whether the step succeeds:
+ *
+ * - `honored` — continued the session (the default when a session id arrives,
+ *   which is what the crash-recovery tests have always assumed);
+ * - `rejected` — started fresh and says so, the case the engine must disclose;
+ * - `omit` — started fresh and says NOTHING, i.e. an executor that claims
+ *   `verified` and lies by silence. "Fails closed" is untestable until the
+ *   fake can lie, so this is part of the compliance contract, not a nicety.
+ */
+export type FakeResumeReport = "honored" | "rejected" | "omit";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -40,12 +54,12 @@ function usageEvent(model: string, usage: FakeUsage): ExecutorEvent {
  */
 export class FakeExecutor implements Executor {
   readonly id = "fake";
-  readonly capabilities = {
-    subagents: true,
-    mcp: true,
-    skills: true,
-    resume: false,
-    streaming: true,
+  readonly capabilities: {
+    subagents: boolean;
+    mcp: boolean;
+    skills: boolean;
+    resume: ResumeCapability;
+    streaming: boolean;
   };
 
   /** step id → attempts observed (for retry assertions). */
@@ -54,17 +68,43 @@ export class FakeExecutor implements Executor {
   readonly requests: StepExecutionRequest[] = [];
   /** undefined = no env-auth gating (the default for demo/compliance runs). */
   readonly envAuthProviders?: readonly string[];
+  private readonly resumeReports: Record<string, FakeResumeReport>;
 
   constructor(
     private readonly script: Record<string, FakeStepBehavior> = {},
-    opts: { envAuthProviders?: readonly string[] } = {},
+    opts: {
+      envAuthProviders?: readonly string[];
+      /**
+       * Advertised resume capability; `verified` is what earns a session id.
+       * Defaults to `verified` — the crash-recovery path is part of what this
+       * fake exists to prove, and defaulting to `none` would silently switch
+       * the engine's resume plumbing off for the whole suite while every test
+       * kept passing. Weaker values are opted into by the tests about them.
+       */
+      resume?: ResumeCapability;
+      /** Per-step resume outcome, same `<stepId>@<iteration>` keying as the script. */
+      resumeReports?: Record<string, FakeResumeReport>;
+    } = {},
   ) {
     this.envAuthProviders = opts.envAuthProviders;
+    this.capabilities = {
+      subagents: true,
+      mcp: true,
+      skills: true,
+      resume: opts.resume ?? "verified",
+      streaming: true,
+    };
+    this.resumeReports = opts.resumeReports ?? {};
   }
 
   /** `<stepId>@<iteration>` keys override the bare step id (loop-round scripting). */
   behaviorFor(stepId: string, iteration = 1): FakeStepBehavior {
     return this.script[`${stepId}@${iteration}`] ?? this.script[stepId] ?? { kind: "succeed" };
+  }
+
+  /** Default `honored`: a scripted resume that says nothing is the normal case. */
+  resumeReportFor(stepId: string, iteration = 1): FakeResumeReport {
+    return this.resumeReports[`${stepId}@${iteration}`] ?? this.resumeReports[stepId] ?? "honored";
   }
 
   async *executeStep(
@@ -76,7 +116,18 @@ export class FakeExecutor implements Executor {
     this.attempts.set(req.stepId, attempt);
     const behavior = this.behaviorFor(req.stepId, req.iteration ?? 1);
 
-    yield { type: "step.started", sessionId: `fake-${req.stepId}-${attempt}` };
+    // Nothing to report when no session id arrived — there was no resume to
+    // honor. A honored resume keeps the session it continued, which is what
+    // makes "did we get the session we asked for?" a real comparison.
+    const report = req.resumeSessionId
+      ? this.resumeReportFor(req.stepId, req.iteration ?? 1)
+      : null;
+    yield {
+      type: "step.started",
+      sessionId:
+        report === "honored" ? (req.resumeSessionId as string) : `fake-${req.stepId}-${attempt}`,
+      ...(report === "honored" || report === "rejected" ? { resumed: report } : {}),
+    };
 
     switch (behavior.kind) {
       case "script": {

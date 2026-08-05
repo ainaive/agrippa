@@ -287,6 +287,16 @@ export const commentCreateSchema = z.object({
 });
 export type CommentCreateInput = z.infer<typeof commentCreateSchema>;
 
+/**
+ * One steering message on a finished run (ADR-0018). Bounded like a comment,
+ * because it is one: the message is written to the run's thread as well as
+ * carried into the follow-up's prompt.
+ */
+export const followupCreateSchema = z.object({
+  message: z.string().min(1).max(4000),
+});
+export type FollowupCreateInput = z.infer<typeof followupCreateSchema>;
+
 export const grantsPutSchema = z.array(
   z.object({
     resourceType: z.enum(RESOURCE_TYPES),

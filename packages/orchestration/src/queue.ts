@@ -141,6 +141,20 @@ export async function createRunQueue(
       await ensureQueue(name);
       await boss.send(name, { runId }, { singletonKey: runId, retryLimit: 2, retryDelay: 5 });
     },
+    async enqueueRunAfter(runId: string, delaySeconds: number): Promise<void> {
+      const executorIds = await opts.resolveRunExecutors(runId);
+      if (executorIds.length === 0) {
+        throw new Error(`enqueueRunAfter: cannot derive an executor set for run ${runId}`);
+      }
+      const name = runExecuteQueueName(executorIds);
+      await ensureQueue(name);
+      await boss.sendAfter(
+        name,
+        { runId },
+        { singletonKey: runId, retryLimit: 2, retryDelay: 5 },
+        delaySeconds,
+      );
+    },
     async enqueueApprovalExpiry(payload: ApprovalExpirePayload, atMs: number): Promise<void> {
       await boss.sendAfter(
         QUEUE_APPROVAL_EXPIRE,

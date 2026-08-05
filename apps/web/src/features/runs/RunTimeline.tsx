@@ -1,4 +1,6 @@
-import { useMutation } from "@tanstack/react-query";
+import { isTerminalRunStatus, runHoldsWorkspace } from "@agrippa/core";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import {
   CircleCheckIcon,
   CircleXIcon,
@@ -6,6 +8,7 @@ import {
   GitBranchIcon,
   GitPullRequestIcon,
   MessageSquareIcon,
+  PlayIcon,
   RepeatIcon,
   SendIcon,
   SkipForwardIcon,
@@ -21,11 +24,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import type { RunEvent } from "@/features/useRunEvents";
 import { ApiError, api } from "@/lib/api";
-import { formatTime, lt } from "@/lib/format";
+import { formatTime, lt, submitChord } from "@/lib/format";
 import type { Artifact, Checkpoint, Run } from "@/lib/types";
 import { CheckpointPanel } from "./CheckpointPanel";
 
-type TurnItem = {
+export type TurnItem = {
   kind: "turn";
   seq: number;
   stepId: string;
@@ -46,7 +49,8 @@ type TimelineItem =
   | { kind: "system"; seq: number; icon: "workspace" | "branch" | "loop" | "skip"; label: string }
   | { kind: "pr"; seq: number; url: string; branch: string };
 
-function buildTimeline(
+/** Exported for test: the two-starts-per-step rule is worth pinning directly. */
+export function buildTimeline(
   events: RunEvent[],
   run: Run,
   t: (key: string, opts?: Record<string, unknown>) => string,
@@ -78,6 +82,13 @@ function buildTimeline(
         break;
       }
       case "step.started": {
+        // A step can start twice under one key: a crash-resume re-runs the
+        // attempt, and a rejected resume re-invokes it disclosed. The earlier
+        // turn is over either way — without closing it the timeline keeps a
+        // spinner that nothing will ever complete, because step.completed
+        // resolves through the map below and finds only the newer turn.
+        const superseded = openTurns.get(stepKey);
+        if (superseded) superseded.done = true;
         const turn: TurnItem = {
           kind: "turn",
           seq: event.seq,
@@ -326,6 +337,8 @@ export function RunTimeline({
 }) {
   const { t } = useTranslation(["runs", "common"]);
   const [comment, setComment] = useState("");
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const endRef = useRef<HTMLDivElement | null>(null);
   const items = useMemo(() => buildTimeline(events, run, t), [events, run, t]);
   // slot names live on run_steps.agentRef; the event stream carries them too —
@@ -342,6 +355,53 @@ export function RunTimeline({
       toast.error(error instanceof ApiError ? error.message : String(error));
     },
   });
+
+  /**
+   * Steering (ADR-0018): the same box, a different destination. The message
+   * lands on this run's thread either way — the endpoint writes the comment
+   * itself — so the visible difference is that the agent is asked to continue.
+   */
+  // one rule, shared with the server's group-level SQL — see runHoldsWorkspace.
+  // Re-evaluated when the workspace expires, not only on render: a tab left
+  // open past the window would otherwise keep offering Continue, and the click
+  // would come back 409 workspace_expired.
+  const [, setExpiryTick] = useState(0);
+  useEffect(() => {
+    if (!run.workspaceExpiresAt) return;
+    const remaining = new Date(run.workspaceExpiresAt).getTime() - Date.now();
+    if (remaining <= 0) return;
+    const timer = setTimeout(() => setExpiryTick((n) => n + 1), remaining);
+    return () => clearTimeout(timer);
+  }, [run.workspaceExpiresAt]);
+  // expiry only governs runs that HAVE a workspace: one without a directory
+  // never loses it, and the API steers those past the window
+  const steerable =
+    isTerminalRunStatus(run.status) && (!run.usesWorkspace || runHoldsWorkspace(run));
+  const sendFollowup = useMutation({
+    mutationFn: () =>
+      api<{ runId: string; number: number; coalesced: boolean }>(`/runs/${runId}/followup`, {
+        method: "POST",
+        json: { message: comment },
+      }),
+    onSuccess: (result) => {
+      setComment("");
+      void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+      // a coalesced message joins the follow-up already queued, so both cases
+      // land the reader on the run that will do the work
+      void navigate({
+        to: "/projects/$projectId/runs/$runId",
+        params: { projectId: run.projectId, runId: result.runId },
+      });
+    },
+    onError: (error) => {
+      toast.error(error instanceof ApiError ? error.message : String(error));
+    },
+  });
+
+  // BOTH paths write a comment — the follow-up endpoint writes one itself — so
+  // one guard across both buttons and the shortcut, or a fast double-click
+  // leaves two identical entries on the thread.
+  const isSubmitting = postComment.isPending || sendFollowup.isPending;
 
   const itemCount = items.length;
   // follow the stream: re-scroll whenever a new timeline item lands, not only
@@ -436,23 +496,42 @@ export function RunTimeline({
           <Textarea
             rows={1}
             className="min-h-9"
-            placeholder={t("runs:comments.placeholder")}
+            placeholder={t(steerable ? "runs:followup.placeholder" : "runs:comments.placeholder", {
+              shortcut: submitChord(),
+            })}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && comment.trim()) {
+              if (
+                e.key === "Enter" &&
+                (e.metaKey || e.ctrlKey) &&
+                comment.trim() &&
+                !isSubmitting
+              ) {
                 postComment.mutate();
               }
             }}
           />
           <Button
             size="sm"
-            disabled={!comment.trim() || postComment.isPending}
+            variant={steerable ? "outline" : "default"}
+            disabled={!comment.trim() || isSubmitting}
             onClick={() => postComment.mutate()}
           >
             <SendIcon />
             {t("runs:comments.send")}
           </Button>
+          {steerable ? (
+            <Button
+              size="sm"
+              disabled={!comment.trim() || isSubmitting}
+              onClick={() => sendFollowup.mutate()}
+              title={t("runs:followup.hint")}
+            >
+              <PlayIcon />
+              {t("runs:followup.send")}
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </div>

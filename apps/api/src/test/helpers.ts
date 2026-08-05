@@ -132,6 +132,7 @@ export async function jsonOf<T = Record<string, unknown>>(res: Response): Promis
 export function makeFakeQueue(overrides: Partial<RunQueue> = {}): RunQueue {
   return {
     enqueueRun: async () => {},
+    enqueueRunAfter: async () => {},
     enqueueApprovalExpiry: async () => {},
     enqueueNotificationDelivery: async () => {},
     registerSchedule: async () => {},

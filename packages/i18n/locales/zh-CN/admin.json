@@ -100,6 +100,8 @@
       "lastSeen": "最近上线 {{time}}",
       "neverConnected": "从未连接",
       "offline": "离线",
+      "outdated": "需要升级",
+      "outdatedHint": "该守护进程版本较旧。后续追加运行不会派发到这里，以免在错误的工作区里继续；重新构建并重启即可启用。",
       "revoked": "已撤销",
       "revoke": "撤销令牌"
     }

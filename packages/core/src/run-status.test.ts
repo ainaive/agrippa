@@ -5,6 +5,7 @@ import {
   isTerminalRunStatus,
   RUN_STATUSES,
   type RunStatus,
+  runHoldsWorkspace,
   transitionRun,
 } from "./run-status";
 
@@ -47,5 +48,41 @@ describe("run state machine", () => {
         expect(canTransitionRun(from, to)).toBe(false);
       }
     }
+  });
+});
+
+describe("runHoldsWorkspace (steerability, ADR-0018)", () => {
+  const hour = 60 * 60 * 1000;
+
+  it("a live run holds it: nothing has released yet", () => {
+    expect(runHoldsWorkspace({ finishedAt: null, workspaceExpiresAt: null })).toBe(true);
+  });
+
+  it("a finished run holds it until its expiry passes", () => {
+    const finishedAt = new Date(Date.now() - hour);
+    expect(runHoldsWorkspace({ finishedAt, workspaceExpiresAt: new Date(Date.now() + hour) })).toBe(
+      true,
+    );
+    expect(
+      runHoldsWorkspace({ finishedAt, workspaceExpiresAt: new Date(Date.now() - 60_000) }),
+    ).toBe(false);
+  });
+
+  it("a finished run with NO expiry has already released", () => {
+    // runs that finalized before retention existed, and any whose release
+    // write was lost. Reading these as "held" is what made the SPA offer a
+    // Continue button on every historical run, each of which the API refused.
+    expect(
+      runHoldsWorkspace({ finishedAt: new Date(Date.now() - hour), workspaceExpiresAt: null }),
+    ).toBe(false);
+  });
+
+  it("accepts the ISO strings the API actually serves", () => {
+    expect(
+      runHoldsWorkspace({
+        finishedAt: new Date(Date.now() - hour).toISOString(),
+        workspaceExpiresAt: new Date(Date.now() + hour).toISOString(),
+      }),
+    ).toBe(true);
   });
 });

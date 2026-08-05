@@ -8,13 +8,19 @@ import {
   encryptSecret,
   loadSecretKey,
   migrateDb,
-  orgs,
+  newRunIdentity,
+  orchestrationTemplates,
   projects,
   repoConnections,
+  runs,
   secrets,
+  seed,
+  tasks,
+  taskTypes,
   users,
 } from "@agrippa/db";
-import { sql } from "drizzle-orm";
+import { seedBuiltinTemplates } from "@agrippa/orchestration";
+import { eq, sql } from "drizzle-orm";
 
 // WORKSPACE_ROOT is read at module load — point it at a scratch dir BEFORE
 // importing the workspace module
@@ -30,6 +36,7 @@ const {
 const { GitScmService, gitcodeCredentialedUrl } = await import("./scm");
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
+const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates");
 const db = createDb(TEST_DATABASE_URL);
 let dbUp = true;
 try {
@@ -69,7 +76,12 @@ function makeSourceRepo(): string {
 }
 
 describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
-  const runId = crypto.randomUUID();
+  // A REAL run row, because both services now resolve a run to its workspace
+  // key before touching the filesystem (ADR-0018 Decision 3) — a bare uuid
+  // would exercise a path that cannot happen in production.
+  let runId: string;
+  /** The directory identity behind that run — its own id, since it is not a follow-up. */
+  let workspaceKey: string;
   const publishBranch = "agrippa/run-1-abcd1234";
   let orgId: string;
   let projectId: string;
@@ -77,34 +89,107 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   let sourceDir: string;
   let workspace: InstanceType<typeof GitWorkspaceManager>;
   let scm: InstanceType<typeof GitScmService>;
+  // enough of a run's ancestry to insert more of them: several tests want a
+  // second, independent workspace, and every one now needs a real row behind it
+  let taskId: string;
+  let templateVersionId: string;
+  let faberId: string;
+  let userId: string;
+  let runNumber = 1;
+
+  /** Another run of the same task — a fresh workspace key, like any new run. */
+  const newRunRow = async (): Promise<string> => {
+    runNumber += 1;
+    const [row] = await db
+      .insert(runs)
+      .values({
+        ...newRunIdentity(),
+        taskId,
+        projectId,
+        number: runNumber,
+        templateVersionId,
+        faberId,
+        executorId: "fake",
+        paramsSnapshot: {},
+        modelResolution: {},
+        createdBy: userId,
+      })
+      .returning();
+    return row?.id as string;
+  };
 
   beforeAll(async () => {
     await db.execute(sql`drop schema if exists public cascade`);
     await db.execute(sql`create schema public`);
     await db.execute(sql`drop schema if exists drizzle cascade`);
     await migrateDb(db);
+    // seeded org/fabri/templates: a run row needs a task, a task type and a
+    // published template version behind it
+    await seed(db);
+    await seedBuiltinTemplates(db, TEMPLATES_DIR);
 
-    const [org] = await db.insert(orgs).values({ slug: "ws", name: "WS" }).returning();
-    orgId = org?.id as string;
+    const orgRows = (await db.execute(sql`select id from orgs limit 1`)) as Array<{ id: string }>;
+    orgId = orgRows[0]?.id as string;
     const [user] = await db
       .insert(users)
       .values({
         id: Bun.randomUUIDv7(),
         name: "WS Tester",
         email: "ws@example.com",
-        orgId: org?.id as string,
+        orgId,
       })
       .returning();
     const [project] = await db
       .insert(projects)
       .values({
-        orgId: org?.id as string,
+        orgId,
         slug: "ws",
         name: "WS",
         createdBy: user?.id as string,
       })
       .returning();
     projectId = project?.id as string;
+
+    const [template] = await db
+      .select()
+      .from(orchestrationTemplates)
+      .where(eq(orchestrationTemplates.slug, "swdev.bug-localize-fix"));
+    const [taskType] = await db
+      .select()
+      .from(taskTypes)
+      .where(eq(taskTypes.templateId, template?.id as string));
+    const [task] = await db
+      .insert(tasks)
+      .values({
+        orgId,
+        projectId,
+        taskTypeId: taskType?.id as string,
+        title: "workspace fixture",
+        params: {},
+        createdBy: user?.id as string,
+      })
+      .returning();
+    taskId = task?.id as string;
+    templateVersionId = template?.latestPublishedVersionId as string;
+    faberId = taskType?.defaultFaberId as string;
+    userId = user?.id as string;
+    const [run] = await db
+      .insert(runs)
+      .values({
+        ...newRunIdentity(),
+        taskId,
+        projectId,
+        number: 1,
+        templateVersionId: template?.latestPublishedVersionId as string,
+        faberId: taskType?.defaultFaberId as string,
+        executorId: "fake",
+        paramsSnapshot: {},
+        modelResolution: {},
+        createdBy: user?.id as string,
+      })
+      .returning();
+    runId = run?.id as string;
+    workspaceKey = run?.workspaceKey as string;
 
     sourceDir = makeSourceRepo();
     const [conn] = await db
@@ -129,8 +214,8 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("records the clone base and keeps sanitization out of the diff", async () => {
-    const dir = workspaceDirFor(runId);
-    const base = await platformBaseSha(runId);
+    const dir = workspaceDirFor(workspaceKey);
+    const base = await platformBaseSha(workspaceKey);
     expect(base).toMatch(/^[0-9a-f]{40}$/);
     // .claude was stripped by sanitizeWorkspace, but the diff must not report
     // its deletion in every patch
@@ -139,7 +224,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("includes committed, staged, and untracked changes in the diff", async () => {
-    const dir = workspaceDirFor(runId);
+    const dir = workspaceDirFor(workspaceKey);
     await Bun.write(path.join(dir, "README.md"), "# Source\n\ncommitted line\n");
     await gitIn(dir, ["add", "-A"]);
     await gitIn(dir, ["commit", "-m", "feat: committed change"]);
@@ -151,7 +236,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("keeps sanitized paths out of diffs and agent commits", async () => {
-    const dir = workspaceDirFor(runId);
+    const dir = workspaceDirFor(workspaceKey);
     // platform-materialized + agent-created files under the sanitized paths —
     // none of this may appear in evidence or ship in a commit
     await Bun.write(path.join(dir, ".claude", "skills", "demo", "SKILL.md"), "# skill\n");
@@ -176,7 +261,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
 
   it("publishes one idempotent snapshot commit with all legitimate changes", async () => {
     const branch = publishBranch;
-    const dir = workspaceDirFor(runId);
+    const dir = workspaceDirFor(workspaceKey);
     await Bun.write(path.join(dir, "left-uncommitted.txt"), "the agent forgot me\n");
     const approved = await workspace.diff(runId);
     const first = await scm.push(runId, {
@@ -224,7 +309,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("refuses to publish a run with no commits and no changes", async () => {
-    const emptyRunId = crypto.randomUUID();
+    const emptyRunId = await newRunRow();
     await workspace.checkout(emptyRunId, {
       repo: { repoConnectionId },
       access: "readWrite",
@@ -414,7 +499,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("never runs agent-installed hooks or honors agent git config in platform git", async () => {
-    const hostileRunId = crypto.randomUUID();
+    const hostileRunId = await newRunRow();
     await workspace.checkout(hostileRunId, {
       repo: { repoConnectionId },
       access: "readWrite",
@@ -472,7 +557,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("never follows an agent-controlled .git/config symlink", async () => {
-    const symlinkRunId = crypto.randomUUID();
+    const symlinkRunId = await newRunRow();
     await workspace.checkout(symlinkRunId, {
       repo: { repoConnectionId },
       access: "readWrite",
@@ -506,7 +591,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("never opens an agent-controlled .git/config FIFO", async () => {
-    const fifoRunId = crypto.randomUUID();
+    const fifoRunId = await newRunRow();
     await workspace.checkout(fifoRunId, {
       repo: { repoConnectionId },
       access: "readWrite",
@@ -538,7 +623,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("ignores an agent-corrupted index and exclude file when publishing", async () => {
-    const protectedRunId = crypto.randomUUID();
+    const protectedRunId = await newRunRow();
     await workspace.checkout(protectedRunId, {
       repo: { repoConnectionId },
       access: "readWrite",
@@ -581,7 +666,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     // whatever happens in the workspace after approval cannot reach the
     // published tree — the old refresh-and-compare drift guard is retired
     // because there is nothing to compare anymore.
-    const staleRunId = crypto.randomUUID();
+    const staleRunId = await newRunRow();
     await workspace.checkout(staleRunId, {
       repo: { repoConnectionId },
       access: "readWrite",
@@ -621,11 +706,11 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("reports a never-checked-out workspace as not intact", async () => {
-    expect(await workspace.isIntact(crypto.randomUUID())).toBe(false);
+    expect(await workspace.isIntact(await newRunRow())).toBe(false);
   });
 
   it("ignores agent tampering with the base ref — the sidecar SHA anchors evidence", async () => {
-    const dir = workspaceDirFor(runId);
+    const dir = workspaceDirFor(workspaceKey);
     await git(["update-ref", "-d", "refs/agrippa/base"], dir);
     await Bun.write(path.join(dir, "uncommitted.txt"), "worktree only\n");
 
@@ -635,7 +720,7 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
   });
 
   it("fails closed when trusted platform metadata is missing", async () => {
-    await rm(platformDirFor(runId), { recursive: true, force: true });
+    await rm(platformDirFor(workspaceKey), { recursive: true, force: true });
     expect(await workspace.isIntact(runId)).toBe(false);
     await expect(workspace.diff(runId)).rejects.toThrow(/trusted platform git base is missing/);
   });

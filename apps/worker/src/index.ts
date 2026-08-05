@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import {
   type ApprovalExpirePayload,
+  catalogCapabilityShortfall,
   EXECUTOR_CATALOG,
   isExecutorId,
   type NotificationDeliverPayload,
@@ -17,6 +18,7 @@ import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
 import {
   appendRunEvent,
+  collectExpiredWorkspaces,
   createRunQueue,
   DiskArtifactStore,
   dbRunExecutorResolver,
@@ -51,8 +53,16 @@ import {
 } from "./deps/readiness";
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitScmService } from "./deps/scm";
-import { GitWorkspaceManager } from "./deps/workspace";
+import { GitWorkspaceManager, removeWorkspace } from "./deps/workspace";
 import { selectRunQueues } from "./run-queues";
+
+/**
+ * Workspace keys this process has already collected, and when — so a key named
+ * on every tick for the rest of its window costs a lookup rather than an
+ * `rm -rf`, and the map is pruned to that window instead of growing with
+ * uptime. A restart simply re-collects, which is a no-op.
+ */
+const collectedWorkspaces = new Map<string, number>();
 
 const db = createDb();
 // inside a compose container the hostname IS the container id — the identity
@@ -99,14 +109,12 @@ if (codexProbe.ok) {
 // capability set here would let templates pass validation and fail at runtime
 for (const [id, executor] of Object.entries(executors)) {
   if (!isExecutorId(id)) throw new Error(`executor '${id}' is not in EXECUTOR_CATALOG`);
-  const expected = EXECUTOR_CATALOG[id].capabilities;
-  const actual = executor.capabilities as Record<string, boolean>;
-  for (const [flag, value] of Object.entries(expected)) {
-    // the catalog may promise less than the executor delivers, never more
-    if (value && !actual[flag]) {
-      throw new Error(`executor '${id}' lacks catalog capability '${flag}'`);
-    }
-  }
+  // the catalog may promise less than the executor delivers, never more
+  const short = catalogCapabilityShortfall(
+    EXECUTOR_CATALOG[id].capabilities,
+    executor.capabilities,
+  );
+  if (short) throw new Error(`executor '${id}' lacks catalog capability '${short}'`);
 }
 
 const workerAd = {
@@ -493,6 +501,25 @@ setInterval(async () => {
       for (const runId of await findStrandedCheckpointRuns(db)) {
         await enqueueAfterCommit(() => queue.enqueueRun(runId), `stranded ${runId}`);
       }
+    });
+
+    // Workspace collection (ADR-0018 Decision 4). Deleting used to be a
+    // finalize side effect, which cannot work once a directory outlives the
+    // run that made it: a key is collected only when every run sharing it has
+    // released it and the group's latest expiry has passed. Every worker runs
+    // this — the deletes are idempotent, and a worker that does not hold a
+    // directory removes nothing, so a fleet with a shared volume collects once
+    // and a fleet without one still collects on whichever host has the files.
+    await stage("workspaces", async () => {
+      await collectExpiredWorkspaces({
+        db,
+        remove: removeWorkspace,
+        collected: collectedWorkspaces,
+        logger: {
+          info: (msg: string) => deps.logger.info(msg),
+          warn: (msg: string) => deps.logger.warn(msg),
+        },
+      });
     });
 
     // delivery backstops: backfill missed events, re-enqueue stale rows

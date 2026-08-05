@@ -173,7 +173,13 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
   );
   return {
     id: "codex-cli",
-    capabilities: { subagents: false, mcp: false, skills: false, resume: true, streaming: true },
+    capabilities: {
+      subagents: false,
+      mcp: false,
+      skills: false,
+      resume: "verified",
+      streaming: true,
+    },
     // captured at construction: a keyless worker registers (project
     // credentials may cover its runs) but the engine defers any run whose
     // providers need env auth this worker doesn't have
@@ -185,13 +191,17 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
     ): AsyncIterable<ExecutorEvent> {
       clearExpectedArtifacts(req.workspaceDir, req.expectedArtifacts);
 
-      const collector = new CodexEventCollector(req.model.providerModelId);
+      const collector = new CodexEventCollector(req.model.providerModelId, req.resumeSessionId);
       const env = overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "openai");
       if (req.providerAuth) {
         // An ambient CODEX_HOME auth.json would outrank the project key, so
-        // the run gets its own home — per run, not per step, because resume
-        // sessions live under CODEX_HOME. Left for OS tmp reaping.
-        const home = path.join(tmpdir(), "agrippa-codex-home", req.runId);
+        // the invocation gets its own home. Scoped to the WORKSPACE, not the
+        // run (ADR-0018): resume threads live under CODEX_HOME, and a
+        // follow-up is a new run continuing the same workspace — keyed by run
+        // it could not find its own thread, then reported success as though it
+        // had. The workspace directory's own name is that key, on every host
+        // and both transports. Left for OS tmp reaping.
+        const home = path.join(tmpdir(), "agrippa-codex-home", path.basename(req.workspaceDir));
         mkdirSync(home, { recursive: true });
         env.CODEX_HOME = home;
       }
@@ -281,7 +291,20 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         }
       } finally {
         ctx.signal.removeEventListener("abort", onAbort);
-        if (killTimer) clearTimeout(killTimer);
+        // An early exit — the caller breaking out of the stream, which the
+        // engine now does the moment a resume is reported rejected — reaches
+        // here with SIGTERM sent and the SIGKILL escalation still pending.
+        // Clearing the timer without waiting cancels that escalation, so a
+        // process ignoring SIGTERM keeps running in the workspace while the
+        // disclosed retry starts in the SAME directory. Wait for it to be
+        // gone, and only then stop escalating.
+        if (killTimer) {
+          try {
+            await proc.exited;
+          } finally {
+            clearTimeout(killTimer);
+          }
+        }
       }
     },
   };

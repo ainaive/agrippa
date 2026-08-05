@@ -2,6 +2,7 @@ import {
   ARTIFACT_KINDS,
   CHECKPOINT_KINDS,
   type CheckpointStoredResponse,
+  type RunKind,
   type RunStatus,
   type StepStatus,
 } from "@agrippa/core";
@@ -10,6 +11,7 @@ import {
   type AnyPgColumn,
   bigserial,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -18,7 +20,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { createdAtCol, idCol, tstz } from "./_helpers";
+import { createdAtCol, idCol, tstz, uuidv7 } from "./_helpers";
 import { users } from "./auth";
 import { orgs } from "./orgs";
 import { projects } from "./projects";
@@ -78,6 +80,46 @@ export const runs = pgTable(
       .$type<{ mcpServers: string[]; skills: string[] }>()
       .notNull()
       .default({ mcpServers: [], skills: [] }),
+    // What this run is: `initial` is a first submission or a retry of one;
+    // `followup` continues its parent's workspace and session (ADR-0018).
+    kind: text("kind").$type<RunKind>().notNull().default("initial"),
+    // The run this one continues. NULL for everything but a follow-up; a chain
+    // of follow-ups points each at its immediate predecessor, not at the head.
+    parentRunId: uuid("parent_run_id").references((): AnyPgColumn => runs.id),
+    /**
+     * Which directory on some host holds this run's work (ADR-0018 Decision 3).
+     * Written at submit as the run's own id and INHERITED by a follow-up, so a
+     * steering chain shares one workspace — which is the whole point: the
+     * agent's branch, its uncommitted edits, and its session all live there.
+     *
+     * Writer-assigned rather than defaulted, because Postgres cannot default a
+     * column to another column of the same row. The identity that follows —
+     * for every run that is not a follow-up, the key IS the run id — is what
+     * keeps older daemons correct when the wire starts carrying keys.
+     */
+    workspaceKey: uuid("workspace_key").notNull(),
+    /**
+     * When this run stops needing its workspace (ADR-0018 Decision 4). NULL
+     * while the run is live — which is what protects the directory: collection
+     * groups by `workspace_key` and takes the group's LATEST expiry, so one
+     * unfinished run in the chain keeps the whole workspace, and a follow-up
+     * extends its ancestor's simply by existing. Stamped at finalize instead
+     * of deleting, because deleting was keyed on a run and the directory now
+     * outlives one.
+     */
+    workspaceExpiresAt: tstz("workspace_expires_at"),
+    /**
+     * What the operator asked for, on a follow-up (ADR-0018). Untrusted text
+     * on the same footing as a task parameter: the engine appends it to the
+     * step's instructions AFTER interpolation, so a message containing
+     * template syntax is delivered verbatim rather than evaluated.
+     *
+     * Also the coalescing buffer. A second message arriving before the run
+     * starts is appended here rather than spawning another run — the run row
+     * IS the burst window, which is why the append CAS requires
+     * `started_at IS NULL`.
+     */
+    steeringMessage: text("steering_message"),
     usageTotals: jsonb("usage_totals").$type<Record<string, unknown>>().notNull().default({}),
     // atomic per-run event-seq allocator (UPDATE … RETURNING); avoids max(seq)+1 races
     nextEventSeq: integer("next_event_seq").notNull().default(0),
@@ -120,6 +162,18 @@ export const runs = pgTable(
     // a re-delivered schedule/trigger job must not be able to charge twice
     uniqueIndex("runs_origin_key_uq").on(t.originKey).where(sql`${t.originKey} IS NOT NULL`),
     index("runs_project_idx").on(t.projectId, t.status),
+    // every workspace question is asked by key, not by run: who else shares
+    // this directory, and is any of them still alive (ADR-0018 Decisions 3–4)
+    index("runs_workspace_key_idx").on(t.workspaceKey),
+    // A follow-up without a parent has no session to inherit and no ancestor
+    // to name — and the engine keys the synthetic flow on `kind`, so such a
+    // row is a data error rather than a degraded run. Enforced here so it
+    // cannot be written at all (ADR-0018 Decision 1).
+    check("runs_followup_has_parent", sql`${t.kind} <> 'followup' or ${t.parentRunId} is not null`),
+    // the collector scans only expired rows, never the whole table
+    index("runs_workspace_expiry_idx")
+      .on(t.workspaceExpiresAt)
+      .where(sql`${t.workspaceExpiresAt} is not null`),
     // the expiry sweep scans only running runs
     index("runs_lease_sweep_idx").on(t.leaseExpiresAt).where(sql`${t.status} = 'running'`),
     // the daemon claim poll asks "which of my pinned runs are finished?" on
@@ -129,6 +183,19 @@ export const runs = pgTable(
       .where(sql`${t.runtimeId} is not null`),
   ],
 );
+
+/**
+ * A fresh run identity. The workspace key is writer-assigned (see the column),
+ * and for anything that is not a follow-up it is the run's own id — so the two
+ * are minted together rather than the caller remembering to pair them.
+ *
+ * A follow-up does NOT use this: it keeps a new id and inherits its parent's
+ * key, which is what makes the pair worth naming.
+ */
+export function newRunIdentity(): { id: string; workspaceKey: string } {
+  const id = uuidv7();
+  return { id, workspaceKey: id };
+}
 
 export const runSteps = pgTable(
   "run_steps",

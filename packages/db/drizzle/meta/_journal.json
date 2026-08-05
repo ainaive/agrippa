@@ -197,6 +197,41 @@
       "when": 1785807100178,
       "tag": "0027_run_runtime_reap_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1785892575695,
+      "tag": "0028_run_workspace_key",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1785894068525,
+      "tag": "0029_runtime_features",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1785894643901,
+      "tag": "0030_workspace_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1785895466192,
+      "tag": "0031_run_steering_message",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1785897458092,
+      "tag": "0032_followup_has_parent",
+      "breakpoints": true
     }
   ]
 }

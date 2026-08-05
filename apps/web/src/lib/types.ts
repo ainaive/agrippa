@@ -147,6 +147,8 @@ export type RunTemplate = {
   }>;
   limits: RunLimits;
   modelRoles: Record<string, { tier: string; fallback: string[] }>;
+  /** Whether the template declares a workspace — see Run.usesWorkspace. */
+  usesWorkspace: boolean;
 };
 
 export type RunAgentBinding = {
@@ -163,6 +165,26 @@ export type Run = {
   taskId: string;
   projectId: string;
   number: number;
+  /** `followup` continues `parentRunId` in the same workspace (ADR-0018). */
+  kind: "initial" | "followup";
+  parentRunId: string | null;
+  /** Run number of the parent, so "continues #N" needs no second request. */
+  parentRunNumber: number | null;
+  /** The operator's steering message, on a follow-up. */
+  steeringMessage: string | null;
+  /**
+   * When this run stops holding its workspace. Past it, the directory may be
+   * collected — which is what makes steering impossible, so the UI stops
+   * offering it rather than letting the API answer 409.
+   */
+  workspaceExpiresAt: string | null;
+  /**
+   * Whether this run has a workspace at all. A template with no `workspace:`
+   * block never had a directory to lose, so the expiry above says nothing
+   * about whether it can still be steered — the API permits those past the
+   * window, and the UI must not hide what the API allows.
+   */
+  usesWorkspace: boolean;
   status: RunStatus;
   templateVersionId: string;
   faberId: string;
