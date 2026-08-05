@@ -39,6 +39,18 @@ Everyone in the project sees the same live timeline; whoever responds to a check
 
 For delivery workflows, the final branch contains one platform-created snapshot commit whose tree exactly matches the reviewed patch. Agents may make local commits as working checkpoints, but that intermediate commit history is not carried into the pull request.
 
+## Continuing a finished run
+
+Sometimes the answer is nearly right. **Continue** appears beside the comment box on a finished run: write what you want changed — *"also handle the empty-list case"*, *"use the existing helper instead"* — and the agent picks up **in the same workspace, with everything it already knows**. No re-clone, no re-explaining, and the pipeline is not re-billed from the start.
+
+A few things worth knowing:
+
+- **It continues; it does not re-decide.** The follow-up keeps the template version, parameters, agents, models and resources the original run used. That is what makes "the same conversation" true — and it means a follow-up **cannot fix a configuration problem**. If the run failed because a model grant or a credential was wrong, fix that and use **Retry** instead.
+- **Several messages in a row become one run.** Send two thoughts in quick succession and they are delivered together rather than starting two runs. Once the follow-up begins, the next message becomes the next follow-up.
+- **Your message is always on the timeline**, immediately, whether or not the run starts promptly.
+- **There is a window.** A finished run holds its workspace for a while (one hour by default; an administrator can change it). After that the workspace is collected and **Continue** disappears — submit a new task instead.
+- **Publishing stays with the original run.** A follow-up produces an updated patch and diff you can read; pushing to the branch and opening the PR remain the first run's business.
+
 ## Cancel, retry, and failures
 
 - **Cancel** (members+) stops a run — immediately for queued/paused runs, at the next safe point for executing ones.

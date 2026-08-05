@@ -559,9 +559,23 @@ export const executionRoutes = new Hono<AppEnv>()
     // a `...run` spread would turn a column we may still want to repurpose —
     // a client-supplied idempotency key would live here — into a compatibility
     // surface nobody chose to declare.
-    const { originKey: _originKey, ...runView } = run;
+    // the workspace key goes the same way as originKey below: a real identity,
+    // but an internal one — the client works in runs, and shipping it would
+    // declare a compatibility surface nobody asked for
+    const { originKey: _originKey, workspaceKey: _workspaceKey, ...runView } = run;
+    // "continues #N" is a header chip; resolving the number here saves the SPA
+    // a second request for one integer
+    let parentRunNumber: number | null = null;
+    if (run.parentRunId) {
+      const [parent] = await c.var.db
+        .select({ number: runs.number })
+        .from(runs)
+        .where(eq(runs.id, run.parentRunId));
+      parentRunNumber = parent?.number ?? null;
+    }
     return c.json({
       ...runView,
+      parentRunNumber,
       template,
       agents,
       checkpoints: checkpointRows.map(({ row, deciderName }) => ({ ...row, deciderName })),

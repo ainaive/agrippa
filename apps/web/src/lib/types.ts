@@ -163,6 +163,19 @@ export type Run = {
   taskId: string;
   projectId: string;
   number: number;
+  /** `followup` continues `parentRunId` in the same workspace (ADR-0018). */
+  kind: "initial" | "followup";
+  parentRunId: string | null;
+  /** Run number of the parent, so "continues #N" needs no second request. */
+  parentRunNumber: number | null;
+  /** The operator's steering message, on a follow-up. */
+  steeringMessage: string | null;
+  /**
+   * When this run stops holding its workspace. Past it, the directory may be
+   * collected — which is what makes steering impossible, so the UI stops
+   * offering it rather than letting the API answer 409.
+   */
+  workspaceExpiresAt: string | null;
   status: RunStatus;
   templateVersionId: string;
   faberId: string;

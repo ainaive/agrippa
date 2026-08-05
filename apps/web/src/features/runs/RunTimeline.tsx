@@ -1,4 +1,6 @@
-import { useMutation } from "@tanstack/react-query";
+import { isTerminalRunStatus } from "@agrippa/core";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import {
   CircleCheckIcon,
   CircleXIcon,
@@ -6,6 +8,7 @@ import {
   GitBranchIcon,
   GitPullRequestIcon,
   MessageSquareIcon,
+  PlayIcon,
   RepeatIcon,
   SendIcon,
   SkipForwardIcon,
@@ -326,6 +329,8 @@ export function RunTimeline({
 }) {
   const { t } = useTranslation(["runs", "common"]);
   const [comment, setComment] = useState("");
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const endRef = useRef<HTMLDivElement | null>(null);
   const items = useMemo(() => buildTimeline(events, run, t), [events, run, t]);
   // slot names live on run_steps.agentRef; the event stream carries them too —
@@ -338,6 +343,35 @@ export function RunTimeline({
   const postComment = useMutation({
     mutationFn: () => api(`/runs/${runId}/comments`, { method: "POST", json: { body: comment } }),
     onSuccess: () => setComment(""),
+    onError: (error) => {
+      toast.error(error instanceof ApiError ? error.message : String(error));
+    },
+  });
+
+  /**
+   * Steering (ADR-0018): the same box, a different destination. The message
+   * lands on this run's thread either way — the endpoint writes the comment
+   * itself — so the visible difference is that the agent is asked to continue.
+   */
+  const steerable =
+    isTerminalRunStatus(run.status) &&
+    (run.workspaceExpiresAt === null || new Date(run.workspaceExpiresAt).getTime() > Date.now());
+  const sendFollowup = useMutation({
+    mutationFn: () =>
+      api<{ runId: string; number: number; coalesced: boolean }>(`/runs/${runId}/followup`, {
+        method: "POST",
+        json: { message: comment },
+      }),
+    onSuccess: (result) => {
+      setComment("");
+      void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+      // a coalesced message joins the follow-up already queued, so both cases
+      // land the reader on the run that will do the work
+      void navigate({
+        to: "/projects/$projectId/runs/$runId",
+        params: { projectId: run.projectId, runId: result.runId },
+      });
+    },
     onError: (error) => {
       toast.error(error instanceof ApiError ? error.message : String(error));
     },
@@ -436,7 +470,7 @@ export function RunTimeline({
           <Textarea
             rows={1}
             className="min-h-9"
-            placeholder={t("runs:comments.placeholder")}
+            placeholder={t(steerable ? "runs:followup.placeholder" : "runs:comments.placeholder")}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
             onKeyDown={(e) => {
@@ -447,12 +481,24 @@ export function RunTimeline({
           />
           <Button
             size="sm"
+            variant={steerable ? "outline" : "default"}
             disabled={!comment.trim() || postComment.isPending}
             onClick={() => postComment.mutate()}
           >
             <SendIcon />
             {t("runs:comments.send")}
           </Button>
+          {steerable ? (
+            <Button
+              size="sm"
+              disabled={!comment.trim() || sendFollowup.isPending}
+              onClick={() => sendFollowup.mutate()}
+              title={t("runs:followup.hint")}
+            >
+              <PlayIcon />
+              {t("runs:followup.send")}
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </div>

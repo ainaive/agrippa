@@ -149,6 +149,22 @@ export function RunDetailPage() {
                 {current.workBranch}
               </span>
             ) : null}
+            {/* a follow-up is only legible next to what it continues */}
+            {current.parentRunId && current.parentRunNumber !== null ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-1.5 text-xs text-muted-foreground"
+                onClick={() =>
+                  void navigate({
+                    to: "/projects/$projectId/runs/$runId",
+                    params: { projectId, runId: current.parentRunId as string },
+                  })
+                }
+              >
+                {t("followup.continues", { number: current.parentRunNumber })}
+              </Button>
+            ) : null}
           </>
         }
         actions={
