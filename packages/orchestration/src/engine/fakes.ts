@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { Db } from "@agrippa/db";
 import type { Logger, ResolvedMcpServer, ResolvedSkill } from "@agrippa/executor-core";
 import type {
   ArtifactStore,
@@ -10,21 +11,37 @@ import type {
   StoredArtifact,
   WorkspaceManager,
 } from "./deps";
+import { workspaceKeyOf } from "./run-lifecycle";
 
 /** In-memory engine dependencies for the integration suite and local dev. */
 
 export class FakeWorkspaceManager implements WorkspaceManager {
+  /** Keyed by WORKSPACE, like the real managers — see the constructor. */
   readonly dirs = new Map<string, string>();
   readonly checkouts: Array<{ runId: string; spec: unknown }> = [];
   readonly released: string[] = [];
   diffOutput = "diff --git a/fake b/fake\n";
   diffError: Error | null = null;
 
+  /**
+   * With a database handle this resolves runs to workspace keys exactly as the
+   * central and remote managers do (ADR-0018 Decision 3) — which is what lets
+   * the compliance suite prove that a follow-up continues its ancestor's
+   * directory rather than quietly getting a fresh one. Without a handle it
+   * degrades to run-keyed, for fixtures with no run rows.
+   */
+  constructor(private readonly db?: Db) {}
+
+  private async key(runId: string): Promise<string> {
+    return this.db ? await workspaceKeyOf(this.db, runId) : runId;
+  }
+
   async ensureDir(runId: string): Promise<string> {
-    let dir = this.dirs.get(runId);
+    const key = await this.key(runId);
+    let dir = this.dirs.get(key);
     if (!dir) {
-      dir = mkdtempSync(path.join(tmpdir(), `agrippa-run-${runId.slice(0, 8)}-`));
-      this.dirs.set(runId, dir);
+      dir = mkdtempSync(path.join(tmpdir(), `agrippa-ws-${key.slice(0, 8)}-`));
+      this.dirs.set(key, dir);
     }
     return dir;
   }
@@ -45,9 +62,19 @@ export class FakeWorkspaceManager implements WorkspaceManager {
     return this.intact;
   }
 
+  /**
+   * Records the release and keeps the directory, like the real central
+   * manager: deleting here is precisely what retention exists to stop, since
+   * a follow-up may still continue it. Tests that want the collected case
+   * flip `intact` or call `collect`.
+   */
   async release(runId: string): Promise<void> {
     this.released.push(runId);
-    this.dirs.delete(runId);
+  }
+
+  /** What the collector would do — drop the fake's memory of the directory. */
+  collect(workspaceKey: string): void {
+    this.dirs.delete(workspaceKey);
   }
 }
 

@@ -18,23 +18,35 @@ import { and, eq, isNull, sql } from "drizzle-orm";
  * who else is using the directory.
  */
 
+/**
+ * How long a finished run's workspace survives, and therefore how long its
+ * result can be steered — the two are the same number (ADR-0018 Decision 7):
+ * a follow-up attaches to the ancestor's directory, so once it is collected
+ * the only honest answer is `workspace_lost`.
+ *
+ * ADR-0018 Decision 4 proposed defaulting to zero to preserve today's
+ * behaviour until the collector was proven. Building Decision 7 showed the
+ * two cannot both hold: at zero the ancestor's workspace is collected on the
+ * next sweeper tick, so the follow-up a human types a minute later always
+ * fails. One hour is the smallest default that makes the feature real —
+ * enough to read a result and reply, short enough that a busy instance is not
+ * holding shallow clones all day. Raise it to inspect finished trees, set it
+ * to 0 to restore the old immediate collection (and give up steering).
+ *
+ * A live run in the chain holds its workspace regardless: eligibility is a
+ * property of the GROUP, so retention never races an unfinished follow-up.
+ */
+const DEFAULT_RETENTION_MINUTES = 60;
+
 /** Env is read per call: the daemon sets its root/config after import time. */
 function retentionMinutes(): number {
-  const raw = Number(process.env.AGRIPPA_WORKSPACE_RETENTION_MINUTES ?? "0");
-  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  const raw = process.env.AGRIPPA_WORKSPACE_RETENTION_MINUTES;
+  if (raw === undefined || raw === "") return DEFAULT_RETENTION_MINUTES;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_RETENTION_MINUTES;
 }
 
-/**
- * How long a finished run's workspace stays collectable-but-present.
- *
- * Zero — today's behaviour, where finalize deleted immediately — until the
- * collector has proven itself in the field. The default deliberately does not
- * try to be clever: a non-zero retention trades disk for the ability to
- * inspect a finished run's tree, and that is an operator's call, not a
- * default. Note that even at zero a follow-up is safe, because eligibility is
- * a property of the GROUP: an unfinished follow-up holds a NULL expiry and
- * keeps the whole workspace regardless of retention.
- */
+/** The steering window, in milliseconds — see DEFAULT_RETENTION_MINUTES. */
 export function workspaceRetentionMs(): number {
   return retentionMinutes() * 60_000;
 }

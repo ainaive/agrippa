@@ -48,6 +48,7 @@ import {
 import { and, eq, gte, inArray, max, ne, sql } from "drizzle-orm";
 import { upgradeCompiledTemplate } from "../compile";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
+import { FOLLOWUP_STEER_STEP_ID, followupSeed, followupTemplate } from "../followup";
 import type { ModelResolutionEntry } from "../resolve";
 import {
   type CompiledTemplate,
@@ -238,7 +239,16 @@ export async function executeRun(
     .from(templateVersions)
     .where(eq(templateVersions.id, run.templateVersionId));
   if (!versionRow) throw new Error(`template version for run ${runId} not found`);
-  const template = upgradeCompiledTemplate(versionRow.compiled);
+  const base = upgradeCompiledTemplate(versionRow.compiled);
+  // A follow-up executes a synthetic two-step flow built from the base
+  // template, never the compiled flow itself (ADR-0018 Decision 7): re-entry
+  // would replay answered checkpoints, reopen closed loops, and — in the
+  // obvious target templates — reach `git.push` again.
+  const seed =
+    run.kind === "followup" && run.parentRunId
+      ? await followupSeed(db, run.parentRunId, base)
+      : null;
+  const template = seed ? followupTemplate(base, seed) : base;
 
   const [task] = await db.select().from(tasks).where(eq(tasks.id, run.taskId));
   const [project] = await db.select().from(projects).where(eq(projects.id, run.projectId));
@@ -310,6 +320,7 @@ export async function executeRun(
       project: { id: project.id, slug: project.slug, name: project.name },
     },
     catalog,
+    seed?.sessionId ?? null,
   );
   return await engine.execute(control);
 }
@@ -355,6 +366,13 @@ class RunEngine {
       project: { id: string; slug: string; name: string };
     },
     private readonly catalog: ProviderCatalog,
+    /**
+     * The conversation this follow-up continues (ADR-0018): the parent's last
+     * executor session, handed to the steer step's first attempt. Null for
+     * everything else — including a follow-up whose parent left no session,
+     * which then starts honestly fresh rather than pretending otherwise.
+     */
+    private readonly followupSessionId: string | null = null,
   ) {
     this.leaseOwner = deps.lease?.owner ?? `engine-${Bun.randomUUIDv7()}`;
     this.leaseTtlMs = deps.lease?.ttlMs ?? RUN_LEASE_TTL_MS;
@@ -610,10 +628,17 @@ class RunEngine {
     const checkoutSucceeded = [...this.stepRows.values()].some(
       (row) => row.status === "succeeded" && this.isCheckoutStep(row.stepId),
     );
-    if (checkoutSucceeded && !(await this.deps.workspace.isIntact(run.id))) {
+    // A follow-up never checks out — it attaches to the workspace its ancestor
+    // left (ADR-0018 Decision 7). Same assertion, one step earlier: without it
+    // the agent would work in an empty directory and report success, which is
+    // the failure mode the whole feature is built to avoid.
+    const attaches = this.run.kind === "followup" && this.template.spec.workspace !== undefined;
+    if ((checkoutSucceeded || attaches) && !(await this.deps.workspace.isIntact(run.id))) {
       throw new RunFailure(
         "workspace_lost",
-        "the run's workspace is gone (worker host changed or files were removed) — it cannot resume here",
+        attaches
+          ? "the workspace this follow-up continues is gone (collected, or the host changed) — submit a new task instead"
+          : "the run's workspace is gone (worker host changed or files were removed) — it cannot resume here",
       );
     }
   }
@@ -1094,8 +1119,15 @@ class RunEngine {
 
     for (let attempt = startAttempt; attempt <= maxAttempts; attempt++) {
       await this.checkInterrupts();
-      // resume the crashed executor session on the first recovery attempt only
-      const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? null) : null;
+      // Resume the crashed executor session on the first recovery attempt
+      // only — or, on a follow-up's steer step, the PARENT's session, which
+      // is the whole point of steering (ADR-0018). A later attempt starts
+      // fresh either way: whatever went wrong, the conversation is suspect.
+      const inherited =
+        attempt === startAttempt && step.id === FOLLOWUP_STEER_STEP_ID
+          ? this.followupSessionId
+          : null;
+      const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? inherited) : null;
       const row = await this.insertStepRow(phase, step, attempt, resumeSessionId);
       this.currentStepRowId = row.id;
       try {
@@ -1598,7 +1630,7 @@ class RunEngine {
       stepId: step.id,
       iteration: this.currentIteration,
       agentSlot: slot,
-      instructions: interpolate(step.instructions, ctx),
+      instructions: this.withSteeringMessage(step, interpolate(step.instructions, ctx)),
       systemPrompt: binding.systemPrompt,
       model,
       providerAuth: await this.providerAuthFor(model.provider, {
@@ -1639,6 +1671,20 @@ class RunEngine {
         kind: this.template.spec.outputs.artifacts.find((a) => a.key === key)?.kind ?? "markdown",
       })),
     };
+  }
+
+  /**
+   * Append the operator's steering message to a follow-up's steer step.
+   *
+   * AFTER interpolation, deliberately and load-bearingly (ADR-0018 Decision
+   * 6): a steering message is untrusted text on the same footing as a task
+   * parameter, so interpolating it would evaluate whatever `${...}` it
+   * happens to contain against the run's expression context. Concatenating it
+   * here means the message is delivered verbatim and read once.
+   */
+  private withSteeringMessage(step: AgentStep, instructions: string): string {
+    if (step.id !== FOLLOWUP_STEER_STEP_ID || !this.run.steeringMessage) return instructions;
+    return `${instructions}\n\n<message-from-operator>\n${this.run.steeringMessage}\n</message-from-operator>`;
   }
 
   /**

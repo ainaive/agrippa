@@ -107,6 +107,18 @@ export const runs = pgTable(
      * outlives one.
      */
     workspaceExpiresAt: tstz("workspace_expires_at"),
+    /**
+     * What the operator asked for, on a follow-up (ADR-0018). Untrusted text
+     * on the same footing as a task parameter: the engine appends it to the
+     * step's instructions AFTER interpolation, so a message containing
+     * template syntax is delivered verbatim rather than evaluated.
+     *
+     * Also the coalescing buffer. A second message arriving before the run
+     * starts is appended here rather than spawning another run — the run row
+     * IS the burst window, which is why the append CAS requires
+     * `started_at IS NULL`.
+     */
+    steeringMessage: text("steering_message"),
     usageTotals: jsonb("usage_totals").$type<Record<string, unknown>>().notNull().default({}),
     // atomic per-run event-seq allocator (UPDATE … RETURNING); avoids max(seq)+1 races
     nextEventSeq: integer("next_event_seq").notNull().default(0),

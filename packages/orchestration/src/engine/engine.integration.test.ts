@@ -280,7 +280,7 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   if (!run) throw new Error("fixture: run insert failed");
 
   const bus = new InProcessEventBus();
-  const workspace = new FakeWorkspaceManager();
+  const workspace = new FakeWorkspaceManager(db);
   const runtimeId = await insertTestRuntime(db, orgId, user.id);
 
   const makeDeps: Fixture["makeDeps"] = (script, opts = {}) => {
@@ -780,6 +780,122 @@ for (const transport of TRANSPORTS) {
             ),
           );
         expect(attempt?.status).toBe("failed");
+      });
+
+      // ── Follow-up steering (ADR-0018 Decisions 1, 2, 7) ────────────────────
+      /** Run the fixture to success, then queue a follow-up that continues it. */
+      const followupOf = async (
+        db: Db,
+        runId: string,
+        message: string,
+      ): Promise<typeof runs.$inferSelect> => {
+        const [parent] = await db.select().from(runs).where(eq(runs.id, runId));
+        const [row] = await db
+          .insert(runs)
+          .values({
+            ...newRunIdentity(),
+            // configuration copied VERBATIM — the divergence from retry
+            workspaceKey: parent?.workspaceKey as string,
+            kind: "followup",
+            parentRunId: runId,
+            steeringMessage: message,
+            taskId: parent?.taskId as string,
+            projectId: parent?.projectId as string,
+            number: (parent?.number ?? 1) + 1,
+            templateVersionId: parent?.templateVersionId as string,
+            faberId: parent?.faberId as string,
+            executorId: parent?.executorId as string,
+            agentBindings: parent?.agentBindings ?? {},
+            paramsSnapshot: parent?.paramsSnapshot ?? {},
+            modelResolution: parent?.modelResolution ?? {},
+            resourceManifest: parent?.resourceManifest ?? { mcpServers: [], skills: [] },
+            workBranch: parent?.workBranch ?? null,
+            workspaceRef: parent?.workspaceRef ?? null,
+            runtimeId: parent?.runtimeId ?? null,
+            createdBy: parent?.createdBy as string,
+          })
+          .returning();
+        return row as typeof runs.$inferSelect;
+      };
+
+      const runToSuccess = async (db: Db, runId: string, makeDeps: Fixture["makeDeps"]) => {
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("waiting_approval");
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("succeeded");
+      };
+
+      it("a follow-up steers the parent's agent in the parent's workspace and session", async () => {
+        const { db, runId, makeDeps, workspace } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const parentSteps = await db.select().from(runSteps).where(eq(runSteps.runId, runId));
+        const parentSession = parentSteps
+          .filter((row) => row.executorSessionId)
+          .sort((a, b) => b.seq - a.seq || b.attempt - a.attempt)[0]?.executorSessionId;
+        expect(parentSession).toBeTruthy();
+        const [parent0] = await db.select().from(runs).where(eq(runs.id, runId));
+        const parentDir = workspace.dirs.get(parent0?.workspaceKey as string);
+        const checkoutsBefore = workspace.checkouts.length;
+
+        const followup = await followupOf(db, runId, "also handle the empty-list case");
+        const deps = makeDeps(HAPPY_SCRIPT);
+        expect(await executeRun(deps, followup.id)).toBe("succeeded");
+
+        // ONE step: no checkout, no branch, no re-entry into the compiled flow
+        const steps = await db
+          .select()
+          .from(runSteps)
+          .where(eq(runSteps.runId, followup.id))
+          .orderBy(asc(runSteps.seq));
+        expect(steps.map((s) => s.stepId)).toEqual(["steer"]);
+        expect(workspace.checkouts).toHaveLength(checkoutsBefore);
+
+        const [request] = deps.executor.requests.filter((r) => r.stepId === "steer");
+        // continues the parent's conversation...
+        expect(request?.resumeSessionId).toBe(parentSession as string);
+        // ...in the parent's directory: same key, same dir, no second checkout
+        expect(followup.workspaceKey).toBe(parent0?.workspaceKey as string);
+        expect(workspace.dirs.get(followup.workspaceKey)).toBe(parentDir as string);
+        expect(request?.instructions).toContain("also handle the empty-list case");
+
+        // and the ancestor is untouched: terminal is absorbing
+        const [parent] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect(parent?.status).toBe("succeeded");
+        expect(parent?.finishedAt?.getTime()).toBe(
+          (
+            await db.select().from(runs).where(eq(runs.id, runId))
+          )[0]?.finishedAt?.getTime() as number,
+        );
+        const parentEvents = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+        expect(parentEvents.filter((e) => e.type === "run.succeeded")).toHaveLength(1);
+      });
+
+      it("a steering message is delivered verbatim, never evaluated", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        // template syntax in operator text: interpolating it would evaluate
+        // against the run's expression context (or throw), which is exactly
+        // what appending AFTER interpolation prevents
+        const hostile = "use ${artifacts.localization-report} and ${run.id} literally";
+        const followup = await followupOf(db, runId, hostile);
+        const deps = makeDeps(HAPPY_SCRIPT);
+        expect(await executeRun(deps, followup.id)).toBe("succeeded");
+        const [request] = deps.executor.requests.filter((r) => r.stepId === "steer");
+        expect(request?.instructions).toContain(hostile);
+      });
+
+      it("a follow-up whose workspace is gone fails workspace_lost, not silently fresh", async () => {
+        const { db, runId, makeDeps, workspace } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const followup = await followupOf(db, runId, "one more thing");
+
+        // the ancestor's directory was collected (or the host changed)
+        workspace.intact = false;
+        const deps = makeDeps(HAPPY_SCRIPT);
+        expect(await executeRun(deps, followup.id)).toBe("failed");
+        const [row] = await db.select().from(runs).where(eq(runs.id, followup.id));
+        expect((row?.error as { code?: string })?.code).toBe("workspace_lost");
+        // it never invoked the agent — the whole point of failing closed
+        expect(deps.executor.requests.filter((r) => r.stepId === "steer")).toHaveLength(0);
       });
 
       it("cancellation mid-step aborts promptly via the control channel", async () => {
@@ -1469,7 +1585,7 @@ async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> 
   if (!run) throw new Error("fixture: run insert failed");
 
   const bus = new InProcessEventBus();
-  const workspace = new FakeWorkspaceManager();
+  const workspace = new FakeWorkspaceManager(db);
   const scm = new FakeScmService();
   const runtimeId = await insertTestRuntime(db, orgId, user.id);
   const makeDeps: V2Fixture["makeDeps"] = (implScript, revScript) => {
@@ -2496,6 +2612,18 @@ for (const transport of TRANSPORTS) {
 }
 
 describe.skipIf(!dbUp)("workspace retention (ADR-0018 Decision 4)", () => {
+  // These are about the GROUP rule, not the window, so they release with no
+  // retention and read the result immediately. The shipped default is an hour
+  // — the steering window — which would make every assertion here a sleep.
+  const savedRetention = process.env.AGRIPPA_WORKSPACE_RETENTION_MINUTES;
+  beforeEach(() => {
+    process.env.AGRIPPA_WORKSPACE_RETENTION_MINUTES = "0";
+  });
+  afterEach(() => {
+    if (savedRetention === undefined) delete process.env.AGRIPPA_WORKSPACE_RETENTION_MINUTES;
+    else process.env.AGRIPPA_WORKSPACE_RETENTION_MINUTES = savedRetention;
+  });
+
   /** A second run sharing one workspace — a follow-up's shape. */
   const shareWorkspace = async (db: Db, runId: string): Promise<string> => {
     const [ancestor] = await db.select().from(runs).where(eq(runs.id, runId));
