@@ -786,11 +786,27 @@ export const executionRoutes = new Hono<AppEnv>()
     // The honest 409: past retention the workspace may already be gone, and a
     // run that discovers that on a worker costs a charge and a failure
     // notification to say what the server already knew.
-    // Check-then-act, knowingly: the collector can take the directory between
-    // this read and the insert below. That window is bounded and its outcome is
-    // honest — the follow-up fails `workspace_lost` — whereas holding a lock
-    // across the whole submission to close it would be a far worse trade.
-    if (await workspaceCollectable(db, parent.workspaceKey)) {
+    // Only a run that HAS a workspace can lose one. Retention stamps an expiry
+    // on every run, so gating on it alone made a workspace-less template (a
+    // weekly report, say) unsteerable an hour after it finished — for a
+    // directory that never existed, while the engine would have run that
+    // follow-up perfectly well: its attach assertion is gated on the same
+    // `spec.workspace`. What such a follow-up continues is the session, and
+    // sessions do not expire with a filesystem.
+    //
+    // Check-then-act where it does apply, knowingly: the collector can take
+    // the directory between this read and the insert below. That window is
+    // bounded and its outcome is honest — the follow-up fails
+    // `workspace_lost` — whereas holding a lock across the whole submission to
+    // close it would be a far worse trade.
+    const [parentVersion] = await db
+      .select({ compiled: templateVersions.compiled })
+      .from(templateVersions)
+      .where(eq(templateVersions.id, parent.templateVersionId));
+    const usesWorkspace =
+      parentVersion !== undefined &&
+      upgradeCompiledTemplate(parentVersion.compiled).spec.workspace !== undefined;
+    if (usesWorkspace && (await workspaceCollectable(db, parent.workspaceKey))) {
       throw AppError.conflict(
         "workspace_expired",
         "This run's workspace has been collected — submit a new task instead",

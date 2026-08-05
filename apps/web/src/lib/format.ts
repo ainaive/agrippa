@@ -35,3 +35,21 @@ export function formatDuration(start: string | null, end: string | null): string
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
 }
+
+/**
+ * The submit chord to *show* — "⌘↵" on Apple keyboards, "Ctrl+↵" elsewhere.
+ *
+ * Derived here rather than written into the locale catalogs: a modifier glyph
+ * is a property of the platform, not of the language, so a catalog carrying
+ * "⌘↵" is wrong for every Windows and Linux reader in both locales. The
+ * handler already accepts either modifier; this is only what the hint says.
+ */
+export function submitChord(): string {
+  const platform =
+    typeof navigator === "undefined"
+      ? ""
+      : ((navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ??
+        navigator.platform ??
+        "");
+  return /mac|iphone|ipad/i.test(platform) ? "⌘↵" : "Ctrl+↵";
+}

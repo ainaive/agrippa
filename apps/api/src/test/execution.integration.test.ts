@@ -822,6 +822,46 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       ]);
     });
 
+    it("a workspace-less run stays steerable past the retention window", async () => {
+      // Retention stamps an expiry on every run, so gating the 409 on it alone
+      // made a template with no `workspace:` block — a weekly report — expire
+      // for a directory it never had. The engine would have run that follow-up
+      // fine: its attach assertion is gated on the same `spec.workspace`, and
+      // what such a follow-up continues is the session.
+      const pmTypes = await jsonOf<Array<{ id: string; slug: string }>>(
+        await admin.request("/api/v1/scenarios/project-management/task-types"),
+      );
+      const weeklyId = pmTypes.find((t) => t.slug === "weekly-report")?.id as string;
+      expect(weeklyId).toBeDefined();
+
+      const submitted = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+          method: "POST",
+          json: {
+            taskTypeId: weeklyId,
+            title: "Weekly report",
+            params: { dateRange: "2026.08.01-2026.08.05", rawNotes: "shipped Phase C" },
+          },
+        }),
+      );
+      // finished, and its workspace long past collection — for a run whose
+      // template declares no workspace at all
+      await db
+        .update(runs)
+        .set({
+          status: "succeeded",
+          finishedAt: new Date(),
+          workspaceExpiresAt: sql`now() - interval '1 day'`,
+        })
+        .where(eq(runs.id, submitted.runId));
+
+      const res = await admin.request(`/api/v1/runs/${submitted.runId}/followup`, {
+        method: "POST",
+        json: { message: "also cover the infra work" },
+      });
+      expect(res.status).toBe(202);
+    });
+
     it("a cancelled follow-up does not swallow the next message", async () => {
       // Cancelling a queued run finalizes it directly and leaves started_at
       // null forever, so a predicate of "unstarted" matched a dead row: every

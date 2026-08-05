@@ -147,14 +147,14 @@
     "no": "No"
   },
   "comments": {
-    "placeholder": "Write a comment for your team…",
+    "placeholder": "Write a comment for your team… ({{shortcut}} to send)",
     "send": "Send"
   },
   "followup": {
     "continues": "continues #{{number}}",
     "send": "Continue",
     "hint": "Ask the agent to continue in the same workspace, with everything it already knows.",
-    "placeholder": "Comment, or ask the agent to continue…"
+    "placeholder": "Comment, or ask the agent to continue… ({{shortcut}} to comment)"
   },
   "pr": {
     "opened": "Pull request opened",

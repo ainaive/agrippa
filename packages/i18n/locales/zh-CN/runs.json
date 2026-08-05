@@ -147,14 +147,14 @@
     "no": "否"
   },
   "comments": {
-    "placeholder": "给团队写一条评论…",
+    "placeholder": "给团队写一条评论…（{{shortcut}} 发送）",
     "send": "发送"
   },
   "followup": {
     "continues": "继续 #{{number}}",
     "send": "继续执行",
     "hint": "让智能体在同一工作区继续，保留它已经掌握的全部上下文。",
-    "placeholder": "写评论，或让智能体继续…"
+    "placeholder": "写评论，或让智能体继续…（{{shortcut}} 发送评论）"
   },
   "pr": {
     "opened": "已创建 Pull Request",

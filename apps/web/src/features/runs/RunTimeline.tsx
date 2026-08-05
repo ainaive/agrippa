@@ -24,7 +24,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import type { RunEvent } from "@/features/useRunEvents";
 import { ApiError, api } from "@/lib/api";
-import { formatTime, lt } from "@/lib/format";
+import { formatTime, lt, submitChord } from "@/lib/format";
 import type { Artifact, Checkpoint, Run } from "@/lib/types";
 import { CheckpointPanel } from "./CheckpointPanel";
 
@@ -485,7 +485,9 @@ export function RunTimeline({
           <Textarea
             rows={1}
             className="min-h-9"
-            placeholder={t(steerable ? "runs:followup.placeholder" : "runs:comments.placeholder")}
+            placeholder={t(steerable ? "runs:followup.placeholder" : "runs:comments.placeholder", {
+              shortcut: submitChord(),
+            })}
             value={comment}
             onChange={(e) => setComment(e.target.value)}
             onKeyDown={(e) => {
