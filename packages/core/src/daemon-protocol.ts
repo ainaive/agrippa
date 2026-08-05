@@ -53,10 +53,36 @@ export const daemonExecutorAdSchema = z.object({
   envAuthProviders: z.array(z.string().min(1).max(100)).max(20).optional(),
 });
 
+/**
+ * Behaviours a daemon build claims at register, beyond which executors it has.
+ *
+ * Version skew across the daemon fleet is a compatibility problem until a
+ * change makes an old build silently WRONG rather than merely limited — which
+ * is what the workspace key does (ADR-0018): a daemon that ignores it clones
+ * into a fresh directory and reports success, so a follow-up loses exactly the
+ * work it was meant to continue, invisibly. Runtimes therefore say what they
+ * can do, and the platform refuses rather than degrades.
+ *
+ * Unknown strings are accepted and stored: a newer daemon claiming something
+ * this server has never heard of is forward compatibility, not an error.
+ */
+export const RUNTIME_FEATURES = ["workspace-key"] as const;
+export type RuntimeFeature = (typeof RUNTIME_FEATURES)[number];
+
+/** Does an advertisement claim this behaviour? Absent list = an older daemon. */
+export function runtimeAdvertises(
+  features: readonly string[] | null | undefined,
+  feature: RuntimeFeature,
+): boolean {
+  return (features ?? []).includes(feature);
+}
+
 export const daemonRegisterSchema = z.object({
   hostname: z.string().min(1).max(255),
   version: z.string().max(100).nullish(),
   executors: z.array(daemonExecutorAdSchema).max(16),
+  // bounded but not enumerated — see RUNTIME_FEATURES
+  features: z.array(z.string().min(1).max(64)).max(32).default([]),
 });
 export type DaemonRegisterBody = z.infer<typeof daemonRegisterSchema>;
 

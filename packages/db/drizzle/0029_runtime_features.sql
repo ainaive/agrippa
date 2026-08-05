@@ -1,0 +1,1 @@
+ALTER TABLE "runtimes" ADD COLUMN "features" jsonb DEFAULT '[]'::jsonb NOT NULL;

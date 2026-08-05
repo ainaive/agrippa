@@ -101,6 +101,7 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
       hostname: "mba.local",
       version: "0.1.0",
       executors: [{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }],
+      features: ["workspace-key", "some-future-thing"],
     });
     expect(res.status).toBe(200);
     const body = await jsonOf<{ runtimeId: string; hints: { keepaliveSec: number } }>(res);
@@ -112,6 +113,9 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     expect(row?.registeredAt).not.toBeNull();
     expect(row?.lastSeenAt).not.toBeNull();
     expect(row?.executors.map((e) => e.id)).toEqual(["claude-agent-sdk"]);
+    // stored verbatim, unknown members included: a newer daemon claiming
+    // something this server has not heard of is forward compatibility
+    expect(row?.features).toEqual(["workspace-key", "some-future-thing"]);
 
     const audits = await db
       .select()
@@ -120,6 +124,15 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     expect(audits).toHaveLength(1);
     expect(audits[0]?.actorRuntimeId).toBe(runtimeId);
     expect(audits[0]?.actorUserId).toBeNull();
+
+    // an older daemon omits the field entirely and registers fine — it simply
+    // claims nothing, and work that depends on a claim is refused there
+    await daemonRequest("/register", {
+      hostname: "mba.local",
+      executors: [{ id: "claude-agent-sdk" }],
+    });
+    const [older] = await db.select().from(runtimes).where(eq(runtimes.id, runtimeId));
+    expect(older?.features).toEqual([]);
   });
 
   it("register rejects queue-unsafe and non-catalog executor ids", async () => {
@@ -152,7 +165,10 @@ describe.skipIf(!dbUp)("runtime daemons: tokens, register, heartbeat", () => {
     const [after] = await db.select().from(runtimes).where(eq(runtimes.id, runtimeId));
     expect(after?.lastSeenAt?.getTime()).toBeGreaterThan(before?.lastSeenAt?.getTime() ?? 0);
     const audits = await db.select().from(auditLogs).where(eq(auditLogs.resourceType, "runtime"));
-    expect(audits.map((a) => a.action).sort()).toEqual(["runtime.create", "runtime.register"]);
+    expect([...new Set(audits.map((a) => a.action))].sort()).toEqual([
+      "runtime.create",
+      "runtime.register",
+    ]);
   });
 
   it("revoke kills the token immediately", async () => {

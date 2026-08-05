@@ -8,6 +8,7 @@ import {
   DISPATCH_EVENT_BATCH_MAX_EVENTS,
   DISPATCH_EVIDENCE_KEY,
   DISPATCH_WORKSPACE_PLACEHOLDER,
+  type RuntimeFeature,
 } from "@agrippa/core";
 import type { Executor, ExecutorEvent, Logger, StepExecutionRequest } from "@agrippa/executor-core";
 import {
@@ -23,6 +24,15 @@ import type { DaemonApi } from "./client";
 
 /** Event-batch flush cadence: sub-second UI latency without per-event HTTP. */
 const FLUSH_MS = 500;
+
+/**
+ * What this binary claims at register. Hard-coded rather than derived, because
+ * the claim is about THIS build's behaviour: `workspace-key` says the runner
+ * below keys directories by `payload.workspaceKey`, so the server may send a
+ * follow-up here knowing it will continue the right workspace rather than
+ * clone a fresh one and call it success (ADR-0018).
+ */
+const DAEMON_FEATURES: readonly RuntimeFeature[] = ["workspace-key"];
 
 export type RunnerOpts = {
   api: DaemonApi;
@@ -69,6 +79,10 @@ export class DaemonRunner {
         id,
         ...(executor.envAuthProviders ? { envAuthProviders: [...executor.envAuthProviders] } : {}),
       })),
+      // What THIS build can do, not what the protocol knows how to ask for:
+      // the server refuses work whose correctness depends on a claim this
+      // binary cannot make (ADR-0018).
+      features: [...DAEMON_FEATURES],
     });
     this.hints = hints;
     this.opts.logger.info(`registered as runtime ${runtimeId}`, {

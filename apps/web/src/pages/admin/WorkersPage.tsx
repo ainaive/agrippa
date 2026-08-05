@@ -33,6 +33,7 @@ type RuntimeRow = {
   hostname: string | null;
   version: string | null;
   executors: ExecutorAd[];
+  features: string[];
   lastSeenAt: string | null;
   registeredAt: string | null;
 };
@@ -208,6 +209,18 @@ export function WorkersPage() {
               </div>
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <ExecutorBadges executors={row.executors} />
+                {/* A connected daemon missing a feature is not merely limited:
+                    follow-ups are refused there rather than silently cloning a
+                    fresh workspace, so the operator needs to see it. */}
+                {row.registeredAt && !(row.features ?? []).includes("workspace-key") ? (
+                  <Badge
+                    variant="outline"
+                    className="border-amber-500/50 text-amber-600 dark:text-amber-400"
+                    title={t("admin:workers.runtimes.outdatedHint")}
+                  >
+                    {t("admin:workers.runtimes.outdated")}
+                  </Badge>
+                ) : null}
                 {row.status === "revoked" ? (
                   <Badge variant="outline">{t("admin:workers.runtimes.revoked")}</Badge>
                 ) : (

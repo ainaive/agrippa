@@ -16,6 +16,7 @@ const runtimeView = {
   hostname: runtimes.hostname,
   version: runtimes.version,
   executors: runtimes.executors,
+  features: runtimes.features,
   lastSeenAt: runtimes.lastSeenAt,
   registeredAt: runtimes.registeredAt,
   createdAt: runtimes.createdAt,

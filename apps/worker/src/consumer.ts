@@ -9,6 +9,7 @@ import {
   executeRun,
   finalizeRun,
   type RunControlHandle,
+  RuntimeFeatureUnavailableError,
   remoteEngineDeps,
   renewRunLeases,
   routeRun,
@@ -192,11 +193,17 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
       // decision. The re-enqueue routes to the correct set queue. A `running`
       // run (crash-recovery pickup) still rethrows: the lease sweeper
       // re-enqueues it once the dead owner's lease expires.
+      //
+      // A pinned daemon too old to honor workspace keys defers the same way
+      // (ADR-0018): the machine may serve this run perfectly well after an
+      // upgrade, and refusing-then-recovering beats failing a run the operator
+      // would have to notice and resubmit.
       if (
         (typeof err === "object" &&
           err !== null &&
           (err as { code?: string }).code === "executor_unavailable_on_worker") ||
-        err instanceof ExecutorUnavailableError
+        err instanceof ExecutorUnavailableError ||
+        err instanceof RuntimeFeatureUnavailableError
       ) {
         const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
         if (run && (run.status === "queued" || run.status === "waiting_approval")) {

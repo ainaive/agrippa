@@ -104,6 +104,10 @@ export const daemonRoutes = new Hono<DaemonEnv>()
         hostname: body.hostname,
         version: body.version ?? null,
         executors: body.executors,
+        // overwritten every register, so an upgrade (or a downgrade) takes
+        // effect the moment the daemon reconnects — a run refused for a
+        // missing feature proceeds as soon as the machine can serve it
+        features: body.features,
         lastSeenAt: sql`now()`,
         registeredAt: sql`coalesce(${runtimes.registeredAt}, now())`,
       })
@@ -111,7 +115,11 @@ export const daemonRoutes = new Hono<DaemonEnv>()
     // once per daemon boot — heartbeats are deliberately not audited
     await daemonAudit(c, {
       action: "runtime.register",
-      payload: { hostname: body.hostname, executors: body.executors.map((e) => e.id) },
+      payload: {
+        hostname: body.hostname,
+        executors: body.executors.map((e) => e.id),
+        features: body.features,
+      },
     });
     return c.json({ runtimeId: c.var.runtime.id, hints: DAEMON_PROTOCOL_HINTS });
   })

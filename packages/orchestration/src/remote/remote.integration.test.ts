@@ -404,6 +404,57 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     await db.delete(runtimes);
   });
 
+  it("a follow-up inherits placement — never re-routed onto a daemon", async () => {
+    // Its workspace exists on exactly one host class. Unpinned means the
+    // ancestor ran centrally, so placing the follow-up on a daemon would hand
+    // the agent an empty directory and let it report success (ADR-0018).
+    await newRuntime([{ id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }]);
+    const ancestor = await newRun();
+    const followup = await newRun({
+      kind: "followup",
+      parentRunId: ancestor.id,
+      workspaceKey: ancestor.workspaceKey,
+    });
+    expect((await routeRun(db, followup)).kind).toBe("central");
+    const [after] = await db
+      .select({ runtimeId: runs.runtimeId })
+      .from(runs)
+      .where(eq(runs.id, followup.id));
+    expect(after?.runtimeId).toBeNull();
+    await db.delete(runtimes);
+  });
+
+  it("refuses a follow-up pinned to a daemon that cannot honor workspace keys", async () => {
+    // Version skew that is a CORRECTNESS hazard, not a compatibility one: a
+    // daemon ignoring the key clones fresh, reports success, and the follow-up
+    // silently loses the work it exists to continue. Refused — and refused as
+    // a deferral, so upgrading the daemon makes the run proceed by itself.
+    const oldRuntime = await newRuntime([
+      { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] },
+    ]);
+    const ancestor = await newRun({ runtimeId: oldRuntime });
+    const followup = await newRun({
+      kind: "followup",
+      parentRunId: ancestor.id,
+      workspaceKey: ancestor.workspaceKey,
+      runtimeId: oldRuntime,
+    });
+    await expect(routeRun(db, followup)).rejects.toThrow("does not support 'workspace-key'");
+
+    // an ordinary run is unaffected — only follow-ups depend on the claim
+    const ordinary = await newRun({ runtimeId: oldRuntime });
+    expect((await routeRun(db, ordinary)).kind).toBe("remote");
+
+    // and the same daemon after an upgrade serves it
+    await db
+      .update(runtimes)
+      .set({ features: ["workspace-key"] })
+      .where(eq(runtimes.id, oldRuntime));
+    expect((await routeRun(db, followup)).kind).toBe("remote");
+    await db.update(runs).set({ runtimeId: null });
+    await db.delete(runtimes);
+  });
+
   it("a STALE snapshot cannot pin a run that has since started centrally", async () => {
     // Delivery B read the run before delivery A executed a whole central leg
     // and released its lease (waiting_approval). B's snapshot passes the

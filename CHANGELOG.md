@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Runtimes advertise what their build can do, not just which executors it has.** Daemon version skew has been a compatibility question — an older build serves less — right up to the workspace key, which makes an old build silently *wrong*: it clones into a fresh directory, reports success, and a follow-up loses the work it existed to continue, with nothing in the timeline saying so. Daemons now register a bounded `features` list, and a follow-up pinned to a runtime that does not claim `workspace-key` is refused rather than degraded. Refused as a **deferral**, not a failure: the run waits with a `run.deferred` event naming the reason, burns no retries, and proceeds by itself once that machine is upgraded — which failing it would not. Admin → Workers flags the runtime so the operator knows which machine to rebuild. Unknown feature strings are stored rather than rejected, so a newer daemon claiming something a lagging server has never heard of stays forward compatible.
+
 ### Changed
 
 - **A workspace is no longer named after a run.** Three identities were conflated in one row: run identity (billing, audit, SSE, the state machine), workspace identity (a directory on some host), and session identity (an executor's conversation handle). Steering a finished run needs the second and third to outlive the first, so `runs.workspace_key` becomes its own column — the run's own id for everything that exists today, and inherited unchanged by a follow-up so a chain of runs shares one directory (ADR-0018 Decision 3). `@agrippa/workspace` took a pure parameter rename; it never knew what a run was, which is what made this a rename rather than a redesign. The engine and the SCM service still speak in run ids, with the translation at the workspace-manager boundary. The daemon's claim response now names spent **workspaces** rather than finished runs — the directory is what gets deleted, and a run is no longer the only thing that can name one.
