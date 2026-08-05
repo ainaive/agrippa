@@ -1,4 +1,4 @@
-import { isTerminalRunStatus } from "@agrippa/core";
+import { isTerminalRunStatus, runHoldsWorkspace } from "@agrippa/core";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -353,9 +353,8 @@ export function RunTimeline({
    * lands on this run's thread either way — the endpoint writes the comment
    * itself — so the visible difference is that the agent is asked to continue.
    */
-  const steerable =
-    isTerminalRunStatus(run.status) &&
-    (run.workspaceExpiresAt === null || new Date(run.workspaceExpiresAt).getTime() > Date.now());
+  // one rule, shared with the server's group-level SQL — see runHoldsWorkspace
+  const steerable = isTerminalRunStatus(run.status) && runHoldsWorkspace(run);
   const sendFollowup = useMutation({
     mutationFn: () =>
       api<{ runId: string; number: number; coalesced: boolean }>(`/runs/${runId}/followup`, {

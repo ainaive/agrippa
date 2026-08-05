@@ -57,11 +57,12 @@ import { GitWorkspaceManager, removeWorkspace } from "./deps/workspace";
 import { selectRunQueues } from "./run-queues";
 
 /**
- * Workspace keys this process has already collected, so a key named on every
- * tick for the rest of its window costs one `has` rather than an `rm -rf`.
- * Bounded by that window; a restart simply re-collects, which is a no-op.
+ * Workspace keys this process has already collected, and when — so a key named
+ * on every tick for the rest of its window costs a lookup rather than an
+ * `rm -rf`, and the map is pruned to that window instead of growing with
+ * uptime. A restart simply re-collects, which is a no-op.
  */
-const collectedWorkspaces = new Set<string>();
+const collectedWorkspaces = new Map<string, number>();
 
 const db = createDb();
 // inside a compose container the hostname IS the container id — the identity

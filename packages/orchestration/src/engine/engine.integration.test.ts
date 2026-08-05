@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import path from "node:path";
-import type { ResumeCapability } from "@agrippa/core";
+import type { ResumeCapability, RunStatus } from "@agrippa/core";
 import {
   artifacts,
   checkpoints,
@@ -37,14 +37,15 @@ import { startTestDaemonLoop, type TestDaemonLoop } from "../remote/test-daemon-
 import { buildParamsValidator, resolveModelRoles } from "../resolve";
 import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
-import {
-  collectExpiredWorkspaces,
-  expiredWorkspaceKeys,
-  releaseWorkspace,
-} from "../workspace-retention";
+import { collectExpiredWorkspaces, expiredWorkspaceKeys } from "../workspace-retention";
 import { InProcessEventBus } from "./bus";
 import { type EngineDeps, ProviderCredentialError, type RunControlHandle } from "./deps";
-import { CONTEXT_LOSS_DISCLOSURE, ExecutorUnavailableError, executeRun } from "./engine";
+import {
+  CONTEXT_LOSS_DISCLOSURE,
+  ExecutorUnavailableError,
+  executeRun,
+  withContextLossDisclosure,
+} from "./engine";
 import {
   FakeResourceMaterializer,
   FakeScmService,
@@ -902,6 +903,35 @@ for (const transport of TRANSPORTS) {
         // the driver wraps the failure, so the constraint name is on the cause
         const cause = (rejection as { cause?: unknown } | null)?.cause ?? rejection;
         expect(String(cause)).toContain("runs_followup_has_parent");
+      });
+
+      it("a follow-up carries the parent's work, even when the resume is rejected", async () => {
+        // The follow-up's own run has ONE step, so the engine's usual prior
+        // context is empty. Without the parent's outputs a rejected resume
+        // left the agent with a message and no account of what it was
+        // continuing — the honest fallback, with nothing honest in it.
+        const { db, runId, makeDeps } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const followup = await followupOf(db, runId, "one more thing");
+
+        const deps = makeDeps(HAPPY_SCRIPT, { resumeReports: { steer: "rejected" } });
+        expect(await executeRun(deps, followup.id)).toBe("succeeded");
+
+        const requests = deps.executor.requests.filter((r) => r.stepId === "steer");
+        expect(requests).toHaveLength(2); // rejected → one disclosed re-invocation
+        for (const request of requests) {
+          const prior = request.priorContext.find((p) => p.stepId === "reproduce-bug");
+          expect(prior?.output).toBe("reproduced");
+        }
+        // and with prior context present, the disclosure may point at it
+        expect(requests[1]?.instructions).toContain("prior step summaries");
+      });
+
+      it("the disclosure only cites prior summaries when there are any", () => {
+        // written for a crash-resume, which always has them; a follow-up on a
+        // parentless-looking run does not, and citing what is absent is noise
+        expect(withContextLossDisclosure("do it", true)).toContain("prior step summaries");
+        expect(withContextLossDisclosure("do it", false)).not.toContain("prior step summaries");
       });
 
       it("a steering message is delivered verbatim, never evaluated", async () => {
@@ -2707,6 +2737,24 @@ describe.skipIf(!dbUp)("workspace retention (ADR-0018 Decision 4)", () => {
     return row?.id as string;
   };
 
+  /** The real release path: finalizing is what releases (ADR-0018). */
+  const finalize = async (
+    db: Db,
+    runId: string,
+    to: "succeeded" | "failed" | "cancelled",
+    from?: RunStatus,
+  ) => {
+    const [row] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
+    return finalizeRun(db, {
+      runId,
+      from: from ?? (row?.status as RunStatus),
+      to,
+      error: null,
+      usageTotals: {},
+      eventPayload: {},
+    });
+  };
+
   it("a workspace is collectable only when the whole chain has released it", async () => {
     const { db, runId } = await setupFixture();
     const [before] = await db.select().from(runs).where(eq(runs.id, runId));
@@ -2715,7 +2763,7 @@ describe.skipIf(!dbUp)("workspace retention (ADR-0018 Decision 4)", () => {
     // live: nothing to collect
     expect(await expiredWorkspaceKeys(db, { runtimeId: null })).not.toContain(key);
 
-    await releaseWorkspace(db, runId);
+    await finalize(db, runId, "failed");
     expect(await expiredWorkspaceKeys(db, { runtimeId: null })).toContain(key);
 
     // a follow-up joins the group and holds the directory, even though its
@@ -2723,16 +2771,39 @@ describe.skipIf(!dbUp)("workspace retention (ADR-0018 Decision 4)", () => {
     const followupId = await shareWorkspace(db, runId);
     expect(await expiredWorkspaceKeys(db, { runtimeId: null })).not.toContain(key);
 
-    await releaseWorkspace(db, followupId);
+    await finalize(db, followupId, "cancelled");
     expect(await expiredWorkspaceKeys(db, { runtimeId: null })).toContain(key);
   });
 
-  it("release is idempotent and does not extend an expiry already stamped", async () => {
+  it("EVERY finalization path releases, not just the engine's", async () => {
+    // The release used to live in the engine's finalize, so a run cancelled
+    // while queued or failed by retry exhaustion got no retention window at
+    // all — and a failed run's directory is the one most worth keeping.
+    // finalizeRun is the one terminal write all three paths share.
+    const cases = [
+      { to: "cancelled", claimFirst: false }, // the API cancelling a queued run
+      { to: "failed", claimFirst: false }, // the worker exhausting its retries
+      { to: "succeeded", claimFirst: true }, // the engine's own finalize
+    ] as const;
+    for (const { to, claimFirst } of cases) {
+      const { db, runId } = await setupFixture();
+      if (claimFirst) expect(await claimRunLease(db, runId, "w1")).toBe(true);
+      await finalize(db, runId, to);
+      const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+      expect(row?.status).toBe(to);
+      expect(row?.workspaceExpiresAt).not.toBeNull();
+    }
+  });
+
+  it("a second finalize cannot extend an expiry already stamped", async () => {
+    // terminal is absorbing, so the CAS makes the release exactly-once by
+    // construction rather than by a not-null guard on a separate statement
     const { db, runId } = await setupFixture();
-    await releaseWorkspace(db, runId);
+    await finalize(db, runId, "failed");
     const [first] = await db.select().from(runs).where(eq(runs.id, runId));
     await Bun.sleep(10);
-    await releaseWorkspace(db, runId);
+    // the second path still believes the run is queued — the real race
+    expect((await finalize(db, runId, "failed", "queued")).outcome).toBe("lost");
     const [second] = await db.select().from(runs).where(eq(runs.id, runId));
     expect(second?.workspaceExpiresAt?.getTime()).toBe(
       first?.workspaceExpiresAt?.getTime() as number,
@@ -2743,10 +2814,10 @@ describe.skipIf(!dbUp)("workspace retention (ADR-0018 Decision 4)", () => {
     const { db, runId } = await setupFixture();
     const [row] = await db.select().from(runs).where(eq(runs.id, runId));
     const key = row?.workspaceKey as string;
-    await releaseWorkspace(db, runId);
+    await finalize(db, runId, "failed");
 
     const removed: string[] = [];
-    const collected = new Set<string>();
+    const collected = new Map<string, number>();
     const logger = { info: () => {}, warn: () => {} };
 
     process.env.AGRIPPA_KEEP_WORKSPACES = "1";

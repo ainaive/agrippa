@@ -822,6 +822,38 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       ]);
     });
 
+    it("a cancelled follow-up does not swallow the next message", async () => {
+      // Cancelling a queued run finalizes it directly and leaves started_at
+      // null forever, so a predicate of "unstarted" matched a dead row: every
+      // later message was absorbed into it, accepted, and never executed —
+      // and it never self-healed, because that row can no longer start.
+      const { runId: parentId } = await finishedRun();
+      const first = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "first" },
+        }),
+      );
+      expect(
+        (await admin.request(`/api/v1/runs/${first.runId}/cancel`, { method: "POST" })).status,
+      ).toBe(200);
+      const [cancelled] = await db.select().from(runs).where(eq(runs.id, first.runId));
+      expect(cancelled?.status).toBe("cancelled");
+      expect(cancelled?.startedAt).toBeNull(); // the shape that made this a trap
+
+      const second = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "second" },
+        }),
+      );
+      expect(second.coalesced).toBe(false);
+      expect(second.runId).not.toBe(first.runId);
+      const [fresh] = await db.select().from(runs).where(eq(runs.id, second.runId));
+      expect(fresh?.status).toBe("queued");
+      expect(fresh?.steeringMessage).toBe("second");
+    });
+
     it("refuses an unfinished run, and one whose workspace has been collected", async () => {
       const { runId: parentId } = await finishedRun();
       await db.update(runs).set({ status: "running" }).where(eq(runs.id, parentId));

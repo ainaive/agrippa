@@ -780,6 +780,10 @@ export const executionRoutes = new Hono<AppEnv>()
     // The honest 409: past retention the workspace may already be gone, and a
     // run that discovers that on a worker costs a charge and a failure
     // notification to say what the server already knew.
+    // Check-then-act, knowingly: the collector can take the directory between
+    // this read and the insert below. That window is bounded and its outcome is
+    // honest — the follow-up fails `workspace_lost` — whereas holding a lock
+    // across the whole submission to close it would be a far worse trade.
     if (await workspaceCollectable(db, parent.workspaceKey)) {
       throw AppError.conflict(
         "workspace_expired",
@@ -804,7 +808,13 @@ export const executionRoutes = new Hono<AppEnv>()
         },
       });
 
-      // (2) absorb into an unstarted follow-up on this workspace, if any
+      // (2) absorb into a follow-up that is still going to run, if any.
+      //
+      // `queued`, not merely `started_at IS NULL`: cancelling a queued run
+      // finalizes it directly and leaves that column null forever, so the
+      // laxer predicate matched a dead row and every later message vanished
+      // into it — accepted with `coalesced: true`, executed never, and no
+      // self-healing, because the row can no longer start.
       const [pending] = await tx
         .select({ id: runs.id, number: runs.number })
         .from(runs)
@@ -812,6 +822,7 @@ export const executionRoutes = new Hono<AppEnv>()
           and(
             eq(runs.workspaceKey, parent.workspaceKey),
             eq(runs.kind, "followup"),
+            eq(runs.status, "queued"),
             isNull(runs.startedAt),
           ),
         )
@@ -823,7 +834,7 @@ export const executionRoutes = new Hono<AppEnv>()
           .set({
             steeringMessage: sql`coalesce(${runs.steeringMessage} || E'\n\n', '') || ${message}`,
           })
-          .where(and(eq(runs.id, pending.id), isNull(runs.startedAt)))
+          .where(and(eq(runs.id, pending.id), eq(runs.status, "queued"), isNull(runs.startedAt)))
           .returning({ id: runs.id });
         if (absorbed.length > 0) {
           await audit(

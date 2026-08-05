@@ -1,5 +1,5 @@
-import { type Db, type DbOrTx, runs } from "@agrippa/db";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { type Db, runs } from "@agrippa/db";
+import { type SQL, sql } from "drizzle-orm";
 
 /**
  * Workspace retention (ADR-0018 Decision 4).
@@ -46,26 +46,19 @@ function retentionMinutes(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_RETENTION_MINUTES;
 }
 
-/** The steering window, in milliseconds — see DEFAULT_RETENTION_MINUTES. */
-export function workspaceRetentionMs(): number {
-  return retentionMinutes() * 60_000;
-}
-
 /**
- * Mark this run as done with its workspace. Idempotent, and deliberately not
- * a delete: another run in the chain may still hold the directory.
+ * When a run finalizing right now stops holding its workspace.
+ *
+ * An expression rather than a statement, because the write belongs INSIDE
+ * `finalizeRun`'s CAS: releasing is part of finalizing, and every path that
+ * finalizes — the engine, the API's cancel of a queued or paused run, the
+ * worker's retry-exhaustion — must release. Doing it as a follow-up statement
+ * gave retention only to the engine's path and made a lost write possible;
+ * inside the transaction it happens exactly once, or not at all.
  */
-export async function releaseWorkspace(db: DbOrTx, runId: string): Promise<void> {
-  const minutes = retentionMinutes();
-  await db
-    .update(runs)
-    .set({
-      workspaceExpiresAt: sql`now() + ${sql.raw(String(minutes))} * interval '1 minute'`,
-    })
-    .where(and(eq(runs.id, runId), isNull(runs.workspaceExpiresAt)));
+export function workspaceExpiryAt(): SQL {
+  return sql`now() + ${sql.raw(String(retentionMinutes()))} * interval '1 minute'`;
 }
-
-export type ExpiredWorkspace = { workspaceKey: string };
 
 /**
  * Workspace keys nothing needs any more: every run sharing the key has
@@ -139,24 +132,34 @@ export async function collectExpiredWorkspaces(opts: {
   db: Db;
   remove: (workspaceKey: string) => Promise<void>;
   logger: { info(message: string): void; warn(message: string): void };
-  /** Keys already collected by this process — repeat polls cost a `has`. */
-  collected: Set<string>;
+  /**
+   * Keys already collected by this process, with when — so a key named on
+   * every tick for the rest of its window costs a lookup rather than an
+   * `rm -rf`, and the memory is bounded by that window rather than by uptime.
+   * A plain Set never evicted, which on a long-lived worker is a slow leak of
+   * exactly the kind this module exists to stop on disk.
+   */
+  collected: Map<string, number>;
   windowHours?: number;
 }): Promise<number> {
   // the debugging escape hatch keeps its meaning: nothing is deleted, so a
   // finished run's tree stays on disk for as long as the operator wants
   if (process.env.AGRIPPA_KEEP_WORKSPACES === "1") return 0;
 
-  const keys = await expiredWorkspaceKeys(opts.db, {
-    runtimeId: null,
-    ...(opts.windowHours !== undefined ? { windowHours: opts.windowHours } : {}),
-  });
+  const windowHours = opts.windowHours ?? 24;
+  const cutoff = Date.now() - windowHours * 60 * 60 * 1000;
+  for (const [key, at] of opts.collected) {
+    // past the window the query stops naming it, so remembering it is pointless
+    if (at < cutoff) opts.collected.delete(key);
+  }
+
+  const keys = await expiredWorkspaceKeys(opts.db, { runtimeId: null, windowHours });
   let removed = 0;
   for (const key of keys) {
     if (opts.collected.has(key)) continue;
     try {
       await opts.remove(key);
-      opts.collected.add(key);
+      opts.collected.set(key, Date.now());
       removed += 1;
     } catch (err) {
       opts.logger.warn(`workspace collection failed for ${key}: ${String(err)}`);

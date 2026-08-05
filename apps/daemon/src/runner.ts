@@ -62,11 +62,15 @@ export class DaemonRunner {
   /** Workspaces being executed in right now — never reap one of these. */
   private readonly activeWorkspaceKeys = new Set<string>();
   /**
-   * Already deleted this process, so a workspace named on every poll for the
-   * rest of its 24-hour window costs one `has` rather than an `rm -rf` each
-   * time. Bounded by that window; a restart simply re-reaps, a no-op.
+   * Already deleted this process, and when — so a workspace named on every
+   * poll for the rest of its 24-hour window costs a lookup rather than an
+   * `rm -rf` each time, and the map is pruned to that window rather than
+   * growing with the daemon's uptime (a laptop daemon runs for weeks). A
+   * restart simply re-reaps, a no-op.
    */
-  private readonly reaped = new Set<string>();
+  private readonly reaped = new Map<string, number>();
+  /** The server's own reap window — past it, remembering a key buys nothing. */
+  private static readonly REAP_MEMORY_MS = 24 * 60 * 60 * 1000;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly opts: RunnerOpts) {}
@@ -223,11 +227,15 @@ export class DaemonRunner {
    * stale response from deleting a directory out from under a live dispatch.
    */
   private async reapWorkspaces(workspaceKeys: readonly string[]): Promise<void> {
+    const cutoff = Date.now() - DaemonRunner.REAP_MEMORY_MS;
+    for (const [key, at] of this.reaped) {
+      if (at < cutoff) this.reaped.delete(key);
+    }
     for (const key of workspaceKeys) {
       if (this.activeWorkspaceKeys.has(key) || this.reaped.has(key)) continue;
       try {
         await removeWorkspace(key);
-        this.reaped.add(key);
+        this.reaped.set(key, Date.now());
       } catch (err) {
         this.opts.logger.warn(`workspace reap failed for ${key}`, { err: String(err) });
       }

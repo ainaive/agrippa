@@ -48,7 +48,12 @@ import {
 import { and, eq, gte, inArray, max, ne, sql } from "drizzle-orm";
 import { upgradeCompiledTemplate } from "../compile";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
-import { FOLLOWUP_STEER_STEP_ID, followupSeed, followupTemplate } from "../followup";
+import {
+  FOLLOWUP_STEER_STEP_ID,
+  type FollowupSeed,
+  followupSeed,
+  followupTemplate,
+} from "../followup";
 import type { ModelResolutionEntry } from "../resolve";
 import {
   type CompiledTemplate,
@@ -59,7 +64,6 @@ import {
   type TemplatePhaseV2,
   type TemplateStepV2,
 } from "../template-schema";
-import { releaseWorkspace } from "../workspace-retention";
 import {
   type EngineDeps,
   ProviderCredentialError,
@@ -92,18 +96,29 @@ type AbortReason = "cancelled" | "timed_out" | "usage_limit_exceeded" | "drained
  */
 export const CONTEXT_LOSS_DISCLOSURE =
   "Your previous conversation for this step could not be restored, so you are starting " +
-  "without it. Treat nothing from that conversation as known: re-read the workspace and " +
-  "the prior step summaries above before acting, and say so if that leaves you unable to " +
-  "continue.";
+  "without it. Treat nothing from that conversation as known, and say so if that leaves " +
+  "you unable to continue.";
+
+/** Appended only when there IS prior context — see withContextLossDisclosure. */
+export const CONTEXT_LOSS_PRIOR_CONTEXT_HINT =
+  " Re-read the workspace and the prior step summaries above before acting.";
 
 /**
  * Compose the disclosure into a step's instructions. Concatenation, not
  * interpolation: whatever the instructions contain is already fully resolved,
  * and re-scanning them here would evaluate template syntax that a later
  * feature (an operator's steering message) legitimately puts in this string.
+ *
+ * The "prior step summaries above" clause is conditional, because it was
+ * written for a crash-resume — which always has them — and a follow-up's own
+ * run has a single step. Telling an agent to consult something that is not
+ * there is how a disclosure meant to be honest becomes noise.
  */
-export function withContextLossDisclosure(instructions: string): string {
-  return `${CONTEXT_LOSS_DISCLOSURE}\n\n${instructions}`;
+export function withContextLossDisclosure(instructions: string, hasPriorContext: boolean): string {
+  const disclosure = hasPriorContext
+    ? CONTEXT_LOSS_DISCLOSURE + CONTEXT_LOSS_PRIOR_CONTEXT_HINT
+    : CONTEXT_LOSS_DISCLOSURE;
+  return `${disclosure}\n\n${instructions}`;
 }
 
 /** A run's per-slot execution binding, resolved once at pickup. */
@@ -368,7 +383,7 @@ export async function executeRun(
       project: { id: project.id, slug: project.slug, name: project.name },
     },
     catalog,
-    seed?.sessionId ?? null,
+    seed,
   );
   return await engine.execute(control);
 }
@@ -415,12 +430,13 @@ class RunEngine {
     },
     private readonly catalog: ProviderCatalog,
     /**
-     * The conversation this follow-up continues (ADR-0018): the parent's last
-     * executor session, handed to the steer step's first attempt. Null for
-     * everything else — including a follow-up whose parent left no session,
-     * which then starts honestly fresh rather than pretending otherwise.
+     * What this follow-up continues (ADR-0018): the parent's last executor
+     * session, handed to the steer step's first attempt, and the parent's step
+     * outputs, which become the follow-up's prior context. Null for everything
+     * else — and a follow-up whose parent left no session starts honestly
+     * fresh rather than pretending otherwise.
      */
-    private readonly followupSessionId: string | null = null,
+    private readonly followup: FollowupSeed | null = null,
   ) {
     this.leaseOwner = deps.lease?.owner ?? `engine-${Bun.randomUUIDv7()}`;
     this.leaseTtlMs = deps.lease?.ttlMs ?? RUN_LEASE_TTL_MS;
@@ -1173,7 +1189,7 @@ class RunEngine {
       // fresh either way: whatever went wrong, the conversation is suspect.
       const inherited =
         attempt === startAttempt && step.id === FOLLOWUP_STEER_STEP_ID
-          ? this.followupSessionId
+          ? (this.followup?.sessionId ?? null)
           : null;
       const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? inherited) : null;
       const row = await this.insertStepRow(phase, step, attempt, resumeSessionId);
@@ -1432,7 +1448,10 @@ class RunEngine {
         const { resumeSessionId: _dead, ...fresh } = request;
         result = await this.invokeExecutor(phase, step, row, attempt, binding, {
           ...fresh,
-          instructions: withContextLossDisclosure(request.instructions),
+          instructions: withContextLossDisclosure(
+            request.instructions,
+            request.priorContext.length > 0,
+          ),
         });
       } else if (result.resumed === undefined) {
         // Fails closed: an executor that claims `verified`, is given a session
@@ -1662,13 +1681,22 @@ class RunEngine {
       });
     }
 
-    const priorContext: PriorStepSummary[] = Object.entries(this.stepOutputs).map(
-      ([stepId, value]) => ({
+    // A follow-up's own run has one step, so its prior context is what the
+    // PARENT produced (ADR-0018). Without this a rejected resume left the
+    // agent with a message and no account of the work it was continuing —
+    // and the context-loss disclosure pointed at summaries that were not there.
+    const priorContext: PriorStepSummary[] = [
+      ...(this.followup?.priorOutputs ?? []).map((prior) => ({
+        stepId: prior.stepId,
+        output: prior.output,
+        artifactKeys: [],
+      })),
+      ...Object.entries(this.stepOutputs).map(([stepId, value]) => ({
         stepId,
         output: String(value.outputs.result ?? ""),
         artifactKeys: [],
-      }),
-    );
+      })),
+    ];
 
     // slot resolution is single-provider, so the step model's provider also
     // covers every subagent model in this request
@@ -2245,13 +2273,12 @@ class RunEngine {
       payload: eventPayload,
       createdAt: result.createdAt.toISOString(),
     });
-    // Release, don't delete (ADR-0018 Decision 4). The directory can outlive
-    // this run — a follow-up continues it — so finalize stamps an expiry and
-    // the collector deletes once EVERY run sharing the key has released it.
-    // The manager still drops whatever is this run's alone (a remote run's
-    // local staging dir); the workspace itself is now group-owned.
+    // Release, don't delete (ADR-0018 Decision 4). The expiry itself was
+    // stamped by finalizeRun above, inside the CAS — every finalization path
+    // needs it, not just this one. What is left here is the manager dropping
+    // whatever belongs to THIS run alone (a remote run's local staging dir);
+    // the workspace itself is group-owned and outlives the run.
     try {
-      await releaseWorkspace(this.db, this.run.id);
       await this.deps.workspace.release(this.run.id);
     } catch (err) {
       this.deps.logger.warn("workspace release failed", { err: String(err) });

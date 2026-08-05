@@ -44,6 +44,17 @@ export type FollowupSeed = {
   sessionId: string | null;
   /** A patch-kind artifact key to re-diff into, when the base declares one. */
   patchArtifactKey: string | null;
+  /**
+   * What the parent's steps produced, in order — the follow-up's prior
+   * context.
+   *
+   * Without it a follow-up whose resume was REJECTED has nothing at all: its
+   * own run has one step, so the engine's usual prior-context source is empty,
+   * and the context-loss disclosure would point at summaries that do not
+   * exist. The session is the good path; this is what makes the honest fallback
+   * honest.
+   */
+  priorOutputs: Array<{ stepId: string; output: string }>;
 };
 
 /**
@@ -95,11 +106,19 @@ export async function followupSeed(
 
   const patch = base.spec.outputs.artifacts.find((artifact) => artifact.kind === "patch");
 
+  // ascending, deduped to the latest attempt per step: the same shape the
+  // engine builds for an ordinary run's prior context
+  const latestOutput = new Map<string, string>();
+  for (const row of [...rows].reverse()) {
+    if (row.output) latestOutput.set(row.stepId, row.output);
+  }
+
   return {
     slot,
     modelRole,
     sessionId: sessionRow?.sessionId ?? null,
     patchArtifactKey: patch?.key ?? null,
+    priorOutputs: [...latestOutput].map(([stepId, output]) => ({ stepId, output })),
   };
 }
 

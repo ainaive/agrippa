@@ -1,6 +1,7 @@
 import { type CheckpointStoredResponse, canTransitionRun, type RunStatus } from "@agrippa/core";
 import { checkpoints, type Db, type DbOrTx, runEvents, runs } from "@agrippa/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { workspaceExpiryAt } from "../workspace-retention";
 
 /**
  * Run-lifecycle module (docs/design/04, ADR-0007): the one place that mutates
@@ -309,6 +310,14 @@ export async function finalizeRun(db: Db, input: FinalizeRunInput): Promise<Fina
         // finalization path (engine, worker retry-exhaustion, API cancel)
         leaseOwner: null,
         leaseExpiresAt: null,
+        // …and it stops holding its workspace, for exactly the same reason and
+        // on exactly the same paths (ADR-0018 Decision 4). Written here rather
+        // than by the engine afterwards: a cancelled or retry-exhausted run
+        // got no retention window at all that way — and a failed run's
+        // directory is the one most worth keeping — while a lost follow-up
+        // write left a workspace nothing would ever collect. Inside the CAS it
+        // happens exactly once, with the terminal write, or not at all.
+        workspaceExpiresAt: workspaceExpiryAt(),
       })
       .where(and(...conds))
       .returning({ id: runs.id });
