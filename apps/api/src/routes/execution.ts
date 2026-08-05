@@ -15,6 +15,7 @@ import {
   artifacts,
   checkpoints,
   fabri,
+  newRunIdentity,
   orchestrationTemplates,
   projectMembers,
   projects,
@@ -404,6 +405,10 @@ export const executionRoutes = new Hono<AppEnv>()
         const [run] = await tx
           .insert(runs)
           .values({
+            // a retry gets a FRESH workspace: ADR-0014 re-resolves
+            // configuration and re-clones from the pinned base, so inheriting
+            // the predecessor's directory would contradict what retry means
+            ...newRunIdentity(),
             taskId: task.id,
             projectId: task.projectId,
             number: head.number + 1,

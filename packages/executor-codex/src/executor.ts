@@ -195,9 +195,13 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       const env = overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "openai");
       if (req.providerAuth) {
         // An ambient CODEX_HOME auth.json would outrank the project key, so
-        // the run gets its own home — per run, not per step, because resume
-        // sessions live under CODEX_HOME. Left for OS tmp reaping.
-        const home = path.join(tmpdir(), "agrippa-codex-home", req.runId);
+        // the invocation gets its own home. Scoped to the WORKSPACE, not the
+        // run (ADR-0018): resume threads live under CODEX_HOME, and a
+        // follow-up is a new run continuing the same workspace — keyed by run
+        // it could not find its own thread, then reported success as though it
+        // had. The workspace directory's own name is that key, on every host
+        // and both transports. Left for OS tmp reaping.
+        const home = path.join(tmpdir(), "agrippa-codex-home", path.basename(req.workspaceDir));
         mkdirSync(home, { recursive: true });
         env.CODEX_HOME = home;
       }

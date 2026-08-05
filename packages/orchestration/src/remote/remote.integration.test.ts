@@ -7,6 +7,7 @@ import {
   dispatches,
   mcpServers,
   migrateDb,
+  newRunIdentity,
   orchestrationTemplates,
   projects,
   providerCredentials,
@@ -73,6 +74,7 @@ async function newRun(
   const [run] = await db
     .insert(runs)
     .values({
+      ...newRunIdentity(),
       taskId,
       projectId,
       number: runNumber,

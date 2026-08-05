@@ -4,6 +4,7 @@ import {
   auditLogs,
   dispatchEvents,
   dispatches,
+  newRunIdentity,
   orchestrationTemplates,
   projects,
   runSteps,
@@ -266,6 +267,7 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     const [run] = await db
       .insert(runs)
       .values({
+        ...newRunIdentity(),
         taskId: task?.id as string,
         projectId: project?.id as string,
         number: 1,
@@ -280,28 +282,44 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     runId = run?.id as string;
   });
 
-  it("names this runtime's finished runs so the daemon can reap their workspaces", async () => {
+  it("names this runtime's spent workspaces so the daemon can reap them", async () => {
     // Affinity gives the daemon a run's workspace for the run's whole life, so
     // only the server — where the engine finalizes, even for a remote executor
     // — can say when the directory is spent. Without this every remote run
     // leaves a clone on the daemon host permanently.
-    const pinned = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
-    expect(pinned.reapableRunIds ?? []).not.toContain(runId);
+    const pinned = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(pinned.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
     await db
       .update(runs)
       .set({ runtimeId, status: "succeeded", finishedAt: sql`now()` })
       .where(eq(runs.id, runId));
-    const done = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
-    expect(done.reapableRunIds).toContain(runId);
+    const done = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(done.reapableWorkspaceKeys).toContain(runId);
 
     // never another runtime's, and never one that is still going
-    const foreign = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim(otherToken));
-    expect(foreign.reapableRunIds ?? []).not.toContain(runId);
+    const foreign = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(
+      await daemonClaim(otherToken),
+    );
+    expect(foreign.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
     await db.update(runs).set({ status: "running" }).where(eq(runs.id, runId));
-    const live = await jsonOf<{ reapableRunIds?: string[] }>(await daemonClaim());
-    expect(live.reapableRunIds ?? []).not.toContain(runId);
+    const live = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(live.reapableWorkspaceKeys ?? []).not.toContain(runId);
+
+    // The two coincide for an ordinary run, which is exactly why the field
+    // must be pinned against a run whose workspace key is NOT its id — a
+    // follow-up's shape (ADR-0018 Decision 3). Naming the run would tell the
+    // daemon to delete a directory it does not have while the one it does
+    // have leaks.
+    const inherited = crypto.randomUUID();
+    await db
+      .update(runs)
+      .set({ workspaceKey: inherited, status: "succeeded", finishedAt: sql`now()` })
+      .where(eq(runs.id, runId));
+    const followup = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(followup.reapableWorkspaceKeys).toContain(inherited);
+    expect(followup.reapableWorkspaceKeys).not.toContain(runId);
   });
 
   it("claim is atomic, oldest-first, and scoped to the runtime", async () => {

@@ -202,14 +202,16 @@ export const daemonRoutes = new Hono<DaemonEnv>()
           eq(dispatches.abortRequested, true),
         ),
       );
-    // Runs pinned here that have finalized: the daemon holds their workspaces
-    // and cannot tell on its own that they are done, because the engine runs
-    // centrally even when the executor is remote. Bounded by a recency window
-    // rather than an acknowledgement — removal is idempotent, so repeating an
-    // id costs nothing, and anything older than the window is collected by the
-    // daemon's own backstop sweep.
+    // Workspaces of runs pinned here that have finalized: the daemon holds the
+    // directories and cannot tell on its own that they are done, because the
+    // engine runs centrally even when the executor is remote. Named by
+    // workspace key rather than run id (ADR-0018 Decision 3) — the directory
+    // is what gets deleted, and distinct so a chain sharing one workspace does
+    // not repeat it. Bounded by a recency window rather than an
+    // acknowledgement: removal is idempotent, so repeating a key costs
+    // nothing, and anything older is collected by the daemon's backstop sweep.
     const reapable = await c.var.db
-      .select({ id: runs.id })
+      .selectDistinct({ workspaceKey: runs.workspaceKey })
       .from(runs)
       .where(
         and(
@@ -222,7 +224,7 @@ export const daemonRoutes = new Hono<DaemonEnv>()
     const response: DaemonClaimResponse = {
       dispatch: claimed,
       abortedDispatchIds: aborted.map((r) => r.id),
-      reapableRunIds: reapable.map((r) => r.id),
+      reapableWorkspaceKeys: reapable.map((r) => r.workspaceKey),
     };
     return c.json(response);
   })

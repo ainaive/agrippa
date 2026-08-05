@@ -128,31 +128,38 @@ export async function git(
   return await runGit(args, { cwd, env, profile });
 }
 
-/** The run's agent-visible checkout directory. */
-export function workspaceDirFor(runId: string): string {
-  return path.join(workspaceRoot(), runId);
+/**
+ * The agent-visible checkout directory for a workspace key.
+ *
+ * The key is deliberately not a run id (ADR-0018 Decision 3). This package has
+ * never known what a run is — the id was only ever a directory name — and a
+ * chain of runs steering the same work shares one directory, so naming the
+ * parameter for what it identifies is the whole change on this side.
+ */
+export function workspaceDirFor(workspaceKey: string): string {
+  return path.join(workspaceRoot(), workspaceKey);
 }
 
 /** Platform-owned sidecar, outside the agent's writable workspace root. */
-export function platformDirFor(runId: string): string {
-  return path.join(workspaceRoot(), `${runId}.platform`);
+export function platformDirFor(workspaceKey: string): string {
+  return path.join(workspaceRoot(), `${workspaceKey}.platform`);
 }
 
 /** Trusted gitdir used for all evidence and publication operations. */
-export function platformGitDirFor(runId: string): string {
-  return path.join(platformDirFor(runId), "git");
+export function platformGitDirFor(workspaceKey: string): string {
+  return path.join(platformDirFor(workspaceKey), "git");
 }
 
 /** Run Git with trusted metadata and the agent workspace only as a worktree. */
 export async function platformGit(
-  runId: string,
+  workspaceKey: string,
   args: string[],
   env: Record<string, string> = {},
 ): Promise<string> {
   return await runGit(args, {
-    cwd: platformDirFor(runId),
-    gitDir: platformGitDirFor(runId),
-    workTree: workspaceDirFor(runId),
+    cwd: platformDirFor(workspaceKey),
+    gitDir: platformGitDirFor(workspaceKey),
+    workTree: workspaceDirFor(workspaceKey),
     env,
   });
 }
@@ -179,9 +186,9 @@ export async function sanitizeAgentWorkspace(dir: string): Promise<void> {
 }
 
 /** Clone-base SHA from trusted metadata; null means the sidecar is incomplete. */
-export async function platformBaseSha(runId: string): Promise<string | null> {
+export async function platformBaseSha(workspaceKey: string): Promise<string | null> {
   try {
-    const sha = await platformGit(runId, ["rev-parse", "--verify", BASE_REF]);
+    const sha = await platformGit(workspaceKey, ["rev-parse", "--verify", BASE_REF]);
     return sha.trim() || null;
   } catch {
     return null;
@@ -199,12 +206,12 @@ export type PlatformSnapshot = {
  * Evidence and publication both use this exact operation, including Git's
  * normalization rules and binary patches.
  */
-export async function stagePlatformSnapshot(runId: string): Promise<PlatformSnapshot> {
-  const baseSha = await platformBaseSha(runId);
+export async function stagePlatformSnapshot(workspaceKey: string): Promise<PlatformSnapshot> {
+  const baseSha = await platformBaseSha(workspaceKey);
   if (!baseSha) throw new Error("trusted platform git base is missing");
-  await platformGit(runId, ["read-tree", baseSha]);
-  await platformGit(runId, ["add", "-A", "--", ".", ...PROTECTED_PATHSPECS]);
-  const patch = await platformGit(runId, [
+  await platformGit(workspaceKey, ["read-tree", baseSha]);
+  await platformGit(workspaceKey, ["add", "-A", "--", ".", ...PROTECTED_PATHSPECS]);
+  const patch = await platformGit(workspaceKey, [
     "diff",
     "--cached",
     "--binary",
@@ -215,7 +222,7 @@ export async function stagePlatformSnapshot(runId: string): Promise<PlatformSnap
     ".",
     ...PROTECTED_PATHSPECS,
   ]);
-  const treeSha = (await platformGit(runId, ["write-tree"])).trim();
+  const treeSha = (await platformGit(workspaceKey, ["write-tree"])).trim();
   return { baseSha, patch, treeSha };
 }
 
@@ -238,14 +245,14 @@ export type CheckoutSource = {
 };
 
 /**
- * Per-run checkout with dual Git metadata:
+ * Per-workspace checkout with dual Git metadata:
  *
  * - workspace/.git is agent-owned and exists for local checkpoints/review;
- * - <run>.platform/git is an independent pristine copy used by the platform.
+ * - <key>.platform/git is an independent pristine copy used by the platform.
  */
-export async function checkoutFromUrl(runId: string, source: CheckoutSource): Promise<void> {
-  const dir = workspaceDirFor(runId);
-  const platformDir = platformDirFor(runId);
+export async function checkoutFromUrl(workspaceKey: string, source: CheckoutSource): Promise<void> {
+  const dir = workspaceDirFor(workspaceKey);
+  const platformDir = platformDirFor(workspaceKey);
 
   await rm(dir, { recursive: true, force: true });
   await rm(platformDir, { recursive: true, force: true });
@@ -289,18 +296,18 @@ export async function checkoutFromUrl(runId: string, source: CheckoutSource): Pr
   // Move the pristine metadata out first, then give the agent a byte-copy.
   // No inode/object storage is shared between the trust domains.
   await mkdir(platformDir, { recursive: true });
-  await rename(path.join(dir, ".git"), platformGitDirFor(runId));
-  await cp(platformGitDirFor(runId), path.join(dir, ".git"), { recursive: true });
+  await rename(path.join(dir, ".git"), platformGitDirFor(workspaceKey));
+  await cp(platformGitDirFor(workspaceKey), path.join(dir, ".git"), { recursive: true });
   await sanitizeAgentWorkspace(dir);
 }
 
 /** Whether a previously checked-out workspace is actually present here. */
-export async function workspaceIntact(runId: string): Promise<boolean> {
+export async function workspaceIntact(workspaceKey: string): Promise<boolean> {
   try {
     const [workspace, gitDir, head] = await Promise.all([
-      lstat(workspaceDirFor(runId)),
-      lstat(platformGitDirFor(runId)),
-      lstat(path.join(platformGitDirFor(runId), "HEAD")),
+      lstat(workspaceDirFor(workspaceKey)),
+      lstat(platformGitDirFor(workspaceKey)),
+      lstat(path.join(platformGitDirFor(workspaceKey), "HEAD")),
     ]);
     return workspace.isDirectory() && gitDir.isDirectory() && head.isFile();
   } catch {
@@ -308,9 +315,9 @@ export async function workspaceIntact(runId: string): Promise<boolean> {
   }
 }
 
-export async function removeWorkspace(runId: string): Promise<void> {
-  await rm(workspaceDirFor(runId), { recursive: true, force: true });
-  await rm(platformDirFor(runId), { recursive: true, force: true });
+export async function removeWorkspace(workspaceKey: string): Promise<void> {
+  await rm(workspaceDirFor(workspaceKey), { recursive: true, force: true });
+  await rm(platformDirFor(workspaceKey), { recursive: true, force: true });
 }
 
 export type ApplyApprovedPatchSpec = {

@@ -49,12 +49,12 @@ export class DaemonRunner {
   private hints: DaemonProtocolHints = DAEMON_PROTOCOL_HINTS;
   private stopped = false;
   private readonly activeAborts = new Map<string, AbortController>();
-  /** Runs executing here right now — never reap one of these. */
-  private readonly activeRunIds = new Set<string>();
+  /** Workspaces being executed in right now — never reap one of these. */
+  private readonly activeWorkspaceKeys = new Set<string>();
   /**
-   * Already deleted this process, so a run named on every poll for the rest of
-   * its 24-hour window costs one `has` rather than an `rm -rf` each time.
-   * Bounded by that window; a restart simply re-reaps, which is a no-op.
+   * Already deleted this process, so a workspace named on every poll for the
+   * rest of its 24-hour window costs one `has` rather than an `rm -rf` each
+   * time. Bounded by that window; a restart simply re-reaps, a no-op.
    */
   private readonly reaped = new Set<string>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -97,7 +97,7 @@ export class DaemonRunner {
       for (const dispatchId of claim.abortedDispatchIds) {
         this.activeAborts.get(dispatchId)?.abort("server requested abort");
       }
-      await this.reapWorkspaces(claim.reapableRunIds ?? []);
+      await this.reapWorkspaces(claim.reapableWorkspaceKeys ?? []);
       if (claim.dispatch) await this.executeDispatch(claim.dispatch);
     }
   }
@@ -114,20 +114,24 @@ export class DaemonRunner {
     const { api, logger } = this.opts;
     const controller = new AbortController();
     this.activeAborts.set(dispatch.id, controller);
-    this.activeRunIds.add(dispatch.runId);
+    this.activeWorkspaceKeys.add(dispatch.payload.workspaceKey ?? dispatch.runId);
     try {
       const executor = this.opts.executors[dispatch.payload.executorId];
       if (!executor) {
         throw new Error(`executor '${dispatch.payload.executorId}' is not available here`);
       }
 
+      // Directories are keyed by workspace, not by run (ADR-0018 Decision 3):
+      // a follow-up inherits its parent's key so it continues that work rather
+      // than cloning beside it. Equal to the run id for every other run.
       const runId = dispatch.runId;
-      const workspaceDir = workspaceDirFor(runId);
+      const workspaceKey = dispatch.payload.workspaceKey ?? runId;
+      const workspaceDir = workspaceDirFor(workspaceKey);
       if (dispatch.payload.workspace) {
         const spec = dispatch.payload.workspace;
-        if (!(await workspaceIntact(runId))) {
+        if (!(await workspaceIntact(workspaceKey))) {
           logger.info(`cloning ${spec.repoUrl} for run ${runId} (ambient git auth)`);
-          await checkoutFromUrl(runId, {
+          await checkoutFromUrl(workspaceKey, {
             cloneUrl: spec.repoUrl,
             displayUrl: spec.repoUrl,
             ...(spec.ref !== undefined ? { ref: spec.ref } : {}),
@@ -167,7 +171,7 @@ export class DaemonRunner {
         // uploaded like any artifact — the server hashes it at store time
         let result: { baseSha?: string; treeSha?: string } = {};
         if (dispatch.payload.workspace && dispatch.payload.workspace.access === "readWrite") {
-          const snapshot = await stagePlatformSnapshot(runId);
+          const snapshot = await stagePlatformSnapshot(workspaceKey);
           await api.uploadArtifact(dispatch.id, DISPATCH_EVIDENCE_KEY, snapshot.patch);
           result = { baseSha: snapshot.baseSha, treeSha: snapshot.treeSha };
         }
@@ -185,7 +189,7 @@ export class DaemonRunner {
         .catch((failErr) => logger.warn("fail() report lost", { err: String(failErr) }));
     } finally {
       this.activeAborts.delete(dispatch.id);
-      this.activeRunIds.delete(dispatch.runId);
+      this.activeWorkspaceKeys.delete(dispatch.payload.workspaceKey ?? dispatch.runId);
     }
   }
 
@@ -204,14 +208,14 @@ export class DaemonRunner {
    * belt and braces — the server only names terminal runs — but it keeps a
    * stale response from deleting a directory out from under a live dispatch.
    */
-  private async reapWorkspaces(runIds: readonly string[]): Promise<void> {
-    for (const runId of runIds) {
-      if (this.activeRunIds.has(runId) || this.reaped.has(runId)) continue;
+  private async reapWorkspaces(workspaceKeys: readonly string[]): Promise<void> {
+    for (const key of workspaceKeys) {
+      if (this.activeWorkspaceKeys.has(key) || this.reaped.has(key)) continue;
       try {
-        await removeWorkspace(runId);
-        this.reaped.add(runId);
+        await removeWorkspace(key);
+        this.reaped.add(key);
       } catch (err) {
-        this.opts.logger.warn(`workspace reap failed for run ${runId}`, { err: String(err) });
+        this.opts.logger.warn(`workspace reap failed for ${key}`, { err: String(err) });
       }
     }
   }

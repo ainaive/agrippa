@@ -6,6 +6,7 @@ import {
   createDb,
   migrateDb,
   models,
+  newRunIdentity,
   orchestrationTemplates,
   projectResourceGrants,
   projects,
@@ -236,6 +237,7 @@ describe.skipIf(!dbUp)("heterogeneous fleet routing (Phase A verify)", () => {
     const [run] = await db
       .insert(runs)
       .values({
+        ...newRunIdentity(),
         taskId: task?.id as string,
         projectId,
         number,

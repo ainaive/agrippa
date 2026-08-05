@@ -8,6 +8,7 @@ import {
   type Db,
   migrateDb,
   models,
+  newRunIdentity,
   orchestrationTemplates,
   projectQuotas,
   projectResourceGrants,
@@ -255,6 +256,7 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const [run] = await db
     .insert(runs)
     .values({
+      ...newRunIdentity(),
       taskId: task.id,
       projectId: project.id,
       number: 1,
@@ -1436,6 +1438,7 @@ async function setupV2Fixture(sourceYaml = V2_FIXTURE_YAML): Promise<V2Fixture> 
   const [run] = await db
     .insert(runs)
     .values({
+      ...newRunIdentity(),
       taskId: task.id,
       projectId: project.id,
       number: 1,

@@ -38,7 +38,7 @@ infra/docker-compose.yml
 | `ANTHROPIC_API_KEY` | Claude executor (worker only) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | Codex executor's `openai` provider (worker only); both optional — a keyless worker still registers `codex-cli` and defers runs needing env auth it lacks |
 | `WORKER_SLOTS` | run concurrency per worker (default 2) |
-| `WORKSPACE_ROOT` | per-run workspaces volume (default `/work/runs`) |
+| `WORKSPACE_ROOT` | workspaces volume, one directory per workspace key (default `/work/runs`) |
 | `ARTIFACT_STORAGE_ROOT` | large-artifact volume |
 | `AGRIPPA_PORT` | published port mapping; accepts an interface (`127.0.0.1:3000`) so the plain-HTTP API isn't exposed beside the TLS terminator |
 | `AGRIPPA_HSTS_MAX_AGE` | `Strict-Transport-Security` lifetime in seconds (default 31536000). Emitted only when the proxy forwards `X-Forwarded-Proto: https`, so it is inert without TLS. `0` is not "off" — it emits `max-age=0`, which clears a pin browsers already cached, and is the rollback path |

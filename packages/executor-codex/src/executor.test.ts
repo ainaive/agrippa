@@ -298,14 +298,36 @@ describe("codex executor", () => {
     expect(argv).not.toContain("model_provider=agrippa");
   });
 
+  it("a second run in the same workspace gets the same CODEX_HOME", async () => {
+    // Resume threads live under CODEX_HOME, so its scope must follow the
+    // WORKSPACE, not the run (ADR-0018): a follow-up is a new run continuing
+    // the same workspace, and keyed by run it would look for its own thread in
+    // an empty home, start fresh, and report success as though it had resumed.
+    savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const workspaceDir = makeWorkspace("env");
+    const auth = { provider: "openai", apiKey: "sk-openai-project" };
+    const homeOf = async (runId: string): Promise<string | null> => {
+      const events = await collect(makeReq(workspaceDir, { runId, providerAuth: auth }));
+      const done = events.find((e) => e.type === "step.completed");
+      const seen = JSON.parse(done?.type === "step.completed" ? done.output : "{}") as {
+        codexHome: string | null;
+      };
+      return seen.codexHome;
+    };
+    const first = await homeOf("run-ancestor");
+    expect(first).toContain("agrippa-codex-home");
+    expect(await homeOf("run-followup")).toBe(first as string);
+  });
+
   it("project credential replaces env auth and redirects CODEX_HOME", async () => {
     savedEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     savedEnv.CODEX_HOME = process.env.CODEX_HOME;
     process.env.OPENAI_API_KEY = "sk-worker-env";
     process.env.CODEX_HOME = "/home/worker/.codex";
 
+    const workspaceDir = makeWorkspace("env");
     const events = await collect(
-      makeReq(makeWorkspace("env"), {
+      makeReq(workspaceDir, {
         providerAuth: {
           provider: "openai",
           apiKey: "sk-openai-project",
@@ -323,7 +345,7 @@ describe("codex executor", () => {
     expect(seen.openaiBaseUrl).toBe("https://proxy.example.com/v1");
     // ambient auth.json under the worker's CODEX_HOME must not outrank the key
     expect(seen.codexHome).toContain("agrippa-codex-home");
-    expect(seen.codexHome).toContain("run-1");
+    expect(seen.codexHome).toContain(path.basename(workspaceDir));
   });
 
   it("scrubs the subprocess environment down to the allow-list", async () => {

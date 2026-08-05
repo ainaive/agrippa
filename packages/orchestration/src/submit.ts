@@ -2,6 +2,7 @@ import { AppError, type RunQueue, type TaskSubmitInput } from "@agrippa/core";
 import {
   type Db,
   type DbOrTx,
+  newRunIdentity,
   orchestrationTemplates,
   projects,
   runs,
@@ -215,6 +216,7 @@ export async function submitTaskIn(db: DbOrTx, args: SubmitTaskArgs): Promise<Su
     .returning();
   if (!task) throw new Error("task insert failed");
   const [run] = await insertRunOrRaiseDuplicate(db, originKey, {
+    ...newRunIdentity(), // id + the workspace key that starts out equal to it
     taskId: task.id,
     projectId,
     number: 1,

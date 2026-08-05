@@ -71,6 +71,8 @@ const dispatchFor = (
   runId,
   payload: {
     executorId: executor,
+    // for everything but a follow-up the workspace key IS the run id
+    workspaceKey: runId,
     request: {
       runId,
       stepId: "step-1",
@@ -250,9 +252,9 @@ describe("daemon runner config isolation", () => {
     const runner = makeRunner(api, new FakeExecutor({}));
     await runner.register();
     api.claimQueue = [
-      { dispatch: null, abortedDispatchIds: [], reapableRunIds: [finished] },
+      { dispatch: null, abortedDispatchIds: [], reapableWorkspaceKeys: [finished] },
       // second poll ends the loop, so start() returns
-      { dispatch: null, abortedDispatchIds: [], reapableRunIds: [] },
+      { dispatch: null, abortedDispatchIds: [], reapableWorkspaceKeys: [] },
     ];
     const loop = runner.start();
     while (api.claimCalls < 2) await Bun.sleep(5);

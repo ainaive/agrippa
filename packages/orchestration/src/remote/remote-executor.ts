@@ -18,6 +18,7 @@ import type {
   StepExecutionRequest,
 } from "@agrippa/executor-core";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { workspaceKeyOf } from "../engine/run-lifecycle";
 
 /** How often the engine-side stream polls dispatch_events / dispatch status. */
 const POLL_MS = 500;
@@ -299,6 +300,7 @@ export class RemoteExecutor implements Executor {
       request: wireRequest as unknown as Record<string, unknown>,
       workspace: await this.opts.workspaceSpec(),
       skills,
+      workspaceKey: await workspaceKeyOf(this.opts.db, request.runId),
     };
   }
 

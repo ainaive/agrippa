@@ -1,5 +1,11 @@
 import { type Db, dispatches, runs } from "@agrippa/db";
-import type { PullRequestSpec, PushResult, PushSpec, ScmService } from "@agrippa/orchestration";
+import {
+  type PullRequestSpec,
+  type PushResult,
+  type PushSpec,
+  type ScmService,
+  workspaceKeyOf,
+} from "@agrippa/orchestration";
 import { applyApprovedPatch, platformGitDirFor, workspaceIntact } from "@agrippa/workspace";
 import { and, desc, eq } from "drizzle-orm";
 import {
@@ -70,15 +76,21 @@ export async function gitcodeCredentialedUrl(repoUrl: string, token: string): Pr
 export class GitScmService implements ScmService {
   constructor(private readonly db: Db) {}
 
+  /** Run id → directory identity, resolved at the boundary (ADR-0018 Decision 3). */
+  private key(runId: string): Promise<string> {
+    return workspaceKeyOf(this.db, runId);
+  }
+
   async createBranch(runId: string, name: string): Promise<void> {
+    const key = await this.key(runId);
     // Daemon-routed runs have no local checkout: the engine still records
     // runs.work_branch, and the daemon materializes it (`checkout -B`) from
     // the dispatch payload. Publication no longer needs a sidecar ref anchor
     // (ADR-0017 Decision 5), so remotely there is nothing to do here.
-    if (!(await workspaceIntact(runId))) return;
+    if (!(await workspaceIntact(key))) return;
     // Central runs: the last platform operation against agent-visible .git,
     // before any agent step — the agent is told to commit to this branch.
-    await git(["checkout", "-B", name], workspaceDirFor(runId));
+    await git(["checkout", "-B", name], workspaceDirFor(key));
   }
 
   async push(runId: string, spec: PushSpec): Promise<PushResult> {
@@ -88,7 +100,8 @@ export class GitScmService implements ScmService {
     // (store-time sha256) and passes them as expectedPatch — no workspace
     // state participates, so post-approval drift is structurally irrelevant
     // and evidence_mismatch cannot occur at this layer anymore.
-    const patch = spec.expectedPatch ?? (await stagePlatformSnapshot(runId)).patch;
+    const key = await this.key(runId);
+    const patch = spec.expectedPatch ?? (await stagePlatformSnapshot(key)).patch;
     if (patch.length === 0) {
       throw new Error("nothing to publish — the approved patch is empty");
     }
@@ -105,12 +118,12 @@ export class GitScmService implements ScmService {
     // daemon involvement) — never the dispatch report. A daemon-chosen base
     // could be any other reachable commit, and a benign patch applying
     // cleanly on top would smuggle that commit's contents past the approval.
-    const sidecarBase = await platformBaseSha(runId);
+    const sidecarBase = await platformBaseSha(key);
     let fetchSource: string;
     let fetchRef: string;
     let baseSha: string;
     if (sidecarBase) {
-      fetchSource = platformGitDirFor(runId);
+      fetchSource = platformGitDirFor(key);
       fetchRef = "refs/agrippa/base";
       baseSha = sidecarBase;
     } else {

@@ -16,6 +16,7 @@ import { git } from "@agrippa/workspace";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { DiskArtifactStore } from "../artifact-store";
 import type { WorkspaceManager, WorkspaceSpec } from "../engine/deps";
+import { workspaceKeyOf } from "../engine/run-lifecycle";
 
 /** Runtime liveness window for isIntact — mirrors routing's 60s watermark. */
 const RUNTIME_LIVE_MS = 60_000;
@@ -40,12 +41,15 @@ export class RemoteWorkspaceManager implements WorkspaceManager {
     private readonly runtimeId: string,
   ) {}
 
-  private stagingDir(runId: string): string {
-    return path.join(tmpdir(), "agrippa-remote", runId);
+  private stagingDir(workspaceKey: string): string {
+    return path.join(tmpdir(), "agrippa-remote", workspaceKey);
   }
 
   async ensureDir(runId: string): Promise<string> {
-    const dir = this.stagingDir(runId);
+    // keyed like the daemon's real workspace (ADR-0018 Decision 3), so a
+    // follow-up's staged skill files land beside its ancestor's rather than in
+    // a directory nothing else will ever look at
+    const dir = this.stagingDir(await workspaceKeyOf(this.db, runId));
     await mkdir(dir, { recursive: true });
     return dir;
   }
@@ -169,6 +173,9 @@ export class RemoteWorkspaceManager implements WorkspaceManager {
   }
 
   async cleanup(runId: string): Promise<void> {
-    await rm(this.stagingDir(runId), { recursive: true, force: true });
+    await rm(this.stagingDir(await workspaceKeyOf(this.db, runId)), {
+      recursive: true,
+      force: true,
+    });
   }
 }

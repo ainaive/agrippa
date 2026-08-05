@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { type Db, decryptSecret, loadSecretKey, repoConnections, secrets } from "@agrippa/db";
-import type { WorkspaceManager, WorkspaceSpec } from "@agrippa/orchestration";
+import { type WorkspaceManager, type WorkspaceSpec, workspaceKeyOf } from "@agrippa/orchestration";
 import {
   checkoutFromUrl,
   removeWorkspace,
@@ -78,15 +78,24 @@ export function credentialedUrl(url: string, token: string | null): string {
 export class GitWorkspaceManager implements WorkspaceManager {
   constructor(private readonly db: Db) {}
 
+  /**
+   * The interface stays run-keyed and the translation happens here (ADR-0018
+   * Decision 3), so the engine — which orchestrates runs, not directories —
+   * needs no notion of a workspace key at all.
+   */
+  private key(runId: string): Promise<string> {
+    return workspaceKeyOf(this.db, runId);
+  }
+
   async ensureDir(runId: string): Promise<string> {
-    const dir = workspaceDirFor(runId);
+    const dir = workspaceDirFor(await this.key(runId));
     await mkdir(dir, { recursive: true });
     return dir;
   }
 
   async checkout(runId: string, spec: WorkspaceSpec): Promise<void> {
     const { connection, token } = await loadRepoConnection(this.db, spec.projectId, spec.repo);
-    await checkoutFromUrl(runId, {
+    await checkoutFromUrl(await this.key(runId), {
       cloneUrl: credentialedUrl(connection.url, token),
       displayUrl: connection.url,
       ref: spec.ref || connection.defaultBranch,
@@ -95,15 +104,15 @@ export class GitWorkspaceManager implements WorkspaceManager {
   }
 
   async diff(runId: string): Promise<string> {
-    return (await stagePlatformSnapshot(runId)).patch;
+    return (await stagePlatformSnapshot(await this.key(runId))).patch;
   }
 
   async isIntact(runId: string): Promise<boolean> {
-    return await workspaceIntact(runId);
+    return await workspaceIntact(await this.key(runId));
   }
 
   async cleanup(runId: string): Promise<void> {
     if (process.env.AGRIPPA_KEEP_WORKSPACES === "1") return;
-    await removeWorkspace(runId);
+    await removeWorkspace(await this.key(runId));
   }
 }

@@ -124,6 +124,18 @@ export type DispatchPayload = {
   request: Record<string, unknown>;
   workspace: DispatchWorkspaceSpec | null;
   skills: DispatchSkillContent[];
+  /**
+   * Which directory on the daemon holds this run's work (ADR-0018 Decision 3).
+   * Equal to the run id for everything but a follow-up, which inherits its
+   * parent's — so a daemon that keys directories by run id silently clones
+   * fresh and reports success, losing the work it was meant to continue. That
+   * is why runtimes advertise features and a follow-up is refused to one that
+   * does not claim this: the failure is invisible rather than loud.
+   *
+   * Lives on the payload rather than inside `workspace` because a run with no
+   * repository still gets a scratch directory that a follow-up must inherit.
+   */
+  workspaceKey: string;
 };
 
 export type ClaimedDispatch = {
@@ -137,7 +149,7 @@ export type DaemonClaimResponse = {
   /** Piggybacked abort flags for this runtime's other live dispatches. */
   abortedDispatchIds: string[];
   /**
-   * Runs pinned here whose workspace is now safe to delete, piggybacked on the
+   * Workspaces pinned here that are now safe to delete, piggybacked on the
    * same poll for the same reason the aborts are.
    *
    * The daemon cannot work this out for itself. Affinity gives it the
@@ -148,8 +160,12 @@ export type DaemonClaimResponse = {
    * finalized, because the engine runs centrally even when the executor does
    * not. Absent on an older server, which an older daemon also ignores; either
    * way the backstop sweep still collects the directory eventually.
+   *
+   * Keyed by WORKSPACE, not by run (ADR-0018 Decision 3): the directory is
+   * what gets deleted, and a run is no longer the only thing that can name
+   * one. The two coincide for every run that is not a follow-up.
    */
-  reapableRunIds?: string[];
+  reapableWorkspaceKeys?: string[];
 };
 
 export const dispatchEventBatchSchema = z.object({

@@ -23,6 +23,23 @@ export type RunEventInput = {
 export type AppendedRunEvent = { seq: number; createdAt: Date };
 
 /**
+ * The directory identity behind a run (ADR-0018 Decision 3). The engine and
+ * the SCM service still speak in run ids — a run is what they orchestrate —
+ * so the translation lives here, at the one boundary where "which run" becomes
+ * "which directory". Read fresh rather than cached: workspace operations are
+ * rare next to the git work they precede, and a stale answer would point a
+ * clone, a diff, or a delete at the wrong directory.
+ */
+export async function workspaceKeyOf(db: DbOrTx, runId: string): Promise<string> {
+  const [row] = await db
+    .select({ workspaceKey: runs.workspaceKey })
+    .from(runs)
+    .where(eq(runs.id, runId));
+  if (!row) throw new Error(`run ${runId} not found — cannot resolve its workspace`);
+  return row.workspaceKey;
+}
+
+/**
  * Move a run from `from` to `to` iff it is still in `from` (compare-and-swap).
  * Returns true when this caller made the change, false when the row had already
  * moved on (e.g. a cancel landed first). Rejects illegal transitions up front.
