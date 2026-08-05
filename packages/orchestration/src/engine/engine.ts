@@ -570,8 +570,21 @@ class RunEngine {
     }
     this.run.status = "running";
     if (run.startedAt === null) {
-      await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, run.id));
+      // This write is what closes the coalescing window: the API appends
+      // steering messages to a follow-up for exactly as long as `started_at`
+      // is null (ADR-0018 Decision 8). The run row was read at the top of
+      // executeRun — before routing, the claim and the pin verify — so a
+      // message committed anywhere in that stretch is in the row and not in
+      // our copy, and it would reach neither this agent nor a later follow-up.
+      // Taking it back from the same statement that shuts the window is the
+      // one read that cannot be stale.
+      const [started] = await db
+        .update(runs)
+        .set({ startedAt: new Date() })
+        .where(eq(runs.id, run.id))
+        .returning({ steeringMessage: runs.steeringMessage });
       this.run.startedAt = new Date();
+      this.run.steeringMessage = started?.steeringMessage ?? this.run.steeringMessage;
     }
     await this.emit(resuming ? "run.resumed" : "run.started", {
       taskId: run.taskId,
@@ -1187,8 +1200,14 @@ class RunEngine {
       // only — or, on a follow-up's steer step, the PARENT's session, which
       // is the whole point of steering (ADR-0018). A later attempt starts
       // fresh either way: whatever went wrong, the conversation is suspect.
+      // `attempt === 1`, not `=== startAttempt`: startAttempt is derived from
+      // the persisted rows, so on any re-entry it is already >1 and the
+      // parent's session would be offered to an attempt that has failed once —
+      // which is the case the comment above says must not happen. Crash
+      // recovery keeps `startAttempt`, because there the previous attempt was
+      // interrupted rather than tried.
       const inherited =
-        attempt === startAttempt && step.id === FOLLOWUP_STEER_STEP_ID
+        attempt === 1 && step.id === FOLLOWUP_STEER_STEP_ID
           ? (this.followup?.sessionId ?? null)
           : null;
       const resumeSessionId = attempt === startAttempt ? (recovery?.sessionId ?? inherited) : null;

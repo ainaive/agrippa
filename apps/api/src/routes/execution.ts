@@ -60,7 +60,13 @@ import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
  * not feel ignored. The run row is the buffer, so this is only a delay — the
  * messages are on the thread immediately either way.
  */
-const FOLLOWUP_COALESCE_SECONDS = Number(process.env.AGRIPPA_FOLLOWUP_COALESCE_SECONDS ?? "15");
+const FOLLOWUP_COALESCE_SECONDS = (() => {
+  const raw = Number(process.env.AGRIPPA_FOLLOWUP_COALESCE_SECONDS);
+  // A NaN would reach enqueueRunAfter, whose failure enqueueAfterCommit
+  // swallows by design — so every follow-up would silently fall back to the
+  // 30s straggler sweep. Same finite-check shape as retentionMinutes().
+  return Number.isFinite(raw) && raw >= 0 ? raw : 15;
+})();
 
 async function loadRunScoped(
   c: { var: AppEnv["Variables"] },
@@ -808,6 +814,17 @@ export const executionRoutes = new Hono<AppEnv>()
         },
       });
 
+      // Serialize concurrent follow-ups on this task BEFORE reading the
+      // coalescing candidate. Unlocked, two messages sent together each see no
+      // pending follow-up and each create one — precisely the burst this
+      // exists to collapse. The lock also covers the run-number computation
+      // further down, which is why there is only one.
+      await tx
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(eq(tasks.id, parent.taskId))
+        .for("update");
+
       // (2) absorb into a follow-up that is still going to run, if any.
       //
       // `queued`, not merely `started_at IS NULL`: cancelling a queued run
@@ -858,11 +875,6 @@ export const executionRoutes = new Hono<AppEnv>()
       // Decision 2). Deliberately NOT re-resolved: the inherited session and
       // workspace only mean anything against the executor and manifest that
       // produced them.
-      await tx
-        .select({ id: tasks.id })
-        .from(tasks)
-        .where(eq(tasks.id, parent.taskId))
-        .for("update");
       const [head] = await tx
         .select({ number: runs.number })
         .from(runs)

@@ -31,7 +31,8 @@ import {
   type FakeStepBehavior,
 } from "@agrippa/executor-core";
 import { and, asc, eq, sql } from "drizzle-orm";
-import { compileTemplate } from "../compile";
+import { compileTemplate, upgradeCompiledTemplate } from "../compile";
+import { followupSeed } from "../followup";
 import { RemoteExecutor } from "../remote/remote-executor";
 import { startTestDaemonLoop, type TestDaemonLoop } from "../remote/test-daemon-loop";
 import { buildParamsValidator, resolveModelRoles } from "../resolve";
@@ -834,6 +835,8 @@ for (const transport of TRANSPORTS) {
           .sort((a, b) => b.seq - a.seq || b.attempt - a.attempt)[0]?.executorSessionId;
         expect(parentSession).toBeTruthy();
         const [parent0] = await db.select().from(runs).where(eq(runs.id, runId));
+        const parentFinishedAt = parent0?.finishedAt?.getTime();
+        expect(parentFinishedAt).toBeDefined();
         const parentDir = workspace.dirs.get(parent0?.workspaceKey as string);
         const checkoutsBefore = workspace.checkouts.length;
 
@@ -858,17 +861,113 @@ for (const transport of TRANSPORTS) {
         expect(workspace.dirs.get(followup.workspaceKey)).toBe(parentDir as string);
         expect(request?.instructions).toContain("also handle the empty-list case");
 
-        // and the ancestor is untouched: terminal is absorbing
+        // and the ancestor is untouched: terminal is absorbing. Compared
+        // against the timestamp captured BEFORE the follow-up ran — reading
+        // the row twice afterwards compares a value to itself and passes
+        // however much the follow-up mutated it.
         const [parent] = await db.select().from(runs).where(eq(runs.id, runId));
         expect(parent?.status).toBe("succeeded");
-        expect(parent?.finishedAt?.getTime()).toBe(
-          (
-            await db.select().from(runs).where(eq(runs.id, runId))
-          )[0]?.finishedAt?.getTime() as number,
-        );
+        expect(parent?.finishedAt?.getTime()).toBe(parentFinishedAt as number);
         const parentEvents = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
         expect(parentEvents.filter((e) => e.type === "run.succeeded")).toHaveLength(1);
       });
+
+      it("a message absorbed before the run starts still reaches the agent", async () => {
+        // The coalescing window closes when `started_at` is written, but the
+        // engine read the run row long before that — before routing, the claim
+        // and the pin verify. A message committed in between belonged to a row
+        // the engine had already read past: it reached neither this agent nor
+        // a later follow-up, because the run did start.
+        const { db, runId, makeDeps } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const followup = await followupOf(db, runId, "first message");
+
+        const deps = makeDeps(HAPPY_SCRIPT);
+        const outcome = await executeRun(deps, followup.id, {
+          // postClaim runs after the claim and BEFORE the startedAt write —
+          // the exact window the API can still absorb into
+          postClaim: async () => {
+            await db
+              .update(runs)
+              .set({ steeringMessage: "first message\n\nsecond message" })
+              .where(eq(runs.id, followup.id));
+            return true;
+          },
+        });
+        expect(outcome).toBe("succeeded");
+
+        const [request] = deps.executor.requests.filter((r) => r.stepId === "steer");
+        expect(request?.instructions).toContain("second message");
+      });
+
+      it("a chain of follow-ups keeps one workspace and hands the session along", async () => {
+        // ADR-0018 lists chained follow-ups as a compliance dimension: each
+        // link inherits from its immediate predecessor, not from the head, so
+        // the workspace is shared all the way down and the session is whatever
+        // the previous link actually left.
+        const { db, runId, makeDeps, workspace } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const [origin] = await db.select().from(runs).where(eq(runs.id, runId));
+        const key = origin?.workspaceKey as string;
+        const dir = workspace.dirs.get(key);
+
+        const first = await followupOf(db, runId, "first follow-up");
+        const depsA = makeDeps(HAPPY_SCRIPT);
+        expect(await executeRun(depsA, first.id)).toBe("succeeded");
+
+        // the second continues the FIRST follow-up, not the original run
+        const second = await followupOf(db, first.id, "second follow-up");
+        expect(second.parentRunId).toBe(first.id);
+        const depsB = makeDeps(HAPPY_SCRIPT);
+        expect(await executeRun(depsB, second.id)).toBe("succeeded");
+
+        // one directory throughout, and no re-checkout anywhere in the chain
+        expect(second.workspaceKey).toBe(key);
+        expect(workspace.dirs.get(key)).toBe(dir as string);
+        expect(workspace.checkouts).toHaveLength(1);
+
+        // and it resumed the session its own parent left behind
+        const [firstSession] = await db
+          .select({ sessionId: runSteps.executorSessionId })
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, first.id), eq(runSteps.stepId, "steer")));
+        const [request] = depsB.executor.requests.filter((r) => r.stepId === "steer");
+        expect(request?.resumeSessionId).toBe(firstSession?.sessionId as string);
+      });
+
+      // remote-skipped for the same reason the other crash tests are: a daemon
+      // reports a failed dispatch instead of killing the engine, so "the worker
+      // died mid-step" has no remote analogue to reproduce
+      it.skipIf(transport === "remote")(
+        "a crash mid-follow-up resumes it rather than restarting the chain",
+        async () => {
+          const { db, runId, makeDeps } = await setupFixture();
+          await runToSuccess(db, runId, makeDeps);
+          const followup = await followupOf(db, runId, "one more thing");
+
+          const crashing = makeDeps({ ...HAPPY_SCRIPT, steer: { kind: "crash" } });
+          await expect(executeRun(crashing, followup.id)).rejects.toThrow("simulated worker crash");
+          const [afterCrash] = await db.select().from(runs).where(eq(runs.id, followup.id));
+          expect(afterCrash?.status).toBe("running"); // not finalized — pg-boss retries
+
+          const healthy = makeDeps(HAPPY_SCRIPT);
+          expect(await executeRun(healthy, followup.id)).toBe("succeeded");
+
+          // the crashed attempt is recorded and its session carried forward: a
+          // crash is an interrupted attempt, not a consumed retry
+          const attempts = await db
+            .select()
+            .from(runSteps)
+            .where(and(eq(runSteps.runId, followup.id), eq(runSteps.stepId, "steer")));
+          expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+            [1, "failed"],
+            [2, "succeeded"],
+          ]);
+          // and the steering message survived the crash — it lives on the row
+          const [request] = healthy.executor.requests.filter((r) => r.stepId === "steer");
+          expect(request?.instructions).toContain("one more thing");
+        },
+      );
 
       it("a follow-up cannot exist without a parent — the database says so", async () => {
         // The engine keys the synthetic flow on `kind` alone, so a parentless
@@ -1807,6 +1906,52 @@ for (const transport of TRANSPORTS) {
       beforeEach(() => {
         currentTransport = transport;
       });
+      it("binds the inherited session to the follow-up's OWN slot", async () => {
+        // Multi-slot templates are where "the last session" and "the last
+        // agent" come apart: a reviewer step succeeds last while a later
+        // implementer attempt crashes carrying its own session. Resuming that
+        // conversation under the reviewer's persona is worse than starting
+        // fresh — the follow-up would speak with another agent's memory.
+        const fx = await setupV2Fixture();
+        const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        const [version] = await fx.db
+          .select()
+          .from(templateVersions)
+          .where(eq(templateVersions.id, run?.templateVersionId as string));
+        const base = upgradeCompiledTemplate(version?.compiled);
+
+        await fx.db.insert(runSteps).values([
+          {
+            runId: fx.runId,
+            phaseId: "review-round",
+            stepId: "review",
+            iteration: 1,
+            attempt: 1,
+            seq: 1,
+            status: "succeeded",
+            agentRef: "reviewer",
+            executorSessionId: "sess-reviewer",
+          },
+          {
+            // higher seq, different slot, not succeeded — exactly what the
+            // unfiltered query picked up
+            runId: fx.runId,
+            phaseId: "implement",
+            stepId: "implement",
+            iteration: 1,
+            attempt: 1,
+            seq: 2,
+            status: "failed",
+            agentRef: "implementer",
+            executorSessionId: "sess-implementer",
+          },
+        ]);
+
+        const seed = await followupSeed(fx.db, fx.runId, base);
+        expect(seed.slot).toBe("reviewer");
+        expect(seed.sessionId).toBe("sess-reviewer");
+      });
+
       it("runs the full requirement-delivery spine: Q&A loop, plan gate, review-fix loop, platform PR", async () => {
         const fx = await setupV2Fixture();
 

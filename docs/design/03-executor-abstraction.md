@@ -74,7 +74,7 @@ Contract rules:
 
 ```ts
 export type ExecutorEvent =
-  | { type: "step.started"; sessionId?: string }
+  | { type: "step.started"; sessionId?: string; resumed?: "honored" | "rejected" }
   | { type: "message.delta"; text: string }
   | { type: "message.completed"; role: "assistant"; text: string }
   | { type: "tool.started"; toolName: string; input: unknown; toolUseId: string }

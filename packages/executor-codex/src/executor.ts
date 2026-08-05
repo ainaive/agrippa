@@ -291,7 +291,20 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         }
       } finally {
         ctx.signal.removeEventListener("abort", onAbort);
-        if (killTimer) clearTimeout(killTimer);
+        // An early exit — the caller breaking out of the stream, which the
+        // engine now does the moment a resume is reported rejected — reaches
+        // here with SIGTERM sent and the SIGKILL escalation still pending.
+        // Clearing the timer without waiting cancels that escalation, so a
+        // process ignoring SIGTERM keeps running in the workspace while the
+        // disclosed retry starts in the SAME directory. Wait for it to be
+        // gone, and only then stop escalating.
+        if (killTimer) {
+          try {
+            await proc.exited;
+          } finally {
+            clearTimeout(killTimer);
+          }
+        }
       }
     },
   };

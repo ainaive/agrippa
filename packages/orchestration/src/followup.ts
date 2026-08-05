@@ -95,11 +95,24 @@ export async function followupSeed(
   // necessarily its last SUCCEEDED step — a crashed attempt carries one too.
   // Read it separately so a run that ended on a system step (git.push) still
   // resumes the agent that did the work.
+  //
+  // Filtered by SLOT, which the unfiltered version got wrong on any template
+  // with more than one: the slot above comes from the last succeeded agent
+  // step, while the newest session id can belong to a different agent whose
+  // later attempt crashed. Resuming that conversation under this slot's
+  // persona is a worse answer than starting fresh — the follow-up would be a
+  // reviewer speaking with an implementer's memory.
   const [sessionRow] = parentRunId
     ? await db
         .select({ sessionId: runSteps.executorSessionId })
         .from(runSteps)
-        .where(and(eq(runSteps.runId, parentRunId), isNotNull(runSteps.executorSessionId)))
+        .where(
+          and(
+            eq(runSteps.runId, parentRunId),
+            eq(runSteps.agentRef, slot),
+            isNotNull(runSteps.executorSessionId),
+          ),
+        )
         .orderBy(desc(runSteps.seq), desc(runSteps.attempt))
         .limit(1)
     : [];

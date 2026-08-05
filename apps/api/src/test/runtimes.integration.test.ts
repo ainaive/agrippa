@@ -373,8 +373,15 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
       .where(eq(runs.id, followup?.id as string));
     const collectable = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
     expect(collectable.reapableWorkspaceKeys).toContain(runId);
+    // restore the whole pre-test shape, not just the expiry: this test itself
+    // establishes that a FINISHED run with a null expiry is reapable, so
+    // leaving status/finishedAt/runtimeId set would hand every later test in
+    // this file a permanently reapable, runtime-pinned run
     await db.delete(runs).where(eq(runs.id, followup?.id as string));
-    await db.update(runs).set({ workspaceExpiresAt: null }).where(eq(runs.id, runId));
+    await db
+      .update(runs)
+      .set({ workspaceExpiresAt: null, finishedAt: null, runtimeId: null, status: "queued" })
+      .where(eq(runs.id, runId));
   });
 
   it("claim is atomic, oldest-first, and scoped to the runtime", async () => {

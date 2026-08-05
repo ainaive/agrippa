@@ -19,7 +19,7 @@ import {
   InProcessEventBus,
   silentLogger,
 } from "@agrippa/orchestration";
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
 import {
@@ -852,6 +852,40 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       const [fresh] = await db.select().from(runs).where(eq(runs.id, second.runId));
       expect(fresh?.status).toBe("queued");
       expect(fresh?.steeringMessage).toBe("second");
+    });
+
+    it("two messages sent at once produce one follow-up, not two", async () => {
+      // Honest about its reach: this asserts the OUTCOME of a burst, not the
+      // lock that guarantees it. Both orderings of the task-row `for update`
+      // pass here — two in-process requests do not reliably interleave their
+      // transactions — so the lock-before-read ordering is argued in the
+      // handler's comment rather than demonstrated below. Kept because the
+      // outcome is still worth pinning, and labelled because a test that reads
+      // as race coverage without being it is worse than no test at all.
+      const { runId: parentId } = await finishedRun();
+      const [a, b] = await Promise.all([
+        admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "one" },
+        }),
+        admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "two" },
+        }),
+      ]);
+      expect([a?.status, b?.status]).toEqual([202, 202]);
+
+      const [parent] = await db.select().from(runs).where(eq(runs.id, parentId));
+      const followups = await db
+        .select()
+        .from(runs)
+        .where(
+          and(eq(runs.workspaceKey, parent?.workspaceKey as string), eq(runs.kind, "followup")),
+        );
+      expect(followups).toHaveLength(1);
+      // both messages are on it, in whichever order they committed
+      expect(followups[0]?.steeringMessage).toContain("one");
+      expect(followups[0]?.steeringMessage).toContain("two");
     });
 
     it("refuses an unfinished run, and one whose workspace has been collected", async () => {

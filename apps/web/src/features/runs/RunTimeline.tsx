@@ -353,7 +353,18 @@ export function RunTimeline({
    * lands on this run's thread either way — the endpoint writes the comment
    * itself — so the visible difference is that the agent is asked to continue.
    */
-  // one rule, shared with the server's group-level SQL — see runHoldsWorkspace
+  // one rule, shared with the server's group-level SQL — see runHoldsWorkspace.
+  // Re-evaluated when the workspace expires, not only on render: a tab left
+  // open past the window would otherwise keep offering Continue, and the click
+  // would come back 409 workspace_expired.
+  const [, setExpiryTick] = useState(0);
+  useEffect(() => {
+    if (!run.workspaceExpiresAt) return;
+    const remaining = new Date(run.workspaceExpiresAt).getTime() - Date.now();
+    if (remaining <= 0) return;
+    const timer = setTimeout(() => setExpiryTick((n) => n + 1), remaining);
+    return () => clearTimeout(timer);
+  }, [run.workspaceExpiresAt]);
   const steerable = isTerminalRunStatus(run.status) && runHoldsWorkspace(run);
   const sendFollowup = useMutation({
     mutationFn: () =>
@@ -375,6 +386,11 @@ export function RunTimeline({
       toast.error(error instanceof ApiError ? error.message : String(error));
     },
   });
+
+  // BOTH paths write a comment — the follow-up endpoint writes one itself — so
+  // one guard across both buttons and the shortcut, or a fast double-click
+  // leaves two identical entries on the thread.
+  const isSubmitting = postComment.isPending || sendFollowup.isPending;
 
   const itemCount = items.length;
   // follow the stream: re-scroll whenever a new timeline item lands, not only
@@ -473,7 +489,12 @@ export function RunTimeline({
             value={comment}
             onChange={(e) => setComment(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && comment.trim()) {
+              if (
+                e.key === "Enter" &&
+                (e.metaKey || e.ctrlKey) &&
+                comment.trim() &&
+                !isSubmitting
+              ) {
                 postComment.mutate();
               }
             }}
@@ -481,7 +502,7 @@ export function RunTimeline({
           <Button
             size="sm"
             variant={steerable ? "outline" : "default"}
-            disabled={!comment.trim() || postComment.isPending}
+            disabled={!comment.trim() || isSubmitting}
             onClick={() => postComment.mutate()}
           >
             <SendIcon />
@@ -490,7 +511,7 @@ export function RunTimeline({
           {steerable ? (
             <Button
               size="sm"
-              disabled={!comment.trim() || sendFollowup.isPending}
+              disabled={!comment.trim() || isSubmitting}
               onClick={() => sendFollowup.mutate()}
               title={t("runs:followup.hint")}
             >
