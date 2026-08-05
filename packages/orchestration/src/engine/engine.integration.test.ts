@@ -883,13 +883,37 @@ for (const transport of TRANSPORTS) {
         expect(request?.instructions).toContain(hostile);
       });
 
-      it("a follow-up whose workspace is gone fails workspace_lost, not silently fresh", async () => {
+      it("a central follow-up declines while its workspace may be on another host", async () => {
+        // Workspaces are host-local and a central run carries no pin, so a
+        // worker that does not hold the directory must hand the run back
+        // rather than execute in an empty one (ADR-0018 host affinity).
+        const { db, runId, makeDeps, workspace } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const followup = await followupOf(db, runId, "one more thing");
+        workspace.intact = false;
+
+        const deps = makeDeps(HAPPY_SCRIPT);
+        await expect(executeRun(deps, followup.id)).rejects.toThrow("not on this host");
+        // declined with NO side effects: still queued, nothing invoked
+        const [queued] = await db.select().from(runs).where(eq(runs.id, followup.id));
+        expect(queued?.status).toBe("queued");
+        expect(queued?.startedAt).toBeNull();
+        expect(deps.executor.requests.filter((r) => r.stepId === "steer")).toHaveLength(0);
+      });
+
+      it("a follow-up whose workspace is gone for good fails workspace_lost", async () => {
         const { db, runId, makeDeps, workspace } = await setupFixture();
         await runToSuccess(db, runId, makeDeps);
         const followup = await followupOf(db, runId, "one more thing");
 
-        // the ancestor's directory was collected (or the host changed)
+        // past the affinity grace: every worker has had its turn, so the
+        // honest answer is that the directory is gone — not another decline
+        await db
+          .update(runs)
+          .set({ queuedAt: new Date(Date.now() - 60 * 60_000) })
+          .where(eq(runs.id, followup.id));
         workspace.intact = false;
+
         const deps = makeDeps(HAPPY_SCRIPT);
         expect(await executeRun(deps, followup.id)).toBe("failed");
         const [row] = await db.select().from(runs).where(eq(runs.id, followup.id));

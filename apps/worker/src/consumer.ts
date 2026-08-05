@@ -14,6 +14,7 @@ import {
   renewRunLeases,
   routeRun,
   syncRunNotifications,
+  WorkspaceElsewhereError,
 } from "@agrippa/orchestration";
 import { and, eq } from "drizzle-orm";
 import type { JobWithMetadata, PgBoss } from "pg-boss";
@@ -203,7 +204,11 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
           err !== null &&
           (err as { code?: string }).code === "executor_unavailable_on_worker") ||
         err instanceof ExecutorUnavailableError ||
-        err instanceof RuntimeFeatureUnavailableError
+        err instanceof RuntimeFeatureUnavailableError ||
+        // a central follow-up whose workspace is on another worker: declining
+        // lets the host that HAS the directory take it (ADR-0018), bounded by
+        // the engine's grace window so nobody-has-it fails honestly instead
+        err instanceof WorkspaceElsewhereError
       ) {
         const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
         if (run && (run.status === "queued" || run.status === "waiting_approval")) {

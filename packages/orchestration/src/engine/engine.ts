@@ -170,6 +170,34 @@ export class ExecutorUnavailableError extends Error {
   }
 }
 
+/**
+ * Raised when a follow-up's workspace is not on THIS host and might still be
+ * on another (ADR-0018 Consequences: central host affinity).
+ *
+ * Remote runs are pinned, so affinity is free for them. A central run has no
+ * pin, and workspaces are host-local — so on a multi-worker fleet the run can
+ * land on a worker that does not hold the directory. Declining lets the
+ * sweeper re-enqueue and another worker try, which is bounded on purpose: past
+ * the grace window the honest answer is that nobody has it, and the engine
+ * fails `workspace_lost` rather than ping-ponging the run forever. The real
+ * fix is a per-host queue, the same route-by-capability shape Phase B took.
+ */
+export class WorkspaceElsewhereError extends Error {
+  readonly code = "workspace_on_another_host";
+  constructor(runId: string) {
+    super(`run ${runId}: its workspace is not on this host — declining so a host that has it can`);
+    this.name = "WorkspaceElsewhereError";
+  }
+}
+
+/**
+ * How long a central follow-up may bounce between workers looking for its
+ * workspace. The straggler sweep re-enqueues a queued run every ~30s, so this
+ * is roughly ten attempts across the fleet — enough for every worker to have
+ * had a turn, short enough that a directory nobody has fails quickly.
+ */
+const WORKSPACE_AFFINITY_GRACE_MS = 5 * 60_000;
+
 /** Normalize runs.model_resolution (flat legacy or slot-keyed) to one slot's entries. */
 function slotResolutionEntries(raw: Record<string, unknown>, slot: string): ModelResolutionEntry[] {
   const values = Object.values(raw ?? {});
@@ -307,6 +335,23 @@ export async function executeRun(
         }
       }
     }
+  }
+
+  // Central host affinity (ADR-0018). A follow-up continues a directory that
+  // exists on exactly one host; remote runs carry a pin, central ones do not.
+  // Probed BEFORE the claim so a decline costs nothing — no status change, no
+  // retry burned — and bounded, so a workspace nobody holds becomes an honest
+  // `workspace_lost` from the check inside initialize rather than a run that
+  // circulates forever.
+  if (
+    run.kind === "followup" &&
+    run.runtimeId === null &&
+    template.spec.workspace !== undefined &&
+    run.status === "queued" &&
+    Date.now() - run.queuedAt.getTime() < WORKSPACE_AFFINITY_GRACE_MS &&
+    !(await deps.workspace.isIntact(run.id))
+  ) {
+    throw new WorkspaceElsewhereError(run.id);
   }
 
   const engine = new RunEngine(
