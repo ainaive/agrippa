@@ -869,6 +869,41 @@ for (const transport of TRANSPORTS) {
         expect(parentEvents.filter((e) => e.type === "run.succeeded")).toHaveLength(1);
       });
 
+      it("a follow-up cannot exist without a parent — the database says so", async () => {
+        // The engine keys the synthetic flow on `kind` alone, so a parentless
+        // follow-up would inherit no session (survivable) rather than fall
+        // through to the base flow inside an ancestor's workspace (not). The
+        // constraint means the row cannot be written in the first place.
+        const { db, runId, makeDeps } = await setupFixture();
+        await runToSuccess(db, runId, makeDeps);
+        const [parent] = await db.select().from(runs).where(eq(runs.id, runId));
+        const rejection = await db
+          .insert(runs)
+          .values({
+            ...newRunIdentity(),
+            workspaceKey: parent?.workspaceKey as string,
+            kind: "followup",
+            parentRunId: null,
+            taskId: parent?.taskId as string,
+            projectId: parent?.projectId as string,
+            number: (parent?.number ?? 1) + 1,
+            templateVersionId: parent?.templateVersionId as string,
+            faberId: parent?.faberId as string,
+            executorId: parent?.executorId as string,
+            paramsSnapshot: {},
+            modelResolution: {},
+            createdBy: parent?.createdBy as string,
+          })
+          .execute()
+          .then(
+            () => null,
+            (err: unknown) => err,
+          );
+        // the driver wraps the failure, so the constraint name is on the cause
+        const cause = (rejection as { cause?: unknown } | null)?.cause ?? rejection;
+        expect(String(cause)).toContain("runs_followup_has_parent");
+      });
+
       it("a steering message is delivered verbatim, never evaluated", async () => {
         const { db, runId, makeDeps } = await setupFixture();
         await runToSuccess(db, runId, makeDeps);

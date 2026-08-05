@@ -268,14 +268,17 @@ export async function executeRun(
     .where(eq(templateVersions.id, run.templateVersionId));
   if (!versionRow) throw new Error(`template version for run ${runId} not found`);
   const base = upgradeCompiledTemplate(versionRow.compiled);
-  // A follow-up executes a synthetic two-step flow built from the base
-  // template, never the compiled flow itself (ADR-0018 Decision 7): re-entry
-  // would replay answered checkpoints, reopen closed loops, and — in the
-  // obvious target templates — reach `git.push` again.
-  const seed =
-    run.kind === "followup" && run.parentRunId
-      ? await followupSeed(db, run.parentRunId, base)
-      : null;
+  // A follow-up executes a synthetic flow built from the base template, never
+  // the compiled flow itself (ADR-0018 Decision 7): re-entry would replay
+  // answered checkpoints, reopen closed loops, and — in the obvious target
+  // templates — reach `git.push` again.
+  //
+  // Keyed on `kind` ALONE, deliberately. Pairing it with a parent-id check
+  // reads as defensive and is the opposite: a follow-up row with no parent
+  // would fall through to the base flow and re-run the whole pipeline inside
+  // an ancestor's workspace, publishing included. Missing parentage costs the
+  // inherited session (an honest fresh start); it must never cost the flow.
+  const seed = run.kind === "followup" ? await followupSeed(db, run.parentRunId, base) : null;
   const template = seed ? followupTemplate(base, seed) : base;
 
   const [task] = await db.select().from(tasks).where(eq(tasks.id, run.taskId));

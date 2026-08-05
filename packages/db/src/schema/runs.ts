@@ -11,6 +11,7 @@ import {
   type AnyPgColumn,
   bigserial,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -164,6 +165,11 @@ export const runs = pgTable(
     // every workspace question is asked by key, not by run: who else shares
     // this directory, and is any of them still alive (ADR-0018 Decisions 3–4)
     index("runs_workspace_key_idx").on(t.workspaceKey),
+    // A follow-up without a parent has no session to inherit and no ancestor
+    // to name — and the engine keys the synthetic flow on `kind`, so such a
+    // row is a data error rather than a degraded run. Enforced here so it
+    // cannot be written at all (ADR-0018 Decision 1).
+    check("runs_followup_has_parent", sql`${t.kind} <> 'followup' or ${t.parentRunId} is not null`),
     // the collector scans only expired rows, never the whole table
     index("runs_workspace_expiry_idx")
       .on(t.workspaceExpiresAt)

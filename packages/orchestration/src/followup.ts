@@ -54,7 +54,9 @@ export type FollowupSeed = {
  */
 export async function followupSeed(
   db: Db,
-  parentRunId: string,
+  /** Null only for a malformed follow-up row — see the caller: the flow still
+   *  synthesizes, it simply inherits no session and starts honestly fresh. */
+  parentRunId: string | null,
   base: CompiledTemplate,
 ): Promise<FollowupSeed> {
   const agentStepIds = new Map<string, TemplateStepV2 & { kind: "agent" }>();
@@ -64,11 +66,13 @@ export async function followupSeed(
     }
   }
 
-  const rows = await db
-    .select()
-    .from(runSteps)
-    .where(and(eq(runSteps.runId, parentRunId), eq(runSteps.status, "succeeded")))
-    .orderBy(desc(runSteps.seq), desc(runSteps.attempt));
+  const rows = parentRunId
+    ? await db
+        .select()
+        .from(runSteps)
+        .where(and(eq(runSteps.runId, parentRunId), eq(runSteps.status, "succeeded")))
+        .orderBy(desc(runSteps.seq), desc(runSteps.attempt))
+    : [];
   const lastAgentRow = rows.find((row) => agentStepIds.has(row.stepId));
   const templateStep = lastAgentRow ? agentStepIds.get(lastAgentRow.stepId) : undefined;
 
@@ -80,12 +84,14 @@ export async function followupSeed(
   // necessarily its last SUCCEEDED step — a crashed attempt carries one too.
   // Read it separately so a run that ended on a system step (git.push) still
   // resumes the agent that did the work.
-  const [sessionRow] = await db
-    .select({ sessionId: runSteps.executorSessionId })
-    .from(runSteps)
-    .where(and(eq(runSteps.runId, parentRunId), isNotNull(runSteps.executorSessionId)))
-    .orderBy(desc(runSteps.seq), desc(runSteps.attempt))
-    .limit(1);
+  const [sessionRow] = parentRunId
+    ? await db
+        .select({ sessionId: runSteps.executorSessionId })
+        .from(runSteps)
+        .where(and(eq(runSteps.runId, parentRunId), isNotNull(runSteps.executorSessionId)))
+        .orderBy(desc(runSteps.seq), desc(runSteps.attempt))
+        .limit(1)
+    : [];
 
   const patch = base.spec.outputs.artifacts.find((artifact) => artifact.kind === "patch");
 
