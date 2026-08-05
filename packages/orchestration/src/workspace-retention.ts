@@ -99,6 +99,26 @@ export async function expiredWorkspaceKeys(
 }
 
 /**
+ * Whether this workspace is past the point where the platform still promises
+ * it exists — every run sharing the key released it and the latest expiry has
+ * passed, i.e. the collector is entitled to have taken it.
+ *
+ * The follow-up endpoint asks this before creating anything: the alternative
+ * is a run that reaches a worker, finds an empty directory, and fails
+ * `workspace_lost` — a charge, a timeline entry, and a notification for
+ * something the server could have answered as a 409.
+ */
+export async function workspaceCollectable(db: Db, workspaceKey: string): Promise<boolean> {
+  const rows = (await db.execute(sql`
+    select bool_and(r.workspace_expires_at is not null)
+       and max(r.workspace_expires_at) < now() as "collectable"
+    from ${runs} r
+    where r.workspace_key = ${workspaceKey}
+  `)) as unknown as Array<{ collectable: boolean | null }>;
+  return rows[0]?.collectable === true;
+}
+
+/**
  * Delete the central workspaces that have expired. Runs as one sweeper stage
  * on every worker: the deletes are idempotent and a worker that does not hold
  * a directory simply removes nothing, so a fleet sharing the workspaces volume

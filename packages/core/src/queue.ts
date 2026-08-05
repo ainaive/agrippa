@@ -78,6 +78,15 @@ export type TriggerFirePayload = { deliveryId: string };
  */
 export type RunQueue = {
   enqueueRun(runId: string): Promise<void>;
+  /**
+   * Enqueue a run after a delay — the burst window a follow-up coalesces over
+   * (ADR-0018 Decision 8). The delay is the point: while the run has not
+   * started, further messages append to it rather than spawning another run,
+   * and the API runs multiple replicas so an in-process debounce would be
+   * per-replica. Duplicate deliveries are harmless here (the execution lease
+   * and the claim CAS own that), so this needs no dedupe guarantee.
+   */
+  enqueueRunAfter(runId: string, delaySeconds: number): Promise<void>;
   enqueueApprovalExpiry(payload: ApprovalExpirePayload, atMs: number): Promise<void>;
   enqueueNotificationDelivery(deliveryId: string): Promise<void>;
   /**

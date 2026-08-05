@@ -5,6 +5,7 @@ import {
   checkpointRespondSchema,
   commentCreateSchema,
   EXECUTOR_CATALOG,
+  followupCreateSchema,
   isExecutorId,
   isTerminalRunStatus,
   type Question,
@@ -43,14 +44,23 @@ import {
   syncRunNotifications,
   upgradeCompiledTemplate,
   verifyRepoRefs,
+  workspaceCollectable,
 } from "@agrippa/orchestration";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../context";
 import { audit, requestActor } from "../lib/audit";
 import { validate } from "../lib/validate";
 import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
+
+/**
+ * The burst window a follow-up coalesces over: long enough that someone typing
+ * two thoughts in a row gets one run, short enough that the first message does
+ * not feel ignored. The run row is the buffer, so this is only a delay — the
+ * messages are on the thread immediately either way.
+ */
+const FOLLOWUP_COALESCE_SECONDS = Number(process.env.AGRIPPA_FOLLOWUP_COALESCE_SECONDS ?? "15");
 
 async function loadRunScoped(
   c: { var: AppEnv["Variables"] },
@@ -720,6 +730,180 @@ export const executionRoutes = new Hono<AppEnv>()
       createdAt: event.createdAt.toISOString(),
     });
     return c.json(comment, 201);
+  })
+
+  /**
+   * Steer a finished run: one more message to the agent that produced it,
+   * continuing in the same workspace and conversation (ADR-0018).
+   *
+   * Three things happen in order, and the order is the design:
+   *
+   * 1. the message lands on the run's thread FIRST, so it is visible whatever
+   *    the queue does with the rest;
+   * 2. a follow-up that exists but has not started ABSORBS it — the run row is
+   *    the coalescing buffer, which is why the append is a CAS on
+   *    `started_at IS NULL`. The API runs multiple replicas, so an in-process
+   *    debounce would coalesce per replica and produce one run each;
+   * 3. the enqueue is delayed by the burst window and not awaited, like every
+   *    other post-commit send here.
+   *
+   * A message arriving while a follow-up is running does not join it — the CAS
+   * fails, and it becomes the next follow-up.
+   */
+  .post("/runs/:id/followup", validate("json", followupCreateSchema), async (c) => {
+    const db = c.var.db;
+    const parent = await loadRunScoped(c, c.req.param("id"), "member");
+    const { message } = c.req.valid("json");
+
+    // Steering a run that is still going is a different feature with a
+    // different failure model (ADR-0018 Consequences) — the plan says finished.
+    if (!isTerminalRunStatus(parent.status)) {
+      throw AppError.conflict("run_active", "This run has not finished");
+    }
+    // a follow-up is new work: same gates as a submission or a retry
+    await assertProjectAcceptsWork(db, parent.projectId);
+    await assertQuotaHeadroom(db, parent.projectId);
+    // The honest 409: past retention the workspace may already be gone, and a
+    // run that discovers that on a worker costs a charge and a failure
+    // notification to say what the server already knew.
+    if (await workspaceCollectable(db, parent.workspaceKey)) {
+      throw AppError.conflict(
+        "workspace_expired",
+        "This run's workspace has been collected — submit a new task instead",
+      );
+    }
+
+    const result = await db.transaction(async (tx) => {
+      // (1) the thread, first and unconditionally
+      const [comment] = await tx
+        .insert(runComments)
+        .values({ runId: parent.id, userId: c.var.user.id, body: message })
+        .returning();
+      if (!comment) throw new Error("comment insert failed");
+      const event = await allocateRunEvent(tx, {
+        runId: parent.id,
+        type: "comment.added",
+        payload: {
+          commentId: comment.id,
+          body: comment.body,
+          user: { id: c.var.user.id, name: c.var.user.name },
+        },
+      });
+
+      // (2) absorb into an unstarted follow-up on this workspace, if any
+      const [pending] = await tx
+        .select({ id: runs.id, number: runs.number })
+        .from(runs)
+        .where(
+          and(
+            eq(runs.workspaceKey, parent.workspaceKey),
+            eq(runs.kind, "followup"),
+            isNull(runs.startedAt),
+          ),
+        )
+        .orderBy(desc(runs.number))
+        .limit(1);
+      if (pending) {
+        const absorbed = await tx
+          .update(runs)
+          .set({
+            steeringMessage: sql`coalesce(${runs.steeringMessage} || E'\n\n', '') || ${message}`,
+          })
+          .where(and(eq(runs.id, pending.id), isNull(runs.startedAt)))
+          .returning({ id: runs.id });
+        if (absorbed.length > 0) {
+          await audit(
+            c,
+            {
+              action: "run.followup.append",
+              resourceType: "run",
+              resourceId: pending.id,
+              projectId: parent.projectId,
+              payload: { parentRunId: parent.id },
+            },
+            tx,
+          );
+          return { runId: pending.id, number: pending.number, coalesced: true, event, comment };
+        }
+        // it started between the read and the write — fall through and make
+        // this the NEXT follow-up rather than silently dropping the message
+      }
+
+      // (3) a new follow-up, configuration copied verbatim (ADR-0018
+      // Decision 2). Deliberately NOT re-resolved: the inherited session and
+      // workspace only mean anything against the executor and manifest that
+      // produced them.
+      await tx
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(eq(tasks.id, parent.taskId))
+        .for("update");
+      const [head] = await tx
+        .select({ number: runs.number })
+        .from(runs)
+        .where(eq(runs.taskId, parent.taskId))
+        .orderBy(desc(runs.number))
+        .limit(1);
+      const [run] = await tx
+        .insert(runs)
+        .values({
+          ...newRunIdentity(),
+          workspaceKey: parent.workspaceKey,
+          kind: "followup",
+          parentRunId: parent.id,
+          steeringMessage: message,
+          taskId: parent.taskId,
+          projectId: parent.projectId,
+          number: (head?.number ?? parent.number) + 1,
+          templateVersionId: parent.templateVersionId,
+          faberId: parent.faberId,
+          executorId: parent.executorId,
+          agentBindings: parent.agentBindings,
+          paramsSnapshot: parent.paramsSnapshot,
+          modelResolution: parent.modelResolution,
+          resourceManifest: parent.resourceManifest,
+          workBranch: parent.workBranch,
+          workspaceRef: parent.workspaceRef,
+          runtimeId: parent.runtimeId,
+          createdBy: c.var.user.id,
+        })
+        .returning();
+      if (!run) throw new Error("follow-up insert failed");
+      await tx.update(tasks).set({ latestRunId: run.id }).where(eq(tasks.id, parent.taskId));
+      await audit(
+        c,
+        {
+          action: "run.followup",
+          resourceType: "run",
+          resourceId: run.id,
+          projectId: parent.projectId,
+          payload: { parentRunId: parent.id, taskId: parent.taskId },
+        },
+        tx,
+      );
+      return { runId: run.id, number: run.number, coalesced: false, event, comment };
+    });
+
+    await c.var.bus?.publish({
+      runId: parent.id,
+      seq: result.event.seq,
+      type: "comment.added",
+      payload: {
+        commentId: result.comment.id,
+        body: result.comment.body,
+        user: { id: c.var.user.id, name: c.var.user.name },
+      },
+      createdAt: result.event.createdAt.toISOString(),
+    });
+    // Delayed and not awaited: the delay IS the burst window, and the worker's
+    // straggler sweep is the delivery guarantee (a queued run older than 30s
+    // is re-enqueued), so a send failure must not fail the request.
+    void enqueueAfterCommit(
+      () =>
+        c.var.queue?.enqueueRunAfter(result.runId, FOLLOWUP_COALESCE_SECONDS) ?? Promise.resolve(),
+      `follow-up run ${result.runId}`,
+    );
+    return c.json({ runId: result.runId, number: result.number, coalesced: result.coalesced }, 202);
   })
 
   // ── Artifacts ───────────────────────────────────────────────────────────────

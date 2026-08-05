@@ -1,6 +1,14 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { RunQueue } from "@agrippa/core";
-import { auditLogs, fabri, mcpServers, repoConnections, runs, skillVersions } from "@agrippa/db";
+import {
+  auditLogs,
+  fabri,
+  mcpServers,
+  repoConnections,
+  runComments,
+  runs,
+  skillVersions,
+} from "@agrippa/db";
 import { FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
 import {
   type EngineDeps,
@@ -11,7 +19,7 @@ import {
   InProcessEventBus,
   silentLogger,
 } from "@agrippa/orchestration";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { App } from "../app";
 import { createApp } from "../app";
 import {
@@ -58,9 +66,13 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
   const enqueued: string[] = [];
   const bus = new InProcessEventBus();
 
+  const delayed: Array<{ runId: string; delaySeconds: number }> = [];
   const fakeQueue: RunQueue = makeFakeQueue({
     enqueueRun: async (id) => {
       enqueued.push(id);
+    },
+    enqueueRunAfter: async (runId, delaySeconds) => {
+      delayed.push({ runId, delaySeconds });
     },
   });
 
@@ -710,5 +722,145 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
     expect((await jsonOf<{ code: string }>(res)).code).toBe("repo_not_in_project");
 
     if (conn) await db.insert(repoConnections).values(conn);
+  });
+
+  // ── Follow-up steering (ADR-0018) ─────────────────────────────────────────
+  describe("follow-up steering", () => {
+    /** A finished run of its own task, so these tests never fight the retry ones. */
+    const finishedRun = async (): Promise<{ runId: string; taskId: string }> => {
+      const res = await admin.request(`/api/v1/projects/${projectId}/tasks`, {
+        method: "POST",
+        json: submitBody(),
+      });
+      const body = await jsonOf<{ taskId: string; runId: string }>(res);
+      await db
+        .update(runs)
+        .set({ status: "succeeded", finishedAt: new Date() })
+        .where(eq(runs.id, body.runId));
+      return { runId: body.runId, taskId: body.taskId };
+    };
+
+    it("creates a follow-up that inherits workspace, session context and config", async () => {
+      const { runId: parentId, taskId: parentTask } = await finishedRun();
+      const [parent] = await db.select().from(runs).where(eq(runs.id, parentId));
+
+      const res = await admin.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "also handle the empty-list case" },
+      });
+      expect(res.status).toBe(202);
+      const body = await jsonOf<{ runId: string; number: number; coalesced: boolean }>(res);
+      expect(body.coalesced).toBe(false);
+
+      const [followup] = await db.select().from(runs).where(eq(runs.id, body.runId));
+      expect(followup?.kind).toBe("followup");
+      expect(followup?.parentRunId).toBe(parentId);
+      // the identities that make it a continuation
+      expect(followup?.workspaceKey).toBe(parent?.workspaceKey as string);
+      expect(followup?.workBranch).toBe(parent?.workBranch ?? null);
+      expect(followup?.steeringMessage).toBe("also handle the empty-list case");
+      // configuration copied VERBATIM — the divergence from retry (ADR-0014)
+      expect(followup?.templateVersionId).toBe(parent?.templateVersionId as string);
+      expect(followup?.modelResolution).toEqual(parent?.modelResolution ?? {});
+      expect(followup?.resourceManifest).toEqual(parent?.resourceManifest);
+
+      // the message is on the PARENT's thread immediately, whatever the queue does
+      const comments = await db.select().from(runComments).where(eq(runComments.runId, parentId));
+      expect(comments.map((c) => c.body)).toContain("also handle the empty-list case");
+      // and the enqueue is DELAYED — the delay is the burst window
+      expect(delayed.at(-1)?.runId).toBe(body.runId);
+      expect(delayed.at(-1)?.delaySeconds).toBeGreaterThan(0);
+
+      const task = await jsonOf<{ runs: Array<{ number: number }> }>(
+        await admin.request(`/api/v1/tasks/${parentTask}`),
+      );
+      expect(task.runs.map((r) => r.number)).toEqual([2, 1]);
+    });
+
+    it("a burst becomes one follow-up; a message after it starts becomes the next", async () => {
+      const { runId: parentId } = await finishedRun();
+      const first = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "first thought" },
+        }),
+      );
+      const second = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "second thought" },
+        }),
+      );
+      expect(second.coalesced).toBe(true);
+      expect(second.runId).toBe(first.runId);
+      const [coalesced] = await db.select().from(runs).where(eq(runs.id, first.runId));
+      expect(coalesced?.steeringMessage).toBe("first thought\n\nsecond thought");
+
+      // once it starts, the window is closed: the next message is its own run
+      await db.update(runs).set({ startedAt: new Date() }).where(eq(runs.id, first.runId));
+      const third = await jsonOf<{ runId: string; coalesced: boolean }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "third thought" },
+        }),
+      );
+      expect(third.coalesced).toBe(false);
+      expect(third.runId).not.toBe(first.runId);
+      // and both messages are on the thread regardless of how they were routed
+      const comments = await db.select().from(runComments).where(eq(runComments.runId, parentId));
+      expect(comments.map((c) => c.body).sort()).toEqual([
+        "first thought",
+        "second thought",
+        "third thought",
+      ]);
+    });
+
+    it("refuses an unfinished run, and one whose workspace has been collected", async () => {
+      const { runId: parentId } = await finishedRun();
+      await db.update(runs).set({ status: "running" }).where(eq(runs.id, parentId));
+      const active = await admin.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "too soon" },
+      });
+      expect(active.status).toBe(409);
+      expect((await jsonOf<{ code: string }>(active)).code).toBe("run_active");
+
+      // released and past its retention: the workspace may already be gone, so
+      // the honest answer is a 409 rather than a charged run that fails
+      // workspace_lost on a worker
+      await db
+        .update(runs)
+        .set({
+          status: "succeeded",
+          finishedAt: new Date(),
+          workspaceExpiresAt: sql`now() - interval '1 minute'`,
+        })
+        .where(eq(runs.id, parentId));
+      const expired = await admin.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "too late" },
+      });
+      expect(expired.status).toBe(409);
+      expect((await jsonOf<{ code: string }>(expired)).code).toBe("workspace_expired");
+    });
+
+    it("audits the follow-up and requires project membership", async () => {
+      const { runId: parentId } = await finishedRun();
+      const stranger = await signUp(app, "Stranger", `out-${Bun.randomUUIDv7()}@example.com`);
+      const denied = await stranger.request(`/api/v1/runs/${parentId}/followup`, {
+        method: "POST",
+        json: { message: "not mine" },
+      });
+      expect(denied.status).toBe(403);
+
+      const res = await jsonOf<{ runId: string }>(
+        await admin.request(`/api/v1/runs/${parentId}/followup`, {
+          method: "POST",
+          json: { message: "mine" },
+        }),
+      );
+      const audits = await db.select().from(auditLogs).where(eq(auditLogs.action, "run.followup"));
+      expect(audits.some((a) => a.resourceId === res.runId)).toBe(true);
+    });
   });
 });
