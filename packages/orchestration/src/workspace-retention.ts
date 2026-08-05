@@ -71,6 +71,15 @@ export type ExpiredWorkspace = { workspaceKey: string };
  * Workspace keys nothing needs any more: every run sharing the key has
  * released it and the group's latest expiry has passed.
  *
+ * A run reads as released when it has an expiry OR simply a `finished_at`,
+ * and that fallback covers two cases that would otherwise leak a directory
+ * forever. Runs that finalized before retention existed have no expiry (the
+ * engine deleted their workspace on the spot), and a release write lost to a
+ * database blip leaves the same shape. Falling back to `finished_at` means
+ * such a workspace is collectable immediately rather than never — it gives up
+ * that run's steering window, which is the right way round: the window is a
+ * convenience, an unreclaimable directory is not.
+ *
  * `scope` picks whose filesystem is being asked about — the central hosts
  * (runs with no runtime pin) or one daemon's. Bounded by a window rather than
  * an acknowledgement, exactly like the daemon's abort piggyback: deletion is
@@ -90,9 +99,10 @@ export async function expiredWorkspaceKeys(
       scope.runtimeId === null ? sql`r.runtime_id is null` : sql`r.runtime_id = ${scope.runtimeId}`
     }
     group by r.workspace_key
-    having bool_and(r.workspace_expires_at is not null)
-       and max(r.workspace_expires_at) < now()
-       and max(r.workspace_expires_at) > now() - ${sql.raw(String(windowHours))} * interval '1 hour'
+    having bool_and(coalesce(r.workspace_expires_at, r.finished_at) is not null)
+       and max(coalesce(r.workspace_expires_at, r.finished_at)) < now()
+       and max(coalesce(r.workspace_expires_at, r.finished_at)) >
+           now() - ${sql.raw(String(windowHours))} * interval '1 hour'
     limit ${sql.raw(String(limit))}
   `)) as unknown as Array<{ workspaceKey: string }>;
   return rows.map((row) => row.workspaceKey);
@@ -110,8 +120,8 @@ export async function expiredWorkspaceKeys(
  */
 export async function workspaceCollectable(db: Db, workspaceKey: string): Promise<boolean> {
   const rows = (await db.execute(sql`
-    select bool_and(r.workspace_expires_at is not null)
-       and max(r.workspace_expires_at) < now() as "collectable"
+    select bool_and(coalesce(r.workspace_expires_at, r.finished_at) is not null)
+       and max(coalesce(r.workspace_expires_at, r.finished_at)) < now() as "collectable"
     from ${runs} r
     where r.workspace_key = ${workspaceKey}
   `)) as unknown as Array<{ collectable: boolean | null }>;

@@ -306,14 +306,18 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
     const pinned = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
     expect(pinned.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
-    // finishing is no longer the criterion: the run must have RELEASED its
-    // workspace, which is what a follow-up's presence delays (ADR-0018)
+    // Released, and the window passed: now the directory is spent.
     await db
       .update(runs)
-      .set({ runtimeId, status: "succeeded", finishedAt: sql`now()` })
+      .set({
+        runtimeId,
+        status: "succeeded",
+        finishedAt: sql`now()`,
+        workspaceExpiresAt: sql`now() + interval '1 hour'`,
+      })
       .where(eq(runs.id, runId));
-    const finishedOnly = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
-    expect(finishedOnly.reapableWorkspaceKeys ?? []).not.toContain(runId);
+    const withinWindow = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(withinWindow.reapableWorkspaceKeys ?? []).not.toContain(runId);
 
     await db
       .update(runs)
@@ -321,6 +325,13 @@ describe.skipIf(!dbUp)("dispatch protocol: claim, events, artifacts, terminal", 
       .where(eq(runs.id, runId));
     const done = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
     expect(done.reapableWorkspaceKeys).toContain(runId);
+
+    // A finished run with NO expiry counts as released too — it either
+    // predates retention (the engine deleted its workspace on the spot) or
+    // lost the release write, and both must reclaim rather than leak forever.
+    await db.update(runs).set({ workspaceExpiresAt: null }).where(eq(runs.id, runId));
+    const legacy = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(await daemonClaim());
+    expect(legacy.reapableWorkspaceKeys).toContain(runId);
 
     // never another runtime's
     const foreign = await jsonOf<{ reapableWorkspaceKeys?: string[] }>(

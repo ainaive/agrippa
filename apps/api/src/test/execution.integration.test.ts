@@ -733,9 +733,16 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
         json: submitBody(),
       });
       const body = await jsonOf<{ taskId: string; runId: string }>(res);
+      // finalize does two things: it stamps finishedAt AND releases the
+      // workspace with a retention window. A fixture that fakes only the
+      // first produces a run the platform reads as already collected.
       await db
         .update(runs)
-        .set({ status: "succeeded", finishedAt: new Date() })
+        .set({
+          status: "succeeded",
+          finishedAt: new Date(),
+          workspaceExpiresAt: sql`now() + interval '1 hour'`,
+        })
         .where(eq(runs.id, body.runId));
       return { runId: body.runId, taskId: body.taskId };
     };
