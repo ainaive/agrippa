@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -117,9 +117,37 @@ const makeRunner = (api: MockApi, executor: FakeExecutor) =>
     flushMs: 20,
   });
 
+/**
+ * Every test runs against its own workspace root, from the harness rather than
+ * from each test remembering to make one.
+ *
+ * These tests used to assign WORKSPACE_ROOT in their own first line, which was
+ * correct but held only as long as every future test did the same: one added
+ * here that read the root without setting it would silently inherit the
+ * previous test's directory and then pass or fail on file order. That is not a
+ * hypothetical — a test on the follow-up-steering branch depended on an earlier
+ * test having run, and was green in file order and wrong in isolation.
+ *
+ * The root is read lazily (packages/workspace reads the env var per call), so
+ * assigning it per test is enough; afterEach restores whatever the process had.
+ */
+let workspaceRoot: string;
+let savedRoot: string | undefined;
+
+beforeEach(() => {
+  savedRoot = process.env.WORKSPACE_ROOT;
+  workspaceRoot = mkdtempSync(path.join(tmpdir(), "daemon-ws-"));
+  process.env.WORKSPACE_ROOT = workspaceRoot;
+});
+
+afterEach(() => {
+  if (savedRoot === undefined) delete process.env.WORKSPACE_ROOT;
+  else process.env.WORKSPACE_ROOT = savedRoot;
+  rmSync(workspaceRoot, { recursive: true, force: true });
+});
+
 describe("daemon runner", () => {
   it("executes a dispatch: rewrites paths, materializes skills, streams events, completes", async () => {
-    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-ws-"));
     const runId = Bun.randomUUIDv7();
     const api = new MockApi();
     const executor = new FakeExecutor({
@@ -134,7 +162,7 @@ describe("daemon runner", () => {
     await runner.register();
 
     // put the artifact file where the executor claims it is
-    const workspaceDir = path.join(process.env.WORKSPACE_ROOT, runId);
+    const workspaceDir = path.join(workspaceRoot, runId);
     await Bun.write(path.join(workspaceDir, "report.md"), "# report");
 
     await runner.executeDispatch(dispatchFor("fake", runId));
@@ -164,7 +192,6 @@ describe("daemon runner", () => {
   });
 
   it("aborts the executor when a batch response carries the abort flag", async () => {
-    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-ws-"));
     const api = new MockApi();
     api.abortAfterBatches = 0; // every response says abort
     const executor = new FakeExecutor({ "step-1": { kind: "hang" } });
@@ -181,7 +208,6 @@ describe("daemon runner", () => {
   });
 
   it("reports transport-level death via fail() so the server synthesizes the failure", async () => {
-    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-ws-"));
     const api = new MockApi();
     const executor = new FakeExecutor({ "step-1": { kind: "crash" } });
     const runner = makeRunner(api, executor);
@@ -198,7 +224,6 @@ describe("daemon runner", () => {
     // start from the pinned base and report success, dropping everything the
     // ancestor did — invisibly, which is the whole reason follow-ups are
     // refused to daemons that cannot make this promise.
-    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-attach-"));
     const api = new MockApi();
     const runner = makeRunner(api, new FakeExecutor({}));
     await runner.register();
@@ -230,9 +255,8 @@ describe("daemon runner", () => {
 
 describe("daemon runner config isolation", () => {
   it("resets .claude and .mcp.json left by a prior invocation", async () => {
-    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-ws-"));
     const runId = Bun.randomUUIDv7();
-    const workspaceDir = path.join(process.env.WORKSPACE_ROOT, runId);
+    const workspaceDir = path.join(workspaceRoot, runId);
     // a previous agent invocation left hooks, settings, and an MCP config
     await Bun.write(path.join(workspaceDir, ".claude", "settings.json"), "{}");
     await Bun.write(path.join(workspaceDir, ".claude", "hooks", "evil.sh"), "#!/bin/sh");
@@ -268,11 +292,10 @@ describe("daemon runner config isolation", () => {
     // left a shallow clone on the daemon host for good. The daemon cannot work
     // out on its own that a run is done — affinity gives it the workspace for
     // the run's whole life, and the engine finalizes centrally.
-    process.env.WORKSPACE_ROOT = mkdtempSync(path.join(tmpdir(), "daemon-reap-"));
     const finished = Bun.randomUUIDv7();
     const live = Bun.randomUUIDv7();
     for (const id of [finished, `${finished}.platform`, live]) {
-      await Bun.write(path.join(process.env.WORKSPACE_ROOT, id, "keep.txt"), "x");
+      await Bun.write(path.join(workspaceRoot, id, "keep.txt"), "x");
     }
 
     const api = new MockApi();
@@ -288,7 +311,7 @@ describe("daemon runner config isolation", () => {
     runner.stop();
     await loop;
 
-    const root = process.env.WORKSPACE_ROOT;
+    const root = workspaceRoot;
     expect(await Bun.file(path.join(root, finished, "keep.txt")).exists()).toBe(false);
     // the platform sidecar goes with it — removeWorkspace takes both
     expect(await Bun.file(path.join(root, `${finished}.platform`, "keep.txt")).exists()).toBe(
