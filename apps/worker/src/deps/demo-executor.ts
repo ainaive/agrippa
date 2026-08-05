@@ -73,9 +73,10 @@ export class DemoExecutor implements Executor {
     subagents: true,
     mcp: true,
     skills: true,
-    resume: false,
+    // it holds no conversation, so there is nothing a session id could continue
+    resume: "none",
     streaming: true,
-  };
+  } as const;
 
   constructor(private readonly stepDelayMs = 400) {}
 

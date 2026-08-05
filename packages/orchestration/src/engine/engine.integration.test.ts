@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import path from "node:path";
+import type { ResumeCapability } from "@agrippa/core";
 import {
   artifacts,
   checkpoints,
@@ -22,7 +23,12 @@ import {
   tokenUsage,
   users,
 } from "@agrippa/db";
-import { type Executor, FakeExecutor, type FakeStepBehavior } from "@agrippa/executor-core";
+import {
+  type Executor,
+  FakeExecutor,
+  type FakeResumeReport,
+  type FakeStepBehavior,
+} from "@agrippa/executor-core";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { compileTemplate } from "../compile";
 import { RemoteExecutor } from "../remote/remote-executor";
@@ -32,7 +38,7 @@ import { seedBuiltinTemplates } from "../seed-builtins";
 import type { TemplateDoc } from "../template-schema";
 import { InProcessEventBus } from "./bus";
 import { type EngineDeps, ProviderCredentialError, type RunControlHandle } from "./deps";
-import { ExecutorUnavailableError, executeRun } from "./engine";
+import { CONTEXT_LOSS_DISCLOSURE, ExecutorUnavailableError, executeRun } from "./engine";
 import {
   FakeResourceMaterializer,
   FakeScmService,
@@ -149,6 +155,10 @@ type DepsOptions = {
   providerCredentialError?: Error;
   /** Simulate a worker with limited env auth (undefined = no gating). */
   envAuthProviders?: readonly string[];
+  /** Advertised resume capability (default `verified`) — ADR-0018 Decision 5. */
+  resume?: ResumeCapability;
+  /** Per-step resume outcome, including the lie (`omit`) that must fail closed. */
+  resumeReports?: Record<string, FakeResumeReport>;
 };
 
 type FixtureOptions = {
@@ -267,7 +277,11 @@ async function setupFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const runtimeId = await insertTestRuntime(db, orgId, user.id);
 
   const makeDeps: Fixture["makeDeps"] = (script, opts = {}) => {
-    const executor = new FakeExecutor(script, { envAuthProviders: opts.envAuthProviders });
+    const executor = new FakeExecutor(script, {
+      envAuthProviders: opts.envAuthProviders,
+      ...(opts.resume !== undefined ? { resume: opts.resume } : {}),
+      ...(opts.resumeReports !== undefined ? { resumeReports: opts.resumeReports } : {}),
+    });
     return {
       db,
       executors: wireTransport({ fake: executor }, runtimeId),
@@ -637,6 +651,123 @@ for (const transport of TRANSPORTS) {
           expect(request?.resumeSessionId).toBe("fake-find-root-cause-1");
         },
       );
+
+      // ── Resume as a detection capability (ADR-0018 Decision 5) ──────────────
+      // What a crashed worker leaves behind, written onto the row the engine
+      // already created rather than by crashing one: the crash tests above
+      // skip the remote leg (a daemon reports a failed dispatch instead of
+      // killing the engine), and what is under test here is what the NEXT
+      // invocation is handed and how the engine reacts to what it reports —
+      // which must hold through both transports.
+      const crashStep = async (db: Db, runId: string, stepId: string): Promise<string> => {
+        const [row] = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, stepId)));
+        await db
+          .update(runSteps)
+          .set({ status: "failed", error: { code: "crashed", message: "worker died mid-step" } })
+          .where(eq(runSteps.id, row?.id as string));
+        return row?.executorSessionId as string;
+      };
+      const requestsFor = (deps: { executor: FakeExecutor }, stepId: string) =>
+        deps.executor.requests.filter((r) => r.stepId === stepId);
+
+      it("a verified executor that honors the resume is invoked once, undisclosed", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("waiting_approval");
+        const sessionId = await crashStep(db, runId, "find-root-cause");
+
+        const resumed = makeDeps(HAPPY_SCRIPT); // default: verified + honored
+        expect(await executeRun(resumed, runId)).toBe("waiting_approval");
+
+        const requests = requestsFor(resumed, "find-root-cause");
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.resumeSessionId).toBe(sessionId);
+        expect(requests[0]?.instructions).not.toContain(CONTEXT_LOSS_DISCLOSURE);
+      });
+
+      it("a rejected resume is re-invoked once, disclosed, on the same attempt", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("waiting_approval");
+        const sessionId = await crashStep(db, runId, "find-root-cause");
+
+        const resumed = makeDeps(HAPPY_SCRIPT, {
+          resumeReports: { "find-root-cause": "rejected" },
+        });
+        expect(await executeRun(resumed, runId)).toBe("waiting_approval");
+
+        const requests = requestsFor(resumed, "find-root-cause");
+        expect(requests).toHaveLength(2);
+        // the first was told to continue the session and reported it could not
+        expect(requests[0]?.resumeSessionId).toBe(sessionId);
+        expect(requests[0]?.instructions).not.toContain(CONTEXT_LOSS_DISCLOSURE);
+        // the second is honestly fresh: the dead session id is withheld so it
+        // cannot be re-offered, and the transcript opens with the disclosure
+        expect(requests[1]?.resumeSessionId).toBeUndefined();
+        expect(requests[1]?.instructions.startsWith(CONTEXT_LOSS_DISCLOSURE)).toBe(true);
+        expect(requests[1]?.instructions).toContain(requests[0]?.instructions as string);
+
+        // and it cost no retry budget: losing a conversation is not the step
+        // failing, so the recovery attempt is still a single attempt row
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "find-root-cause")));
+        expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+          [1, "failed"],
+          [2, "succeeded"],
+        ]);
+      });
+
+      it.each(["none", "unverified"] as ResumeCapability[])(
+        "an executor advertising '%s' resume is never handed a session id",
+        async (resume) => {
+          const { db, runId, makeDeps } = await setupFixture();
+          expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("waiting_approval");
+          await crashStep(db, runId, "find-root-cause");
+
+          const resumed = makeDeps(HAPPY_SCRIPT, { resume });
+          expect(await executeRun(resumed, runId)).toBe("waiting_approval");
+
+          // one honest fresh start — and NOT disclosed, because nothing was
+          // lost that the agent was ever promised: it never held the thread
+          const requests = requestsFor(resumed, "find-root-cause");
+          expect(requests).toHaveLength(1);
+          expect(requests[0]?.resumeSessionId).toBeUndefined();
+          expect(requests[0]?.instructions).not.toContain(CONTEXT_LOSS_DISCLOSURE);
+        },
+      );
+
+      it("a verified executor that reports no outcome fails the run closed", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("waiting_approval");
+        await crashStep(db, runId, "find-root-cause");
+
+        // the lie by silence: given a session id, says nothing about it
+        const resumed = makeDeps(HAPPY_SCRIPT, {
+          resumeReports: { "find-root-cause": "omit" } as Record<string, FakeResumeReport>,
+        });
+        expect(await executeRun(resumed, runId)).toBe("failed");
+
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        const error = run?.error as { code?: string; message?: string };
+        expect(error?.code).toBe("contract_violation");
+        // named, so this cannot pass for some other contract violation
+        expect(error?.message).toContain("did not report a resume outcome");
+        // the step is not recorded as having produced anything
+        const [attempt] = await db
+          .select()
+          .from(runSteps)
+          .where(
+            and(
+              eq(runSteps.runId, runId),
+              eq(runSteps.stepId, "find-root-cause"),
+              eq(runSteps.attempt, 2),
+            ),
+          );
+        expect(attempt?.status).toBe("failed");
+      });
 
       it("cancellation mid-step aborts promptly via the control channel", async () => {
         const { db, runId, makeDeps, bus } = await setupFixture();

@@ -2,8 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
+import type {
+  ExecutionContext,
+  ExecutorEvent,
+  ResumeOutcome,
+  StepExecutionRequest,
+} from "@agrippa/executor-core";
 import { probeCodexCli } from "./cli";
+import { CodexEventCollector } from "./events";
 import { createCodexExecutor } from "./executor";
 
 const FIXTURE = path.resolve(import.meta.dirname, "../test/fixtures/fake-codex.ts");
@@ -121,6 +127,31 @@ describe("codex executor", () => {
     const argv2 = JSON.parse(done2?.type === "step.completed" ? done2.output : "[]") as string[];
     expect(argv2.slice(argv2.indexOf("--sandbox"))[1]).toBe("read-only");
     expect(argv2.slice(argv2.indexOf("resume"))[1]).toBe("sess-9");
+  });
+
+  // ADR-0018 Decision 5: `codex resume <thread>` announces the thread it
+  // actually opened, which is what makes this executor's `verified` claim
+  // real — a different id means the conversation is gone, whatever the CLI
+  // reports afterwards.
+  it.each([
+    ["thr-1", "honored"],
+    ["thr-other", "rejected"],
+  ] as Array<[string, ResumeOutcome]>)(
+    "reports a resume of thr-1 that opened %s as %s",
+    (opened, outcome) => {
+      const collector = new CodexEventCollector("gpt-5-codex", "thr-1");
+      expect(collector.map({ type: "thread.started", thread_id: opened })).toEqual([
+        { type: "step.started", sessionId: opened, resumed: outcome },
+      ]);
+    },
+  );
+
+  it("reports no resume outcome when it was not asked to resume", () => {
+    const collector = new CodexEventCollector("gpt-5-codex");
+    // absent, not "honored": there was no thread to continue
+    expect(collector.map({ type: "thread.started", thread_id: "thr-1" })).toEqual([
+      { type: "step.started", sessionId: "thr-1" },
+    ]);
   });
 
   it("assembles the prompt from role, prior context, instructions, and artifact directions", async () => {

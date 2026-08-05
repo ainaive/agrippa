@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import {
   type ApprovalExpirePayload,
+  catalogCapabilityShortfall,
   EXECUTOR_CATALOG,
   isExecutorId,
   type NotificationDeliverPayload,
@@ -99,14 +100,12 @@ if (codexProbe.ok) {
 // capability set here would let templates pass validation and fail at runtime
 for (const [id, executor] of Object.entries(executors)) {
   if (!isExecutorId(id)) throw new Error(`executor '${id}' is not in EXECUTOR_CATALOG`);
-  const expected = EXECUTOR_CATALOG[id].capabilities;
-  const actual = executor.capabilities as Record<string, boolean>;
-  for (const [flag, value] of Object.entries(expected)) {
-    // the catalog may promise less than the executor delivers, never more
-    if (value && !actual[flag]) {
-      throw new Error(`executor '${id}' lacks catalog capability '${flag}'`);
-    }
-  }
+  // the catalog may promise less than the executor delivers, never more
+  const short = catalogCapabilityShortfall(
+    EXECUTOR_CATALOG[id].capabilities,
+    executor.capabilities,
+  );
+  if (short) throw new Error(`executor '${id}' lacks catalog capability '${short}'`);
 }
 
 const workerAd = {

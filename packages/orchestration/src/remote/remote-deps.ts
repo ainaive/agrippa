@@ -92,7 +92,7 @@ const NO_CAPABILITIES: ExecutorCapabilities = {
   subagents: false,
   mcp: false,
   skills: false,
-  resume: false,
+  resume: "none",
   streaming: false,
 };
 

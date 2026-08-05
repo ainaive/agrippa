@@ -1,4 +1,4 @@
-import type { ArtifactKind } from "@agrippa/core";
+import type { ArtifactKind, ResumeCapability } from "@agrippa/core";
 import type { WorkspaceAccess } from "./isolation";
 
 /**
@@ -90,6 +90,13 @@ export type StepExecutionRequest = {
   toolPolicy: ToolPolicy;
   limits: { maxTurns: number; maxOutputTokens?: number };
   workspaceDir: string;
+  /**
+   * Continue this executor session. Only ever set for an executor whose
+   * `capabilities.resume` is `verified` (ADR-0018 Decision 5), and such an
+   * executor MUST report the outcome on `step.started`: an invocation that
+   * was given a session id and reports nothing is a protocol violation the
+   * engine fails the step on, rather than proceed on unproven continuity.
+   */
   resumeSessionId?: string;
   priorContext: PriorStepSummary[];
   /** Artifact keys this step must produce (from the template contract). */
@@ -120,8 +127,15 @@ export type UsageDelta = {
   cacheWriteTokens: number;
 };
 
+/**
+ * Whether an invocation handed a `resumeSessionId` actually continued that
+ * conversation. Reported by `verified` executors on `step.started`; absent
+ * when the request carried no session id (there was nothing to continue).
+ */
+export type ResumeOutcome = "honored" | "rejected";
+
 export type ExecutorEvent =
-  | { type: "step.started"; sessionId?: string }
+  | { type: "step.started"; sessionId?: string; resumed?: ResumeOutcome }
   | { type: "message.delta"; text: string }
   | { type: "message.completed"; role: "assistant"; text: string }
   | { type: "tool.started"; toolName: string; input: unknown; toolUseId: string }
@@ -166,7 +180,8 @@ export type ExecutorCapabilities = {
   subagents: boolean;
   mcp: boolean;
   skills: boolean;
-  resume: boolean;
+  /** See ResumeCapability in @agrippa/core — three-valued, not a boolean. */
+  resume: ResumeCapability;
   streaming: boolean;
 };
 

@@ -141,7 +141,7 @@ export function createClaudeExecutor(
     options.claudeExecutablePath ?? process.env.CLAUDE_CODE_EXECUTABLE ?? undefined;
   return {
     id: "claude-agent-sdk",
-    capabilities: { subagents: true, mcp: true, skills: true, resume: true, streaming: true },
+    capabilities: { subagents: true, mcp: true, skills: true, resume: "verified", streaming: true },
     // captured at construction: which env-policy providers this worker can
     // serve without a project credential — the engine defers runs it can't
     envAuthProviders: envAuth ? ["anthropic"] : [],
@@ -170,7 +170,24 @@ export function createClaudeExecutor(
             case "system": {
               if ("subtype" in message && message.subtype === "init" && !started) {
                 started = true;
-                yield { type: "step.started", sessionId: message.session_id };
+                // The init message names the session the SDK actually opened,
+                // which is what makes resume *verifiable* here (ADR-0018
+                // Decision 5): asked to resume, we either got that session back
+                // or we got a different one and the context is gone. Reporting
+                // "rejected" is safe in the direction that matters — the engine
+                // answers it by disclosing context loss, so a false rejection
+                // costs one honest restart while a false "honored" would let a
+                // fresh agent speak as though it remembered the conversation.
+                yield {
+                  type: "step.started",
+                  sessionId: message.session_id,
+                  ...(req.resumeSessionId
+                    ? {
+                        resumed:
+                          message.session_id === req.resumeSessionId ? "honored" : "rejected",
+                      }
+                    : {}),
+                };
               }
               break;
             }

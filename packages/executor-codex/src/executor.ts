@@ -173,7 +173,13 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
   );
   return {
     id: "codex-cli",
-    capabilities: { subagents: false, mcp: false, skills: false, resume: true, streaming: true },
+    capabilities: {
+      subagents: false,
+      mcp: false,
+      skills: false,
+      resume: "verified",
+      streaming: true,
+    },
     // captured at construction: a keyless worker registers (project
     // credentials may cover its runs) but the engine defers any run whose
     // providers need env auth this worker doesn't have
@@ -185,7 +191,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
     ): AsyncIterable<ExecutorEvent> {
       clearExpectedArtifacts(req.workspaceDir, req.expectedArtifacts);
 
-      const collector = new CodexEventCollector(req.model.providerModelId);
+      const collector = new CodexEventCollector(req.model.providerModelId, req.resumeSessionId);
       const env = overlayProviderAuth(buildScrubbedEnv(), req.providerAuth, "openai");
       if (req.providerAuth) {
         // An ambient CODEX_HOME auth.json would outrank the project key, so

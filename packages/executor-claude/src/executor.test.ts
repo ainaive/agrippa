@@ -2,7 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ExecutionContext, ExecutorEvent, StepExecutionRequest } from "@agrippa/executor-core";
+import type {
+  ExecutionContext,
+  ExecutorEvent,
+  ResumeOutcome,
+  StepExecutionRequest,
+} from "@agrippa/executor-core";
 import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { buildQueryArgs, createClaudeExecutor } from "./executor";
 
@@ -274,6 +279,39 @@ describe("claude executor event stream", () => {
       path: ".agrippa/artifacts/fix-report.md",
     });
     expect(events.at(-1)).toEqual({ type: "step.completed", output: "All done." });
+  });
+
+  // ADR-0018 Decision 5: the catalog promises `verified` resume for this
+  // executor, and this is the evidence — the init message names the session
+  // the SDK actually opened, so the claim is a comparison rather than a hope.
+  it.each([
+    ["sess-1", "honored"],
+    ["sess-other", "rejected"],
+  ] as Array<[string, ResumeOutcome]>)(
+    "reports a resume of sess-1 that opened %s as %s",
+    async (opened, outcome) => {
+      const req = makeRequest({ resumeSessionId: "sess-1" });
+      const messages = [
+        { type: "system", subtype: "init", session_id: opened },
+        { type: "result", subtype: "success", result: "done", is_error: false },
+      ];
+      const events = await collect(
+        createClaudeExecutor(scriptedQuery(messages)).executeStep(req, makeCtx()),
+      );
+      expect(events[0]).toEqual({ type: "step.started", sessionId: opened, resumed: outcome });
+    },
+  );
+
+  it("reports no resume outcome when it was not asked to resume", async () => {
+    const messages = [
+      { type: "system", subtype: "init", session_id: "sess-1" },
+      { type: "result", subtype: "success", result: "done", is_error: false },
+    ];
+    const events = await collect(
+      createClaudeExecutor(scriptedQuery(messages)).executeStep(makeRequest(), makeCtx()),
+    );
+    // absent, not "honored": there was no conversation to continue
+    expect(events[0]).toEqual({ type: "step.started", sessionId: "sess-1" });
   });
 
   it("collects only contracted artifacts, skipping patch and uncontracted files", async () => {

@@ -38,6 +38,7 @@ import {
   type ProviderAuth,
   type ResolvedMcpServer,
   type ResolvedModel,
+  type ResumeOutcome,
   type SecretRedactor,
   type StepExecutionRequest,
   type UsageDelta,
@@ -80,6 +81,28 @@ type SystemStep = TemplateStepV2 & { kind: "system" };
 type CheckpointStep = TemplateStepV2 & { kind: "checkpoint" };
 
 type AbortReason = "cancelled" | "timed_out" | "usage_limit_exceeded" | "drained" | "lease_lost";
+
+/**
+ * Told to an agent whose session could not be resumed (ADR-0018 Decision 6).
+ * It goes into the step's `instructions` — the volatile channel — and never
+ * into `systemPrompt` (a registry row shared across runs) or a workspace file
+ * (reset before every attempt, so it would be erased before it was read).
+ */
+export const CONTEXT_LOSS_DISCLOSURE =
+  "Your previous conversation for this step could not be restored, so you are starting " +
+  "without it. Treat nothing from that conversation as known: re-read the workspace and " +
+  "the prior step summaries above before acting, and say so if that leaves you unable to " +
+  "continue.";
+
+/**
+ * Compose the disclosure into a step's instructions. Concatenation, not
+ * interpolation: whatever the instructions contain is already fully resolved,
+ * and re-scanning them here would evaluate template syntax that a later
+ * feature (an operator's steering message) legitimately puts in this string.
+ */
+export function withContextLossDisclosure(instructions: string): string {
+  return `${CONTEXT_LOSS_DISCLOSURE}\n\n${instructions}`;
+}
 
 /** A run's per-slot execution binding, resolved once at pickup. */
 type SlotBinding = {
@@ -1308,51 +1331,42 @@ class RunEngine {
   ): Promise<string> {
     const binding = this.bindingFor(step);
     const request = await this.buildRequest(step, row, attempt);
-    // narrowed to { signal, logger } by ADR-0017 Decision 2: usage flows only
-    // through usage events, secrets only through the resource materializer
-    const ctx: ExecutionContext = {
-      signal: this.abort.signal,
-      logger: this.deps.logger,
-    };
 
-    let output: string | null = null;
-    let failure: StepFailed | null = null;
+    let result = await this.invokeExecutor(phase, step, row, attempt, binding, request);
 
-    for await (const event of binding.executor.executeStep(request, ctx)) {
-      await this.persistExecutorEvent(phase, step, row, event);
-      if (event.type === "step.completed") output = event.output;
-      if (event.type === "step.failed") {
-        failure = new StepFailed(event.error.message, {
-          code: event.error.code,
-          message: event.error.message,
+    // Resume accounting, only for an invocation that was actually handed a
+    // session id — which by the gate in buildRequest means a `verified`
+    // executor, from which a report is mandatory.
+    if (request.resumeSessionId !== undefined && !result.failure) {
+      if (result.resumed === "rejected") {
+        this.deps.logger.warn("executor session did not resume — disclosing context loss", {
+          runId: this.run.id,
+          stepId: step.id,
+          executorId: binding.executorId,
         });
-      }
-      if (event.type === "usage") {
-        try {
-          await this.recordUsage(event, row, attempt);
-        } catch (err) {
-          // Abort so the executor stops streaming, then propagate as a step
-          // failure. Propagating matters because the step-boundary
-          // checkInterrupts is NOT reached after the run's final step (runFlow
-          // goes straight to finalize), so swallowing this would let a run that
-          // blew its limit finish as 'succeeded'. Propagating *as StepFailed*
-          // matters because that is the only branch executeStepWithRetry closes
-          // the row out on — and its abortReason check fires before the retry
-          // and onFailure:continue branches, so a blown limit is never retried
-          // nor shrugged off.
-          if (err instanceof UsageLimitExceededError) {
-            this.triggerAbort("usage_limit_exceeded");
-            throw new StepFailed(err.message, {
-              code: "usage_limit_exceeded",
-              message: err.message,
-            });
-          }
-          throw err;
-        }
+        // One re-invocation, told plainly that its context is gone, and with
+        // the dead session id withheld so it cannot be re-offered. The first
+        // invocation was aborted the moment it reported the rejection, so this
+        // is a second start rather than a second full step.
+        const { resumeSessionId: _dead, ...fresh } = request;
+        result = await this.invokeExecutor(phase, step, row, attempt, binding, {
+          ...fresh,
+          instructions: withContextLossDisclosure(request.instructions),
+        });
+      } else if (result.resumed === undefined) {
+        // Fails closed: an executor that claims `verified`, is given a session
+        // id, and reports nothing has told us only that we cannot know whether
+        // the conversation continued. Proceeding would be exactly the silent
+        // fresh-start-as-continuity this capability exists to prevent.
+        throw new StepFailed(`executor '${binding.executorId}' did not report a resume outcome`, {
+          code: "contract_violation",
+          message: `executor '${binding.executorId}' advertises verified resume but reported no outcome for a resumed session`,
+        });
       }
     }
 
-    if (failure) throw failure;
+    if (result.failure) throw result.failure;
+    const output = result.output;
     if (output === null) {
       throw new StepFailed("executor stream ended without a terminal event", {
         code: "internal",
@@ -1388,6 +1402,91 @@ class RunEngine {
 
     this.stepOutputs[step.id] = { outputs: { result: output } };
     return output;
+  }
+
+  /**
+   * One executor invocation: persist its events, meter its usage, and report
+   * how it ended. Separate from the step because a rejected resume costs a
+   * second invocation of the SAME attempt — the retry budget belongs to work
+   * that failed, and losing a conversation is not the step failing.
+   *
+   * The signal is per-invocation and chained to the run's, so a rejected
+   * resume can be stopped without aborting the run. Stopping it immediately
+   * matters: `step.started` arrives before the model does any work, so the
+   * abandoned invocation costs a process start rather than a whole step.
+   */
+  private async invokeExecutor(
+    phase: TemplatePhaseV2,
+    step: AgentStep,
+    row: StepRow,
+    attempt: number,
+    binding: SlotBinding,
+    request: StepExecutionRequest,
+  ): Promise<{ output: string | null; failure: StepFailed | null; resumed?: ResumeOutcome }> {
+    const invocation = new AbortController();
+    const onRunAbort = () => invocation.abort();
+    if (this.abort.signal.aborted) invocation.abort();
+    this.abort.signal.addEventListener("abort", onRunAbort, { once: true });
+
+    // narrowed to { signal, logger } by ADR-0017 Decision 2: usage flows only
+    // through usage events, secrets only through the resource materializer
+    const ctx: ExecutionContext = {
+      signal: invocation.signal,
+      logger: this.deps.logger,
+    };
+
+    let output: string | null = null;
+    let failure: StepFailed | null = null;
+    let resumed: ResumeOutcome | undefined;
+
+    try {
+      for await (const event of binding.executor.executeStep(request, ctx)) {
+        await this.persistExecutorEvent(phase, step, row, event);
+        if (event.type === "step.started" && event.resumed) {
+          resumed = event.resumed;
+          if (event.resumed === "rejected") {
+            // whatever it does next, it does without the context this step
+            // was built on — stop it here and start again, disclosed
+            invocation.abort();
+            break;
+          }
+        }
+        if (event.type === "step.completed") output = event.output;
+        if (event.type === "step.failed") {
+          failure = new StepFailed(event.error.message, {
+            code: event.error.code,
+            message: event.error.message,
+          });
+        }
+        if (event.type === "usage") {
+          try {
+            await this.recordUsage(event, row, attempt);
+          } catch (err) {
+            // Abort so the executor stops streaming, then propagate as a step
+            // failure. Propagating matters because the step-boundary
+            // checkInterrupts is NOT reached after the run's final step (runFlow
+            // goes straight to finalize), so swallowing this would let a run that
+            // blew its limit finish as 'succeeded'. Propagating *as StepFailed*
+            // matters because that is the only branch executeStepWithRetry closes
+            // the row out on — and its abortReason check fires before the retry
+            // and onFailure:continue branches, so a blown limit is never retried
+            // nor shrugged off.
+            if (err instanceof UsageLimitExceededError) {
+              this.triggerAbort("usage_limit_exceeded");
+              throw new StepFailed(err.message, {
+                code: "usage_limit_exceeded",
+                message: err.message,
+              });
+            }
+            throw err;
+          }
+        }
+      }
+    } finally {
+      this.abort.signal.removeEventListener("abort", onRunAbort);
+    }
+
+    return { output, failure, resumed };
   }
 
   /**
@@ -1525,7 +1624,14 @@ class RunEngine {
       },
       limits: { maxTurns: 50 },
       workspaceDir: this.workspaceDir,
-      resumeSessionId: row.executorSessionId ?? undefined,
+      // Only a `verified` executor is trusted with a session id (ADR-0018
+      // Decision 5). One that cannot prove the context loaded would present a
+      // silent fresh start as continuity — so it is handed nothing, and the
+      // run is honestly a fresh conversation rather than falsely a resumed one.
+      resumeSessionId:
+        binding.executor.capabilities.resume === "verified"
+          ? (row.executorSessionId ?? undefined)
+          : undefined,
       priorContext,
       expectedArtifacts: step.produces.map((key) => ({
         key,
