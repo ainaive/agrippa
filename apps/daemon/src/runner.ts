@@ -18,6 +18,7 @@ import {
   resetAgentProjectConfig,
   stagePlatformSnapshot,
   workspaceDirFor,
+  workspaceDirPresent,
   workspaceIntact,
 } from "@agrippa/workspace";
 import type { DaemonApi } from "./client";
@@ -183,8 +184,10 @@ export class DaemonRunner {
           // idempotent: -B resets to the branch if it exists locally already
           await git(["checkout", "-B", spec.workBranch], workspaceDir, {}, "ambient");
         }
-      } else if (dispatch.payload.mustAttach && !(await workspaceIntact(workspaceKey))) {
+      } else if (dispatch.payload.mustAttach && !(await workspaceDirPresent(workspaceKey))) {
         // scratch workspaces are directories too, and a follow-up inherits one
+        // — but they never have platform git metadata, so presence is the
+        // whole criterion; workspaceIntact would refuse every one of them
         throw new WorkspaceLostError(workspaceKey);
       } else {
         await mkdir(workspaceDir, { recursive: true });

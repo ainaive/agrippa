@@ -244,6 +244,48 @@ describe("daemon runner", () => {
     expect(api.completed).toBeNull();
   });
 
+  it("attaches a follow-up to a scratch workspace that is present", async () => {
+    // A scratch workspace is a bare directory — no checkout, no platform git
+    // sidecar — so the attach criterion is presence, not git intactness. The
+    // first live follow-up smoke failed exactly here: workspaceIntact demands
+    // the sidecar, which a scratch workspace never has, so a healthy directory
+    // was refused as lost.
+    const api = new MockApi();
+    const executor = new FakeExecutor({
+      "step-1": { kind: "succeed", usage: { inputTokens: 1, outputTokens: 1 }, output: "done" },
+    });
+    const runner = makeRunner(api, executor);
+    await runner.register();
+
+    const parentKey = Bun.randomUUIDv7();
+    await Bun.write(path.join(workspaceRoot, parentKey, "report.md"), "# from the ancestor");
+
+    await runner.executeDispatch(
+      dispatchFor("fake", Bun.randomUUIDv7(), { mustAttach: true, workspaceKey: parentKey }),
+    );
+
+    expect(api.failed).toBeNull();
+    expect(api.completed).toEqual({});
+    // the follow-up ran in the ancestor's directory, not one named by its run id
+    expect(executor.requests[0]?.workspaceDir).toBe(path.join(workspaceRoot, parentKey));
+  });
+
+  it("fails workspace_lost when a scratch follow-up's directory is gone", async () => {
+    const api = new MockApi();
+    const runner = makeRunner(api, new FakeExecutor({}));
+    await runner.register();
+
+    await runner.executeDispatch(
+      dispatchFor("fake", Bun.randomUUIDv7(), {
+        mustAttach: true,
+        workspaceKey: Bun.randomUUIDv7(), // never created on this machine
+      }),
+    );
+
+    expect(api.failed?.code).toBe("workspace_lost");
+    expect(api.completed).toBeNull();
+  });
+
   it("fails a dispatch naming an executor this machine lacks", async () => {
     const api = new MockApi();
     const runner = makeRunner(api, new FakeExecutor({}));

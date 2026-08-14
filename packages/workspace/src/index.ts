@@ -301,6 +301,20 @@ export async function checkoutFromUrl(workspaceKey: string, source: CheckoutSour
   await sanitizeAgentWorkspace(dir);
 }
 
+/**
+ * Whether a workspace directory exists here at all — the attach criterion for
+ * scratch (repo-less) workspaces. Those are created by a bare mkdir and never
+ * get platform git metadata, so {@link workspaceIntact} is unconditionally
+ * false for them and would refuse a directory that is present and healthy.
+ */
+export async function workspaceDirPresent(workspaceKey: string): Promise<boolean> {
+  try {
+    return (await lstat(workspaceDirFor(workspaceKey))).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Whether a previously checked-out workspace is actually present here. */
 export async function workspaceIntact(workspaceKey: string): Promise<boolean> {
   try {
