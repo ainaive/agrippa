@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-14
+
+The M2 milestone: execution goes to where the code and credentials live; governance stays on the platform. Remote runtime daemons with capability-routed dispatch, follow-up steering of finished runs, cron/webhook-triggered submission with API keys, and checkpoint notifications — proven end to end on the deployed stack, including a live laptop-daemon follow-up smoke.
+
 ### Added
 
 - **A finished run now has a Continue button.** On a run whose workspace is still held, the timeline's composer gains a second destination: the same text either becomes a comment or asks the agent to carry on, and the reader lands on the run that will do the work. A follow-up's header carries a "continues #N" chip back to its parent. The button disappears once the workspace is past retention, so the affordance and the capability expire together rather than the UI offering something the API would refuse.
@@ -357,6 +361,8 @@ The M1 milestone: all three layers of the platform, working end to end.
 - **Executors** — the pluggable `Executor` contract (ADR-0005) with a FakeExecutor compliance suite; the Claude Agent SDK executor (subagents, skills, MCP, resume, workspace-scoped tool policy, artifact convention); a token-free demo executor.
 - **Platform** — better-auth with org/project RBAC and audit on every mutation, AES-256-GCM secrets store with write-only credentials, localized API errors, usage reporting, git workspaces with credential scrubbing, production Docker images + compose stack + GHCR release workflow.
 
-[Unreleased]: https://github.com/ainaive/agrippa/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ainaive/agrippa/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ainaive/agrippa/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/ainaive/agrippa/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ainaive/agrippa/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ainaive/agrippa/releases/tag/v0.1.0
