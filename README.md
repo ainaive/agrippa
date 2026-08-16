@@ -14,7 +14,7 @@ Projects are the resource scope: enabled Skills/MCP/models, token quota, connect
 
 ## Status
 
-M1 implemented — all three layers work end to end (see the [M1 plan](docs/plan/m1-plan.md)), plus the agrippa/v2 requirement-delivery workflow: multi-agent implement/review loops with structured human checkpoints, team comments, and platform-side pull requests ([CHANGELOG](CHANGELOG.md)).
+M2 shipped as v0.4.0 — execution goes to where the code and credentials live, governance stays on the platform: remote runtime daemons (`agrippa-daemon` on your own machines) with capability-routed dispatch, follow-up steering of finished runs, scheduled and webhook-triggered submission with project API keys, and checkpoint/terminal notifications — proven end to end on the deployed stack (see the [M2 plan](docs/plan/m2-plan.md)). This builds on M1's three layers and the agrippa/v2 requirement-delivery workflow: multi-agent implement/review loops with structured human checkpoints, team comments, and platform-side pull requests ([M1 plan](docs/plan/m1-plan.md) · [CHANGELOG](CHANGELOG.md)).
 
 ## Getting started
 
@@ -85,4 +85,4 @@ Agrippa（硅基工坊）是一个面向团队的智能体工作平台。团队�
 
 ### 当前状态
 
-M1 已实现——三层架构端到端可用（见 [M1 计划](docs/plan/m1-plan.md)），并已支持 agrippa/v2 需求交付工作流：多代理实现/评审循环、结构化人工检查点、团队评论与平台侧 PR（见 [CHANGELOG](CHANGELOG.md)）。
+M2 已发布（v0.4.0）——执行移到代码与凭据所在之处，治理留在平台：远程运行时守护进程（在你自己的机器上运行 `agrippa-daemon`）与按能力路由的调度、对已完成任务的追问引导（follow-up steering）、基于项目 API Key 的定时与 Webhook 触发提交、检查点与终态通知——已在生产部署上端到端验证（见 [M2 计划](docs/plan/m2-plan.md)）。此前的基础是 M1 的三层架构与 agrippa/v2 需求交付工作流：多代理实现/评审循环、结构化人工检查点、团队评论与平台侧 PR（[M1 计划](docs/plan/m1-plan.md) · [CHANGELOG](CHANGELOG.md)）。
