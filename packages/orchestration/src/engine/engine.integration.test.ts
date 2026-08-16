@@ -2902,6 +2902,34 @@ for (const transport of TRANSPORTS) {
         ).toHaveLength(0);
       });
 
+      it("the tail guard reads the run's newest patch row, never a stale attempt's", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+
+        // a retried steer plain-INSERTS a second patch row with the same key
+        // and the same iteration; ordering by iteration alone ties and lets
+        // Postgres hand publication a stale attempt's digest. The stale row
+        // here carries the empty digest — picked, it would skip the whole
+        // tail and publish nothing.
+        const f1 = await v2FollowupOf(fx, "just answer a question about it");
+        await fx.db.insert(artifacts).values({
+          runId: f1,
+          artifactKey: "changes",
+          iteration: 1,
+          kind: "patch",
+          name: "changes",
+          inline: "",
+          sha256: new Bun.CryptoHasher("sha256").update("").digest("hex"),
+          createdAt: new Date(Date.now() - 3600_000),
+        });
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("succeeded");
+        const steps = await fx.db.select().from(runSteps).where(eq(runSteps.runId, f1));
+        const byId = new Map(steps.map((s) => [s.stepId, s.status]));
+        // the NEWEST row (the steer's real, approved-matching patch) decided
+        expect(byId.get("push")).toBe("succeeded");
+        expect(byId.get("approve-publish")).toBe("skipped");
+      });
+
       it("a steer that changed nothing to publish skips the tail entirely", async () => {
         const fx = await setupV2Fixture();
         const { impl, rev } = await publishParent(fx);

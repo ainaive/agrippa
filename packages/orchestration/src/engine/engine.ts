@@ -2231,7 +2231,12 @@ class RunEngine {
       .select({ sha256: artifacts.sha256 })
       .from(artifacts)
       .where(and(eq(artifacts.runId, this.run.id), eq(artifacts.artifactKey, patchKey)))
-      .orderBy(desc(artifacts.iteration))
+      // createdAt tiebreaker: a retried steer INSERTS a second row with the
+      // same key and iteration, and the newest is what the rest of the engine
+      // treats as canonical (priorArtifacts loads last-write-wins) — a stale
+      // attempt's digest deciding publication could suppress the approval for
+      // bytes a human never saw
+      .orderBy(desc(artifacts.iteration), desc(artifacts.createdAt))
       .limit(1);
     const emptyDigest = new Bun.CryptoHasher("sha256").update("").digest("hex");
     if (!own?.sha256 || own.sha256 === emptyDigest) {
