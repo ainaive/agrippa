@@ -166,9 +166,8 @@ export async function sweepDeadHostRuns(
               and not exists (select 1 from ${checkpoints}
                     where ${checkpoints.runId} = ${runs.id}
                       and ${checkpoints.status} = 'pending')
-              and exists (select 1 from ${checkpoints}
-                    where ${checkpoints.runId} = ${runs.id}
-                      and ${checkpoints.decidedAt} < now() - ${grace}))
+              and (select max(${checkpoints.decidedAt}) from ${checkpoints}
+                    where ${checkpoints.runId} = ${runs.id}) < now() - ${grace})
         )`,
       ),
     );

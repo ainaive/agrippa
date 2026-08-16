@@ -215,7 +215,16 @@ export function createRunConsumer(db: Db, deps: EngineDeps, queue: BossQueue): R
         err instanceof WorkspaceBusyError
       ) {
         const [run] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, runId));
-        if (run && (run.status === "queued" || run.status === "waiting_approval")) {
+        if (
+          run &&
+          (run.status === "queued" ||
+            run.status === "waiting_approval" ||
+            // a crashed run's pg-boss retry delivered to the wrong host: the
+            // pinned-elsewhere decline completes the job, and the LEASE
+            // sweeper re-enqueues the leaseless running run through the
+            // resolver — onto the host queue this delivery bypassed
+            (run.status === "running" && err instanceof WorkspaceElsewhereError))
+        ) {
           deps.logger.warn(`run ${runId}: declining — ${String((err as Error).message)}`);
           // one timeline event so the SPA can show WHY the run is waiting
           await appendRunEvent(db, {

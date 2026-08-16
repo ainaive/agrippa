@@ -184,6 +184,14 @@ export type EngineDeps = {
    * renewal is unavailable.
    */
   lease?: { owner: string; ttlMs?: number };
+  /**
+   * This worker's workspace-storage identity (ADR-0018 amendment — the
+   * per-host queue). A central run pinned to another host's storage is
+   * declined before the claim: pg-boss's own retry of a crashed job bypasses
+   * the enqueue-side resolver, so the pin must also hold here. Absent (tests,
+   * daemons via RemoteExecutor deps), the guard is off.
+   */
+  workspaceHost?: string | null;
 };
 
 export type RunOutcome =

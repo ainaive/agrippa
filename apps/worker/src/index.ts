@@ -154,6 +154,8 @@ const deps: EngineDeps = {
   },
   // execution-lease identity: claims, renewals, and releases all key on it
   lease: { owner: containerId },
+  // claim-side half of the per-host queue: a run pinned elsewhere declines
+  workspaceHost,
 };
 
 const SLOTS = Number(process.env.WORKER_SLOTS ?? 2);

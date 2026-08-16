@@ -207,16 +207,18 @@ export class WorkspaceBusyError extends Error {
 }
 
 /**
- * Raised when a follow-up's workspace is not on THIS host and might still be
- * on another (ADR-0018 Consequences: central host affinity).
+ * Raised when a central run's workspace is not on THIS host and might still
+ * be on another (ADR-0018: central host affinity).
  *
- * Remote runs are pinned, so affinity is free for them. A central run has no
- * pin, and workspaces are host-local — so on a multi-worker fleet the run can
- * land on a worker that does not hold the directory. Declining lets the
- * sweeper re-enqueue and another worker try, which is bounded on purpose: past
- * the grace window the honest answer is that nobody has it, and the engine
- * fails `workspace_lost` rather than ping-ponging the run forever. The real
- * fix is a per-host queue, the same route-by-capability shape Phase B took.
+ * Two cases share the decline. A run PINNED to another host's storage
+ * (`runs.workspace_host`, the per-host queue) declines unconditionally —
+ * pg-boss's own retry of a crashed job bypasses the enqueue-side resolver,
+ * so the wrong host can still be handed the job, and failing it there would
+ * be a false `workspace_lost` while the holder is healthy; the sweeps
+ * re-enqueue through the resolver onto the host queue, and a DEAD host is
+ * the dead-host sweeper's terminal decision. An UNPINNED follow-up (skew: a
+ * chain from before the pin existed) declines within a bounded grace, past
+ * which the engine fails `workspace_lost` rather than ping-ponging forever.
  */
 export class WorkspaceElsewhereError extends Error {
   readonly code = "workspace_on_another_host";
@@ -399,15 +401,29 @@ export async function executeRun(
     if (holder.length > 0) throw new WorkspaceBusyError(run.id, holder[0]?.id as string);
   }
 
-  // Central host affinity (ADR-0018). A follow-up continues a directory that
-  // exists on exactly one host; remote runs carry a pin, central ones do not.
-  // Probed BEFORE the claim so a decline costs nothing — no status change, no
-  // retry burned — and bounded, so a workspace nobody holds becomes an honest
-  // `workspace_lost` from the check inside initialize rather than a run that
-  // circulates forever.
+  // The per-host queue's claim-side guard (ADR-0018 amendment): a central run
+  // pinned to another host's storage is never this worker's to claim — or to
+  // fail. Probed before the claim, unconditional (no grace): the sweeps
+  // re-enqueue through the resolver onto the host queue, and a dead host is
+  // the dead-host sweeper's terminal decision, not this worker's guess.
+  if (
+    run.runtimeId === null &&
+    run.workspaceHost !== null &&
+    deps.workspaceHost != null &&
+    run.workspaceHost !== deps.workspaceHost
+  ) {
+    throw new WorkspaceElsewhereError(run.id);
+  }
+
+  // Central host affinity for UNPINNED chains (deploy skew: a follow-up whose
+  // checkout predates the host pin). Probed BEFORE the claim so a decline
+  // costs nothing — no status change, no retry burned — and bounded, so a
+  // workspace nobody holds becomes an honest `workspace_lost` from the check
+  // inside initialize rather than a run that circulates forever.
   if (
     run.kind === "followup" &&
     run.runtimeId === null &&
+    run.workspaceHost === null && // a pinned run on ITS host answers with isIntact honestly
     template.spec.workspace !== undefined &&
     run.status === "queued" &&
     Date.now() - run.queuedAt.getTime() < WORKSPACE_AFFINITY_GRACE_MS &&
@@ -667,6 +683,32 @@ class RunEngine {
       if (!current || row.attempt > current.attempt) this.stepRows.set(key, row);
       if (row.status === "succeeded") {
         this.stepOutputs[row.stepId] = { outputs: { result: row.output ?? "" } };
+      }
+    }
+    // A follow-up's publish tail speaks the base flow's language: the cloned
+    // pr.open interpolates artifact and checkpoint references the ANCESTORS
+    // produced (implementation plan, clarify answers), and a recovery PR —
+    // ancestor pushed, PR creation failed — would otherwise compose from an
+    // empty context. VALUES only: produced/digest state stays this run's own
+    // (contracts and evidence untouched), and the run's own loads below
+    // overwrite anything it produced itself.
+    if (run.kind === "followup") {
+      const chainIds = await this.chainRunIds();
+      if (chainIds.length > 0) {
+        const chainArtifacts = await db
+          .select()
+          .from(artifacts)
+          .where(inArray(artifacts.runId, chainIds))
+          .orderBy(artifacts.createdAt);
+        for (const a of chainArtifacts) this.artifactValues[a.artifactKey] = a.inline ?? "";
+        const chainDecided = await db
+          .select()
+          .from(checkpoints)
+          .where(and(inArray(checkpoints.runId, chainIds), eq(checkpoints.status, "approved")))
+          .orderBy(checkpoints.decidedAt);
+        for (const row of chainDecided) {
+          this.checkpointResponses[row.checkpointId] = this.responseOf(row);
+        }
       }
     }
     const priorArtifacts = await db
@@ -1091,6 +1133,14 @@ class RunEngine {
         return "done";
       }
       const snapshot = this.sourceSnapshot(spec, step.id);
+      // The publish checkpoint records the EXACT digest it presents: approval
+      // attaches to bytes (ADR-0019), and a later identical steer proves its
+      // carry-forward against this record — never against publication or
+      // whatever patch rows a run happens to have.
+      const presentedPatch =
+        step.id === FOLLOWUP_PUBLISH_CHECKPOINT_ID && this.tailGuardState
+          ? (await this.tailGuardState).ownSha256
+          : null;
       await this.db.insert(checkpoints).values({
         runId: this.run.id,
         checkpointId: step.id,
@@ -1105,6 +1155,7 @@ class RunEngine {
           iteration,
           timeoutMinutes: durationToMinutes(spec.timeout),
           onTimeout: spec.onTimeout,
+          ...(presentedPatch ? { patchSha256: presentedPatch } : {}),
           ...snapshot,
         },
       });
@@ -1473,18 +1524,26 @@ class RunEngine {
    */
   private async composePrBody(step: SystemStep, ctx: Record<string, unknown>): Promise<string> {
     let body = interpolate(step.with.body ?? "", ctx);
+    // A follow-up's PR describes the CHAIN's delivery, so its waivers come
+    // from every run of the chain — a recovery PR (ancestor pushed, PR
+    // creation failed) must carry the findings the ancestor's reviewers
+    // accepted, not silently drop them.
+    const waiverRunIds =
+      this.run.kind === "followup" ? [this.run.id, ...(await this.chainRunIds())] : [this.run.id];
     const gateRows = await this.db
       .select({ row: checkpoints, deciderName: users.name, deciderEmail: users.email })
       .from(checkpoints)
       .leftJoin(users, eq(checkpoints.decidedBy, users.id))
       .where(
         and(
-          eq(checkpoints.runId, this.run.id),
+          inArray(checkpoints.runId, waiverRunIds),
           eq(checkpoints.kind, "review-gate"),
           eq(checkpoints.status, "approved"),
         ),
       )
-      .orderBy(checkpoints.iteration);
+      // chronological across the chain, so the last human decision per
+      // finding id wins exactly as it does within one run
+      .orderBy(checkpoints.decidedAt);
     // Waivers accumulate across rounds: a finding accepted in round N stays
     // waived unless a later round selected it for fixing. Walking iterations
     // in order keeps the last human decision per finding id.
@@ -2189,7 +2248,26 @@ class RunEngine {
   }
 
   /** Lazily computed once per engine leg — see {@link computeTailGuards}. */
-  private tailGuardState?: Promise<{ skipTail: boolean; skipCheckpoint: boolean }>;
+  private tailGuardState?: Promise<{
+    skipTail: boolean;
+    skipCheckpoint: boolean;
+    /** The steer's cumulative-patch digest — recorded on the publish
+     *  checkpoint's payload so a later identical steer can prove "these
+     *  exact bytes were approved". */
+    ownSha256: string | null;
+  }>;
+
+  /** The OTHER runs of this workspace chain, cached per engine leg. */
+  private chainRunIdsPromise?: Promise<string[]>;
+
+  private chainRunIds(): Promise<string[]> {
+    this.chainRunIdsPromise ??= this.db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(and(eq(runs.workspaceKey, this.run.workspaceKey), ne(runs.id, this.run.id)))
+      .then((rows) => rows.map((r) => r.id));
+    return this.chainRunIdsPromise;
+  }
 
   /**
    * The publish tail's guards (ADR-0019), keyed on the synthetic phase id so
@@ -2211,22 +2289,28 @@ class RunEngine {
   }
 
   /**
-   * Approved and published are separate facts, each read from its own record
-   * (the review round that shaped ADR-0019 Decision 3 found the first draft
-   * conflating them). The WHOLE tail is skipped only when the steer's
+   * Approved and published are separate facts, and approval attaches to
+   * EXACT bytes (the review rounds that shaped ADR-0019 Decision 3 caught
+   * both conflations). The WHOLE tail is skipped only when the steer's
    * cumulative patch is empty — nothing to publish. The CHECKPOINT alone is
-   * skipped when the patch is byte-identical (store-time sha256) to bytes
-   * this chain already approved: at an earlier follow-up's publish
-   * checkpoint, or by publishing them (nothing publishes unapproved bytes).
-   * A base-flow approval that never reached a push is deliberately not
-   * counted — the conservative direction re-asks a human; it never pushes
-   * unapproved bytes. Push and pr.open always run when the tail runs: both
-   * are idempotent, so an approved-but-unpublished chain is completed by the
-   * next follow-up rather than skipped past.
+   * skipped when the patch digest equals one a human approved at a publish
+   * checkpoint of this chain — the digest recorded on the checkpoint's
+   * payload at presentation, never derived after the fact. Publication is
+   * deliberately NOT approval: an auto-published base flow's bytes were
+   * never reviewed, and a published run's other patch rows (earlier loop
+   * iterations) were never presented — either would let identical bytes skip
+   * a gate nobody answered. The conservative direction re-asks a human; it
+   * never pushes unapproved bytes. Push and pr.open always run when the tail
+   * runs: both are idempotent, so an approved-but-unpublished chain is
+   * completed by the next follow-up rather than skipped past.
    */
-  private async computeTailGuards(): Promise<{ skipTail: boolean; skipCheckpoint: boolean }> {
+  private async computeTailGuards(): Promise<{
+    skipTail: boolean;
+    skipCheckpoint: boolean;
+    ownSha256: string | null;
+  }> {
     const patchKey = this.template.spec.outputs.artifacts.find((a) => a.kind === "patch")?.key;
-    if (!patchKey) return { skipTail: true, skipCheckpoint: false };
+    if (!patchKey) return { skipTail: true, skipCheckpoint: false, ownSha256: null };
     const [own] = await this.db
       .select({ sha256: artifacts.sha256 })
       .from(artifacts)
@@ -2240,38 +2324,27 @@ class RunEngine {
       .limit(1);
     const emptyDigest = new Bun.CryptoHasher("sha256").update("").digest("hex");
     if (!own?.sha256 || own.sha256 === emptyDigest) {
-      return { skipTail: true, skipCheckpoint: false };
+      return { skipTail: true, skipCheckpoint: false, ownSha256: null };
     }
 
-    const chainRuns = await this.db
-      .select({ id: runs.id, publishedSha: runs.publishedSha })
-      .from(runs)
-      .where(and(eq(runs.workspaceKey, this.run.workspaceKey), ne(runs.id, this.run.id)));
-    const approvedRunIds = new Set(
-      chainRuns.filter((r) => r.publishedSha !== null).map((r) => r.id),
-    );
-    const chainIds = chainRuns.map((r) => r.id);
-    if (chainIds.length > 0) {
-      const approvedCheckpoints = await this.db
-        .select({ runId: checkpoints.runId })
-        .from(checkpoints)
-        .where(
-          and(
-            inArray(checkpoints.runId, chainIds),
-            eq(checkpoints.checkpointId, FOLLOWUP_PUBLISH_CHECKPOINT_ID),
-            eq(checkpoints.status, "approved"),
-          ),
-        );
-      for (const row of approvedCheckpoints) approvedRunIds.add(row.runId);
+    const chainIds = await this.chainRunIds();
+    if (chainIds.length === 0) {
+      return { skipTail: false, skipCheckpoint: false, ownSha256: own.sha256 };
     }
-    if (approvedRunIds.size === 0) return { skipTail: false, skipCheckpoint: false };
-    const digests = await this.db
-      .select({ sha256: artifacts.sha256 })
-      .from(artifacts)
+    const approvedDigests = await this.db
+      .select({ payload: checkpoints.payload })
+      .from(checkpoints)
       .where(
-        and(inArray(artifacts.runId, [...approvedRunIds]), eq(artifacts.artifactKey, patchKey)),
+        and(
+          inArray(checkpoints.runId, chainIds),
+          eq(checkpoints.checkpointId, FOLLOWUP_PUBLISH_CHECKPOINT_ID),
+          eq(checkpoints.status, "approved"),
+        ),
       );
-    return { skipTail: false, skipCheckpoint: digests.some((d) => d.sha256 === own.sha256) };
+    const skipCheckpoint = approvedDigests.some(
+      (c) => (c.payload as { patchSha256?: string } | null)?.patchSha256 === own.sha256,
+    );
+    return { skipTail: false, skipCheckpoint, ownSha256: own.sha256 };
   }
 
   private async markSkipped(
