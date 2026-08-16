@@ -19,7 +19,7 @@ Defaults adopted with the plan (recorded here so nobody re-litigates): pre-M3 ch
 
 A follow-up produces a patch today but can never push — publication "remains the ancestor's business" (ADR-0018). ADR-0019 generalizes ADR-0012's creation CAS to an expected-tip CAS so a chain can advance the branch it published.
 
-- [ ] **ADR first**: [ADR-0019](../adr/0019-followup-publication-expected-tip-cas.md) + Amendment pointers appended in ADR-0012 and ADR-0018 (this plan's first commit)
+- [x] **ADR first**: [ADR-0019](../adr/0019-followup-publication-expected-tip-cas.md) + Amendment pointers appended in ADR-0012 and ADR-0018 (this plan's first commit)
 - [ ] **P1** `applyApprovedPatch` learns `expectedTip`: parent selection (E if present, else base), branch-ref fetch for the parent object, no-op tree guard (tree == E's tree → return E, push nothing), `tip_conflict` on any other observed tip; real-git tests — create / advance / idempotent retry / conflict / no-op
 - [ ] **P2** additive migration `runs.published_sha`, written by the engine in the `git.push` handler post-push (the `work_branch` pattern, crash-safe by determinism); `GitScmService` derives E from the `workspace_key` chain; `PushResult` gains `tip_conflict` and the engine maps it to `RunFailure("publish_conflict")`; `FakeScmService` learns to lie; `commitSha` on the `branch.pushed` event
 - [ ] **P3** synthetic publish tail in `followupTemplate` — approval checkpoint presenting the cumulative patch (decision 2, `onTimeout: cancel`) → `git.push` → `pr.open` iff the base flow had one; engine-computed tail guard skips the tail when the steer's patch is empty or byte-identical to the chain's last approved patch; i18n error strings; manual en+zh-CN 03; CHANGELOG
@@ -36,7 +36,7 @@ ADR-0018 named the per-host queue as the real fix for "declines pre-claim for fi
 
 ### Ride-along
 
-- [ ] **R1** Codex session home becomes a workspace sibling `<workspaceDir>.codex-home` (pure path math in `packages/executor-codex`, matching the `<key>.platform` sidecar convention); `removeWorkspace` also removes the sibling, so the worker collector and the daemon reap inherit cleanup for free. Closes the bug ADR-0018's Consequences recorded — M2 re-keyed the home by workspace but left it under OS tmpdir, reapable mid-chain and never collected. Migration note: pre-upgrade sessions resume `unverified` once → the engine's context-loss disclosure path (honest; window = one retention hour)
+- [x] **R1** Codex session home becomes a workspace sibling `<workspaceDir>.codex-home` (pure path math in `packages/executor-codex`, matching the `<key>.platform` sidecar convention); `removeWorkspace` also removes the sibling, so the worker collector and the daemon reap inherit cleanup for free. Closes the bug ADR-0018's Consequences recorded — M2 re-keyed the home by workspace but left it under OS tmpdir, reapable mid-chain and never collected. Migration note: pre-upgrade sessions resume `unverified` once → the engine's context-loss disclosure path (honest; window = one retention hour)
 
 ## PR 2 — `feat/m3-craft`
 
