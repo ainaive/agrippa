@@ -39,8 +39,13 @@ describe("workspaceHostId", () => {
     expect(await workspaceHostId()).toBe("pre-existing-host");
   });
 
-  it("two concurrent boots on one fresh volume converge on one id", async () => {
-    const [a, b] = await Promise.all([workspaceHostId(), workspaceHostId()]);
-    expect(a).toBe(b);
+  it("concurrent boots on one fresh volume converge on one VALID id", async () => {
+    // Convergence alone is not enough — the first implementation could hand
+    // every caller the same TORN read (an empty string), which passed an
+    // equality check and silently disabled host stamping. The shape assertion
+    // is the point.
+    const ids = await Promise.all(Array.from({ length: 8 }, () => workspaceHostId()));
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

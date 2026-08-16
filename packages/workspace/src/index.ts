@@ -1,4 +1,14 @@
-import { appendFile, cp, lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildSystemEnv } from "@agrippa/executor-core";
@@ -133,19 +143,33 @@ export async function git(
  * the root's top level (ADR-0018 amendment: host affinity keys on the
  * STORAGE, not the container, so compose replicas sharing the volume share
  * one id and a redeployed container never looks like a new host). The
- * exclusive-create write makes two workers booting on one fresh volume
- * converge: the loser's write fails and both read the winner's id.
+ * two-step atomic create makes two workers booting on one fresh volume
+ * converge: the loser's link fails and both read the winner's id.
  */
 export async function workspaceHostId(): Promise<string> {
   const file = path.join(workspaceRoot(), ".agrippa-host-id");
-  const read = async (): Promise<string> => (await Bun.file(file).text()).trim();
-  try {
-    const existing = await read();
-    if (existing) return existing;
-  } catch {}
+  const read = async (): Promise<string> => {
+    try {
+      return (await Bun.file(file).text()).trim();
+    } catch {
+      return "";
+    }
+  };
+  const existing = await read();
+  if (existing) return existing;
   await mkdir(workspaceRoot(), { recursive: true });
-  await writeFile(file, `${crypto.randomUUID()}\n`, { flag: "wx" }).catch(() => {});
-  return await read();
+  // Contents land under a temp name; link(2) publishes them. The final name
+  // therefore either does not exist or is COMPLETE — an exclusive-create
+  // write here (the first implementation) let a concurrent boot read the
+  // file between creation and content, and an empty id silently disables
+  // host stamping. The losing linker adopts the winner's id on the re-read.
+  const tmp = path.join(workspaceRoot(), `.agrippa-host-id.${crypto.randomUUID()}`);
+  await writeFile(tmp, `${crypto.randomUUID()}\n`);
+  await link(tmp, file).catch(() => {});
+  await rm(tmp, { force: true });
+  const minted = await read();
+  if (!minted) throw new Error("workspace host id unreadable after create");
+  return minted;
 }
 
 /**
@@ -475,11 +499,18 @@ export async function applyApprovedPatch(
     await rm(patchFile, { force: true });
     const treeSha = (await git(["write-tree"], tmp)).trim();
 
+    const remoteTip = await observeTip();
     // ADR-0019 no-op guard: the approved tree already IS the published tree —
-    // a steer that changed nothing must not mint an empty tip advance
+    // a steer that changed nothing must not mint an empty tip advance. Valid
+    // only against the tip it claims (review round 3): an unchanged steer on
+    // a branch a human has since moved is the conflict below, never a stale
+    // success over a remote the chain no longer describes.
     if (spec.expectedTip !== undefined) {
       const expectedTree = (await git(["rev-parse", `${spec.expectedTip}^{tree}`], tmp)).trim();
-      if (expectedTree === treeSha) return { commitSha: spec.expectedTip, treeSha, pushed: false };
+      if (expectedTree === treeSha) {
+        if (remoteTip !== spec.expectedTip) throw new TipConflictError(remoteTip);
+        return { commitSha: spec.expectedTip, treeSha, pushed: false };
+      }
     }
 
     const baseDate = (await git(["show", "-s", "--format=%cI", spec.baseSha], tmp)).trim();
@@ -505,37 +536,41 @@ export async function applyApprovedPatch(
       )
     ).trim();
 
-    const remoteTip = await observeTip();
     if (remoteTip === commitSha) {
       return { commitSha, treeSha, pushed: true }; // idempotent retry: already published
     }
+    // The tip can move between observation and push; the lease is the real
+    // guard. A rejected lease must surface as the TYPED conflict (review
+    // round 3) — and a push that failed with the tip unmoved is a real error
+    // (transport, auth, a broken remote) that must never masquerade as one.
+    const pushWithLease = async (lease: string): Promise<void> => {
+      try {
+        await git(
+          [
+            "push",
+            "--quiet",
+            spec.pushUrl,
+            `${commitSha}:${branchRef}`,
+            `--force-with-lease=${branchRef}:${lease}`,
+          ],
+          tmp,
+        );
+      } catch (err) {
+        const now = await observeTip();
+        if (now === commitSha) return; // the racer was our own byte-identical retry
+        if (now !== (lease === "" ? null : lease)) throw new TipConflictError(now);
+        throw err;
+      }
+    };
     if (spec.expectedTip !== undefined) {
       if (remoteTip !== spec.expectedTip) throw new TipConflictError(remoteTip);
       // tip-advance CAS: the lease requires the tip to still be E
-      await git(
-        [
-          "push",
-          "--quiet",
-          spec.pushUrl,
-          `${commitSha}:${branchRef}`,
-          `--force-with-lease=${branchRef}:${spec.expectedTip}`,
-        ],
-        tmp,
-      );
+      await pushWithLease(spec.expectedTip);
       return { commitSha, treeSha, pushed: true };
     }
     if (remoteTip !== null) throw new TipConflictError(remoteTip);
     // creation CAS: the lease requires the branch to still be absent
-    await git(
-      [
-        "push",
-        "--quiet",
-        spec.pushUrl,
-        `${commitSha}:${branchRef}`,
-        `--force-with-lease=${branchRef}:`,
-      ],
-      tmp,
-    );
+    await pushWithLease("");
     return { commitSha, treeSha, pushed: true };
   } finally {
     await rm(tmp, { recursive: true, force: true });

@@ -136,6 +136,7 @@ describe("applyApprovedPatch expected-tip CAS (ADR-0019)", () => {
   let chainBase: string;
   let patch1: string; // base → one.ts
   let patch2: string; // base → one.ts + two.ts — CUMULATIVE, the chain's shape
+  let patch3: string; // base → one.ts + three.ts — a competing cumulative steer
 
   const spec = (branch: string, patch: string, expectedTip?: string) => ({
     fetchSource: chainOrigin,
@@ -164,6 +165,11 @@ describe("applyApprovedPatch expected-tip CAS (ADR-0019)", () => {
     writeFileSync(path.join(work, "two.ts"), "two\n");
     sh(["add", "-A"], work);
     patch2 = sh(["diff", "--cached", "--binary", chainBase], work);
+    sh(["reset", "--hard", chainBase], work);
+    writeFileSync(path.join(work, "one.ts"), "one\n");
+    writeFileSync(path.join(work, "three.ts"), "three\n");
+    sh(["add", "-A"], work);
+    patch3 = sh(["diff", "--cached", "--binary", chainBase], work);
   });
 
   it("advances the tip by exactly one commit parented on the last published snapshot", async () => {
@@ -202,6 +208,63 @@ describe("applyApprovedPatch expected-tip CAS (ADR-0019)", () => {
     expect(err).toBeInstanceOf(TipConflictError);
     expect((err as TipConflictError).observedTip).toBe(chainBase);
     expect(sh(["rev-parse", branch], chainOrigin).trim()).toBe(chainBase);
+  });
+
+  it("an unchanged steer on a branch a human has advanced refuses typed", async () => {
+    // "nothing new to publish" is a claim about a remote the chain still
+    // describes — never a stale success over one it no longer does. The human
+    // commit DESCENDS from E, so the expected parent is fetchable and the
+    // refusal comes from the no-op guard itself, not the missing-parent path.
+    const branch = "agrippa/chain-noop-moved";
+    const first = await applyApprovedPatch(spec(branch, patch1));
+    const human = sh(
+      ["commit-tree", `${first.commitSha}^{tree}`, "-p", first.commitSha, "-m", "human touch-up"],
+      chainOrigin,
+    ).trim();
+    sh(["update-ref", `refs/heads/${branch}`, human], chainOrigin);
+
+    const err = await applyApprovedPatch(spec(branch, patch1, first.commitSha)).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(TipConflictError);
+    expect((err as TipConflictError).observedTip).toBe(human);
+    expect(sh(["rev-parse", branch], chainOrigin).trim()).toBe(human);
+  });
+
+  it("two racing advances from one tip: exactly one lands, the loser conflicts typed", async () => {
+    // whichever window the loser hits — before its ls-remote or inside the
+    // push lease — the surfaced error must be the same typed conflict
+    const branch = "agrippa/chain-race";
+    const first = await applyApprovedPatch(spec(branch, patch1));
+
+    const results = await Promise.allSettled([
+      applyApprovedPatch(spec(branch, patch2, first.commitSha)),
+      applyApprovedPatch(spec(branch, patch3, first.commitSha)),
+    ]);
+    const won = results.filter((r) => r.status === "fulfilled");
+    const lost = results.filter((r) => r.status === "rejected");
+    expect(won.length).toBe(1);
+    expect(lost.length).toBe(1);
+    expect((lost[0] as PromiseRejectedResult).reason).toBeInstanceOf(TipConflictError);
+    // exactly one advance landed, parented on the shared tip
+    expect(sh(["rev-parse", `${branch}^`], chainOrigin).trim()).toBe(first.commitSha);
+    expect(sh(["rev-list", "--count", `main..${branch}`], chainOrigin).trim()).toBe("2");
+  });
+
+  it("a push that fails with the tip unmoved stays a plain error, not a conflict", async () => {
+    const branch = "agrippa/chain-broken-remote";
+    const first = await applyApprovedPatch(spec(branch, patch1));
+    Bun.spawnSync(["chmod", "-R", "a-w", chainOrigin]);
+    try {
+      const err = await applyApprovedPatch(spec(branch, patch2, first.commitSha)).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(TipConflictError);
+      expect((err as Error).message).toMatch(/git push failed/);
+    } finally {
+      Bun.spawnSync(["chmod", "-R", "u+w", chainOrigin]);
+    }
   });
 
   it("a chain whose branch was deleted after publishing refuses typed", async () => {
