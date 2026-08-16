@@ -35,7 +35,7 @@ describe.skipIf(!dbUp)("notification queue dedupe (exclusive policy)", () => {
 
   it("converges the queue to exclusive and keeps one live job per delivery", async () => {
     queue = await createRunQueue(TEST_DATABASE_URL, {
-      resolveRunExecutors: async () => ["fake"],
+      resolveRunQueue: async () => "run.execute.fake",
     });
 
     const [queueRow] = (await db.execute(
@@ -57,7 +57,7 @@ describe.skipIf(!dbUp)("notification queue dedupe (exclusive policy)", () => {
     // sweeper re-enqueue and an operator replay from becoming three runs — and
     // on the default 'standard' policy that key enforces nothing at all
     queue ??= await createRunQueue(TEST_DATABASE_URL, {
-      resolveRunExecutors: async () => ["fake"],
+      resolveRunQueue: async () => "run.execute.fake",
     });
 
     const [queueRow] = (await db.execute(

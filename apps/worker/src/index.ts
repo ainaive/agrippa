@@ -21,7 +21,7 @@ import {
   collectExpiredWorkspaces,
   createRunQueue,
   DiskArtifactStore,
-  dbRunExecutorResolver,
+  dbRunQueueResolver,
   decideCheckpoint,
   type EngineDeps,
   enqueueAfterCommit,
@@ -135,7 +135,7 @@ const bus = process.env.REDIS_URL
   ? new RedisEventBus(process.env.REDIS_URL)
   : new InProcessEventBus();
 const queue = await createRunQueue(process.env.DATABASE_URL as string, {
-  resolveRunExecutors: dbRunExecutorResolver(db),
+  resolveRunQueue: dbRunQueueResolver(db),
 });
 
 const deps: EngineDeps = {
@@ -185,6 +185,7 @@ async function computeRunQueues(): Promise<string[]> {
   const liveWorkers = await liveCentralWorkerSets(db);
   const list = selectRunQueues({
     localExecutorIds: Object.keys(executors),
+    ownWorkspaceHost: workspaceHost,
     centralWorkerSets: liveWorkers.map((ads) => ads.map((e) => e.id)),
     runtimeAds: liveRuntimes.map((r) => ({
       name: r.name,

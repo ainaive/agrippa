@@ -4,6 +4,7 @@ import {
   isExecutorId,
   runExecuteQueueName,
   runExecuteSubsetQueues,
+  runHostQueueName,
 } from "@agrippa/core";
 
 /** A daemon ad expands to at most 2^8−1 = 255 subset queues; legit daemons advertise ≤3. */
@@ -37,6 +38,9 @@ export type RunQueueLogger = { warn(message: string): void };
  */
 export function selectRunQueues(input: {
   localExecutorIds: readonly string[];
+  /** This worker's storage identity — it polls its own host's queue, where
+   *  host-pinned central runs land (ADR-0018 amendment). Never a peer's. */
+  ownWorkspaceHost?: string | null;
   /** Executor-id sets of live central workers (from worker_heartbeats). */
   centralWorkerSets: readonly (readonly string[])[];
   /** Executor ids advertised by each live runtime, with a label for logging. */
@@ -47,6 +51,7 @@ export function selectRunQueues(input: {
 }): string[] {
   const isAllowedId = input.isAllowedId ?? isExecutorId;
   const names = new Set<string>(runExecuteSubsetQueues(input.localExecutorIds));
+  if (input.ownWorkspaceHost) names.add(runHostQueueName(input.ownWorkspaceHost));
   const centralSets = input.centralWorkerSets.map((ids) => new Set(ids));
   const centrallyCovered = (ids: readonly string[]): boolean =>
     centralSets.some((set) => ids.every((id) => set.has(id)));

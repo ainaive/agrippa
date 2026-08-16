@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { appendFile, chmod, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runExecuteQueueName, runHostQueueName } from "@agrippa/core";
 import {
   createDb,
   encryptSecret,
@@ -20,7 +21,7 @@ import {
   taskTypes,
   users,
 } from "@agrippa/db";
-import { seedBuiltinTemplates } from "@agrippa/orchestration";
+import { dbRunQueueResolver, seedBuiltinTemplates } from "@agrippa/orchestration";
 import { eq, sql } from "drizzle-orm";
 
 // WORKSPACE_ROOT is read at module load — point it at a scratch dir BEFORE
@@ -250,6 +251,39 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
       .where(eq(runs.id, pinnedRunId));
     await hostA.checkout(pinnedRunId, spec);
     expect(await hostOf(pinnedRunId)).toBeNull();
+  });
+
+  it("dbRunQueueResolver: a host pin routes to the host queue; a runtime pin never does", async () => {
+    const resolve = dbRunQueueResolver(db);
+
+    const hostPinned = await newRunRow();
+    await db.update(runs).set({ workspaceHost: "host-q" }).where(eq(runs.id, hostPinned));
+    expect(await resolve(hostPinned)).toBe(runHostQueueName("host-q"));
+
+    const plain = await newRunRow();
+    expect(await resolve(plain)).toBe(runExecuteQueueName(["fake"]));
+
+    // a daemon-pinned run's affinity IS its runtime pin — it routes by
+    // executor set even if a workspace host somehow got stamped
+    const [runtime] = await db
+      .insert(runtimes)
+      .values({
+        orgId,
+        name: "route-guard",
+        tokenHash: "h",
+        tokenPrefix: `agrd_${Bun.randomUUIDv7().slice(-7)}`,
+        executors: [],
+        createdBy: userId,
+      })
+      .returning({ id: runtimes.id });
+    const daemonPinned = await newRunRow();
+    await db
+      .update(runs)
+      .set({ runtimeId: runtime?.id as string, workspaceHost: "host-q" })
+      .where(eq(runs.id, daemonPinned));
+    expect(await resolve(daemonPinned)).toBe(runExecuteQueueName(["fake"]));
+
+    expect(await resolve(Bun.randomUUIDv7())).toBeNull();
   });
 
   it("records the clone base and keeps sanitization out of the diff", async () => {
