@@ -13,6 +13,7 @@ import {
   projects,
   repoConnections,
   runs,
+  runtimes,
   secrets,
   seed,
   tasks,
@@ -211,6 +212,44 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
       projectId,
     });
     await scm.createBranch(runId, publishBranch);
+  });
+
+  it("checkout stamps the host pin first-writer-wins, never on a runtime-pinned run", async () => {
+    const hostA = new GitWorkspaceManager(db, "host-a");
+    const hostB = new GitWorkspaceManager(db, "host-b");
+    const spec = { repo: { repoConnectionId }, access: "readWrite" as const, projectId };
+
+    const stampRunId = await newRunRow();
+    await hostA.checkout(stampRunId, spec);
+    const hostOf = async (id: string): Promise<string | null> => {
+      const [row] = await db.select({ h: runs.workspaceHost }).from(runs).where(eq(runs.id, id));
+      return row?.h ?? null;
+    };
+    expect(await hostOf(stampRunId)).toBe("host-a");
+
+    // a second checkout (deploy-skew re-pickup) must not re-home the chain
+    await hostB.checkout(stampRunId, spec);
+    expect(await hostOf(stampRunId)).toBe("host-a");
+
+    // a daemon-routed run's affinity is its runtime pin — never a central host
+    const [runtime] = await db
+      .insert(runtimes)
+      .values({
+        orgId,
+        name: "stamp-guard",
+        tokenHash: "h",
+        tokenPrefix: `agrd_${Bun.randomUUIDv7().slice(-7)}`,
+        executors: [],
+        createdBy: userId,
+      })
+      .returning({ id: runtimes.id });
+    const pinnedRunId = await newRunRow();
+    await db
+      .update(runs)
+      .set({ runtimeId: runtime?.id as string })
+      .where(eq(runs.id, pinnedRunId));
+    await hostA.checkout(pinnedRunId, spec);
+    expect(await hostOf(pinnedRunId)).toBeNull();
   });
 
   it("records the clone base and keeps sanitization out of the diff", async () => {

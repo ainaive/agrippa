@@ -32,6 +32,7 @@ const rowFor = async (containerId: string) => {
 const AD = {
   executors: [{ id: "fake" }, { id: "claude-agent-sdk", envAuthProviders: ["anthropic"] }],
   version: "test-1",
+  workspaceHost: "host-a",
 };
 
 describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
@@ -97,14 +98,17 @@ describe.skipIf(!dbUp)("worker readiness heartbeats", () => {
     let row = await rowFor("ctr-ad");
     expect(row?.executors).toEqual(AD.executors);
     expect(row?.version).toBe("test-1");
+    expect(row?.workspaceHost).toBe("host-a");
 
-    // a reconfigured worker (codex CLI removed, version bump) must converge
-    // the row on its next beat, not advertise the old capability forever
-    const changed = { executors: [{ id: "fake" }], version: "test-2" };
+    // a reconfigured worker (codex CLI removed, version bump, remounted
+    // volume) must converge the row on its next beat, not advertise the old
+    // capability forever
+    const changed = { executors: [{ id: "fake" }], version: "test-2", workspaceHost: "host-b" };
     await touchWorkerHeartbeat(db, "ctr-ad", changed);
     row = await rowFor("ctr-ad");
     expect(row?.executors).toEqual(changed.executors);
     expect(row?.version).toBe("test-2");
+    expect(row?.workspaceHost).toBe("host-b");
   });
 
   it("deploy verification counts exactly the ready-AND-alive containers of THIS fleet", async () => {

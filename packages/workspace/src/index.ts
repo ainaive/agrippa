@@ -1,4 +1,4 @@
-import { appendFile, cp, lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
+import { appendFile, cp, lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildSystemEnv } from "@agrippa/executor-core";
@@ -126,6 +126,26 @@ export async function git(
   profile: GitEnvProfile = "platform",
 ): Promise<string> {
   return await runGit(args, { cwd, env, profile });
+}
+
+/**
+ * The identity of this WORKSPACE_ROOT — a uuid minted once and persisted at
+ * the root's top level (ADR-0018 amendment: host affinity keys on the
+ * STORAGE, not the container, so compose replicas sharing the volume share
+ * one id and a redeployed container never looks like a new host). The
+ * exclusive-create write makes two workers booting on one fresh volume
+ * converge: the loser's write fails and both read the winner's id.
+ */
+export async function workspaceHostId(): Promise<string> {
+  const file = path.join(workspaceRoot(), ".agrippa-host-id");
+  const read = async (): Promise<string> => (await Bun.file(file).text()).trim();
+  try {
+    const existing = await read();
+    if (existing) return existing;
+  } catch {}
+  await mkdir(workspaceRoot(), { recursive: true });
+  await writeFile(file, `${crypto.randomUUID()}\n`, { flag: "wx" }).catch(() => {});
+  return await read();
 }
 
 /**

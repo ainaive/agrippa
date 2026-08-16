@@ -934,6 +934,8 @@ export const executionRoutes = new Hono<AppEnv>()
         .values({
           ...newRunIdentity(),
           workspaceKey: parent.workspaceKey,
+          // the chain's host pin travels with the workspace it names
+          workspaceHost: parent.workspaceHost,
           kind: "followup",
           parentRunId: activeLink?.id ?? parent.id,
           steeringMessage: message,

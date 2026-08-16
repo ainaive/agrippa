@@ -53,7 +53,7 @@ import {
 } from "./deps/readiness";
 import { DbResourceMaterializer } from "./deps/resources";
 import { GitScmService } from "./deps/scm";
-import { GitWorkspaceManager, removeWorkspace } from "./deps/workspace";
+import { GitWorkspaceManager, removeWorkspace, workspaceHostId } from "./deps/workspace";
 import { selectRunQueues } from "./run-queues";
 
 /**
@@ -117,12 +117,17 @@ for (const [id, executor] of Object.entries(executors)) {
   if (short) throw new Error(`executor '${id}' lacks catalog capability '${short}'`);
 }
 
+// the storage identity, not the container's (ADR-0018 amendment): replicas
+// sharing the workspaces volume advertise one host and serve one host queue
+const workspaceHost = await workspaceHostId();
+
 const workerAd = {
   executors: Object.entries(executors).map(([id, executor]) => ({
     id,
     envAuthProviders: executor.envAuthProviders ? [...executor.envAuthProviders] : undefined,
   })),
   version: process.env.AGRIPPA_VERSION ?? null,
+  workspaceHost,
 };
 
 await markBootStarted(db, containerId, workerAd);
@@ -137,7 +142,7 @@ const deps: EngineDeps = {
   db,
   executors,
   bus,
-  workspace: new GitWorkspaceManager(db),
+  workspace: new GitWorkspaceManager(db, workspaceHost),
   resources: new DbResourceMaterializer(db),
   artifacts: new DiskArtifactStore(),
   scm: process.env.AGRIPPA_SCM === "fake" ? new FakeScmService() : new GitScmService(db),
