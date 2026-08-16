@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { type Db, decryptSecret, loadSecretKey, repoConnections, secrets } from "@agrippa/db";
+import { type Db, decryptSecret, loadSecretKey, repoConnections, runs, secrets } from "@agrippa/db";
 import { type WorkspaceManager, type WorkspaceSpec, workspaceKeyOf } from "@agrippa/orchestration";
 import {
   checkoutFromUrl,
@@ -7,7 +7,7 @@ import {
   workspaceDirFor,
   workspaceIntact,
 } from "@agrippa/workspace";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 
 // The git-workspace core (dual-metadata checkout, sanitization, snapshot
 // staging) lives in @agrippa/workspace, shared with the remote daemon
@@ -27,6 +27,7 @@ export {
   removeWorkspace,
   stagePlatformSnapshot,
   workspaceDirFor,
+  workspaceHostId,
 } from "@agrippa/workspace";
 
 /**
@@ -78,7 +79,12 @@ export function credentialedUrl(url: string, token: string | null): string {
  * - <run>.platform/git is an independent pristine copy used by the platform.
  */
 export class GitWorkspaceManager implements WorkspaceManager {
-  constructor(private readonly db: Db) {}
+  constructor(
+    private readonly db: Db,
+    /** This host's storage identity ({@link workspaceHostId}); null in tests
+     *  that never route by host. */
+    private readonly workspaceHost: string | null = null,
+  ) {}
 
   /**
    * The interface stays run-keyed and the translation happens here (ADR-0018
@@ -103,6 +109,16 @@ export class GitWorkspaceManager implements WorkspaceManager {
       ref: spec.ref || connection.defaultBranch,
       profile: "platform",
     });
+    if (this.workspaceHost) {
+      // First-writer-wins host pin (ADR-0018 amendment): the host that holds
+      // the checkout serves the chain from here on. The runtime_id guard is
+      // DB-enforced belt-and-braces — a daemon-routed run's affinity is its
+      // pin, never a central host, whatever path led here.
+      await this.db
+        .update(runs)
+        .set({ workspaceHost: this.workspaceHost })
+        .where(and(eq(runs.id, runId), isNull(runs.workspaceHost), isNull(runs.runtimeId)));
+    }
   }
 
   async diff(runId: string): Promise<string> {

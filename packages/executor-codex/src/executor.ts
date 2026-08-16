@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   ARTIFACT_DIR,
@@ -199,9 +199,10 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         // run (ADR-0018): resume threads live under CODEX_HOME, and a
         // follow-up is a new run continuing the same workspace — keyed by run
         // it could not find its own thread, then reported success as though it
-        // had. The workspace directory's own name is that key, on every host
-        // and both transports. Left for OS tmp reaping.
-        const home = path.join(tmpdir(), "agrippa-codex-home", path.basename(req.workspaceDir));
+        // had. A sibling of the workspace directory, not OS tmp: tmp reaping
+        // could take the thread mid-chain, and the sibling is collected with
+        // the workspace (`removeWorkspace` owns the suffix's other half).
+        const home = `${req.workspaceDir}.codex-home`;
         mkdirSync(home, { recursive: true });
         env.CODEX_HOME = home;
       }
@@ -241,8 +242,25 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
           return;
         }
         if (!started) {
-          // the CLI died before announcing a thread (bad auth, bad flags…)
           const stderr = (await stderrPromise).trim().slice(-2000);
+          if (req.resumeSessionId !== undefined) {
+            // Died before announcing a thread while resuming — most commonly a
+            // collected or migrated session home ("no rollout found for thread
+            // id …", pinned live against codex-cli 0.147.0). The engine runs
+            // its context-loss disclosure only on a REPORTED rejection; a step
+            // failure bypasses it and every retry re-offers the same dead
+            // session. So any pre-start death during a resume is reported as
+            // the rejection it almost certainly is: a cause that is not the
+            // session — bad auth, bad flags — recurs identically on the
+            // disclosed fresh start, where the branch below surfaces it.
+            ctx.logger.warn("codex died before resuming a thread — reporting rejection", {
+              exitCode,
+              stderr,
+            });
+            yield { type: "step.started", resumed: "rejected" };
+            return;
+          }
+          // the CLI died before announcing a thread (bad auth, bad flags…)
           ctx.logger.warn("codex died before starting a thread", { exitCode, stderr });
           yield {
             type: "step.failed",

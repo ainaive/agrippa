@@ -70,7 +70,11 @@ afterEach(() => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
-  for (const dir of workspaces.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of workspaces.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+    // the executor materializes a session-home sibling for providerAuth runs
+    rmSync(`${dir}.codex-home`, { recursive: true, force: true });
+  }
 });
 
 describe("codex executor", () => {
@@ -237,6 +241,24 @@ describe("codex executor", () => {
     );
   });
 
+  it("a resume that dies before thread.started reports rejection, not failure", async () => {
+    // The engine's context-loss disclosure runs only on a reported rejection —
+    // a step.failed here would burn retry budget re-offering the dead session.
+    const events = await collect(
+      makeReq(makeWorkspace("missing-rollout"), { resumeSessionId: "0189-dead" }),
+    );
+    expect(events).toEqual([{ type: "step.started", resumed: "rejected" }]);
+  });
+
+  it("the same pre-start death without a resume stays a model_error", async () => {
+    const events = await collect(makeReq(makeWorkspace("missing-rollout")));
+    const terminal = events.at(-1);
+    expect(terminal?.type === "step.failed" && terminal.error.code).toBe("model_error");
+    expect(terminal?.type === "step.failed" && terminal.error.message).toContain(
+      "no rollout found",
+    );
+  });
+
   it("kills the subprocess and reports aborted on cancellation", async () => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 150);
@@ -315,7 +337,8 @@ describe("codex executor", () => {
       return seen.codexHome;
     };
     const first = await homeOf("run-ancestor");
-    expect(first).toContain("agrippa-codex-home");
+    // a workspace SIBLING, not OS tmp: reapable only with the workspace itself
+    expect(first).toBe(`${workspaceDir}.codex-home`);
     expect(await homeOf("run-followup")).toBe(first as string);
   });
 
@@ -344,8 +367,24 @@ describe("codex executor", () => {
     expect(seen.openai).toBe("sk-openai-project"); // project key wins over env
     expect(seen.openaiBaseUrl).toBe("https://proxy.example.com/v1");
     // ambient auth.json under the worker's CODEX_HOME must not outrank the key
-    expect(seen.codexHome).toContain("agrippa-codex-home");
-    expect(seen.codexHome).toContain(path.basename(workspaceDir));
+    expect(seen.codexHome).toBe(`${workspaceDir}.codex-home`);
+  });
+
+  it("no project credential leaves the ambient CODEX_HOME untouched", async () => {
+    // Without providerAuth the ambient home IS the auth source (env keys or a
+    // ChatGPT login's auth.json) — redirecting it would sever auth. Those
+    // sessions deliberately live in the executor's own home, outside
+    // workspace collection; the sibling home exists only under a project
+    // credential.
+    savedEnv.CODEX_HOME = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = "/home/worker/.codex";
+
+    const events = await collect(makeReq(makeWorkspace("env")));
+    const done = events.find((e) => e.type === "step.completed");
+    const seen = JSON.parse(done?.type === "step.completed" ? done.output : "{}") as {
+      codexHome: string | null;
+    };
+    expect(seen.codexHome).toBe("/home/worker/.codex");
   });
 
   it("scrubs the subprocess environment down to the allow-list", async () => {

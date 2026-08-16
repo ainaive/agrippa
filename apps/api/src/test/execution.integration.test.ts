@@ -749,6 +749,8 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
 
     it("creates a follow-up that inherits workspace, session context and config", async () => {
       const { runId: parentId, taskId: parentTask } = await finishedRun();
+      // as if a worker had stamped its host pin at checkout (ADR-0018 amendment)
+      await db.update(runs).set({ workspaceHost: "host-a" }).where(eq(runs.id, parentId));
       const [parent] = await db.select().from(runs).where(eq(runs.id, parentId));
 
       const res = await admin.request(`/api/v1/runs/${parentId}/followup`, {
@@ -764,6 +766,7 @@ describe.skipIf(!dbUp)("execution api (submit → engine → approve → artifac
       expect(followup?.parentRunId).toBe(parentId);
       // the identities that make it a continuation
       expect(followup?.workspaceKey).toBe(parent?.workspaceKey as string);
+      expect(followup?.workspaceHost).toBe("host-a");
       expect(followup?.workBranch).toBe(parent?.workBranch ?? null);
       expect(followup?.steeringMessage).toBe("also handle the empty-list case");
       // configuration copied VERBATIM — the divergence from retry (ADR-0014)

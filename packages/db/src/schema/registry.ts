@@ -235,4 +235,10 @@ export const workerHeartbeats = pgTable("worker_heartbeats", {
   heartbeatAt: tstz("heartbeat_at").notNull().defaultNow(),
   executors: jsonb("executors").$type<WorkerExecutorAd[]>().notNull().default([]),
   version: text("version"),
+  /**
+   * The workspace-storage identity this worker mounts (ADR-0018 amendment):
+   * which `runs.workspace_host` values a live worker can serve. The liveness
+   * source for the dead-host sweep, and the host queue the worker polls.
+   */
+  workspaceHost: text("workspace_host"),
 });

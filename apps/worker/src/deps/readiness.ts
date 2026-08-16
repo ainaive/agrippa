@@ -10,6 +10,9 @@ import { lt, sql } from "drizzle-orm";
 export type WorkerAdvertisement = {
   executors: WorkerExecutorAd[];
   version: string | null;
+  /** The workspace-storage identity this worker mounts (ADR-0018 amendment) —
+   *  which `runs.workspace_host` values it can serve. */
+  workspaceHost: string | null;
 };
 
 /**
@@ -53,6 +56,7 @@ export async function markBootStarted(
       heartbeatAt: DB_NOW,
       executors: ad.executors,
       version: ad.version,
+      workspaceHost: ad.workspaceHost,
     })
     .onConflictDoUpdate({
       target: workerHeartbeats.containerId,
@@ -62,6 +66,7 @@ export async function markBootStarted(
         heartbeatAt: DB_NOW,
         executors: ad.executors,
         version: ad.version,
+        workspaceHost: ad.workspaceHost,
       },
     });
 }
@@ -104,9 +109,15 @@ export async function touchWorkerHeartbeat(
       heartbeatAt: DB_NOW,
       executors: ad.executors,
       version: ad.version,
+      workspaceHost: ad.workspaceHost,
     })
     .onConflictDoUpdate({
       target: workerHeartbeats.containerId,
-      set: { heartbeatAt: DB_NOW, executors: ad.executors, version: ad.version },
+      set: {
+        heartbeatAt: DB_NOW,
+        executors: ad.executors,
+        version: ad.version,
+        workspaceHost: ad.workspaceHost,
+      },
     });
 }

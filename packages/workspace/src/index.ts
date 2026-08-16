@@ -1,4 +1,14 @@
-import { appendFile, cp, lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildSystemEnv } from "@agrippa/executor-core";
@@ -129,6 +139,40 @@ export async function git(
 }
 
 /**
+ * The identity of this WORKSPACE_ROOT — a uuid minted once and persisted at
+ * the root's top level (ADR-0018 amendment: host affinity keys on the
+ * STORAGE, not the container, so compose replicas sharing the volume share
+ * one id and a redeployed container never looks like a new host). The
+ * two-step atomic create makes two workers booting on one fresh volume
+ * converge: the loser's link fails and both read the winner's id.
+ */
+export async function workspaceHostId(): Promise<string> {
+  const file = path.join(workspaceRoot(), ".agrippa-host-id");
+  const read = async (): Promise<string> => {
+    try {
+      return (await Bun.file(file).text()).trim();
+    } catch {
+      return "";
+    }
+  };
+  const existing = await read();
+  if (existing) return existing;
+  await mkdir(workspaceRoot(), { recursive: true });
+  // Contents land under a temp name; link(2) publishes them. The final name
+  // therefore either does not exist or is COMPLETE — an exclusive-create
+  // write here (the first implementation) let a concurrent boot read the
+  // file between creation and content, and an empty id silently disables
+  // host stamping. The losing linker adopts the winner's id on the re-read.
+  const tmp = path.join(workspaceRoot(), `.agrippa-host-id.${crypto.randomUUID()}`);
+  await writeFile(tmp, `${crypto.randomUUID()}\n`);
+  await link(tmp, file).catch(() => {});
+  await rm(tmp, { force: true });
+  const minted = await read();
+  if (!minted) throw new Error("workspace host id unreadable after create");
+  return minted;
+}
+
+/**
  * The agent-visible checkout directory for a workspace key.
  *
  * The key is deliberately not a run id (ADR-0018 Decision 3). This package has
@@ -148,6 +192,18 @@ export function platformDirFor(workspaceKey: string): string {
 /** Trusted gitdir used for all evidence and publication operations. */
 export function platformGitDirFor(workspaceKey: string): string {
   return path.join(platformDirFor(workspaceKey), "git");
+}
+
+/**
+ * The Codex executor's per-workspace session home — a workspace sibling, like
+ * the platform sidecar. The executor derives the identical path from its
+ * `workspaceDir` by suffix alone (`${workspaceDir}.codex-home`); this package
+ * owning the layout is what lets collection remove the threads with the
+ * workspace, so session lifetime equals workspace lifetime (ADR-0018: session
+ * scope follows the workspace — an OS-tmp home could be reaped mid-chain).
+ */
+export function codexHomeDirFor(workspaceKey: string): string {
+  return path.join(workspaceRoot(), `${workspaceKey}.codex-home`);
 }
 
 /** Run Git with trusted metadata and the agent workspace only as a worktree. */
@@ -332,6 +388,7 @@ export async function workspaceIntact(workspaceKey: string): Promise<boolean> {
 export async function removeWorkspace(workspaceKey: string): Promise<void> {
   await rm(workspaceDirFor(workspaceKey), { recursive: true, force: true });
   await rm(platformDirFor(workspaceKey), { recursive: true, force: true });
+  await rm(codexHomeDirFor(workspaceKey), { recursive: true, force: true });
 }
 
 export type ApplyApprovedPatchSpec = {
@@ -347,10 +404,44 @@ export type ApplyApprovedPatchSpec = {
   patch: string;
   /** Credentialed URL the deterministic commit is pushed to. */
   pushUrl: string;
+  /**
+   * The snapshot commit this workspace chain last published (ADR-0019).
+   * Present → the new commit parents on it and the push advances it with a
+   * lease against exactly it; absent → first publish, the branch must not
+   * exist yet. Any other observed tip refuses typed ({@link TipConflictError}).
+   */
+  expectedTip?: string;
   message?: string;
 };
 
-export type ApplyApprovedPatchResult = { commitSha: string; treeSha: string };
+export type ApplyApprovedPatchResult = {
+  commitSha: string;
+  treeSha: string;
+  /**
+   * false only for the ADR-0019 no-op: the approved tree already IS the
+   * expected tip's tree, so nothing was pushed and `commitSha` is that tip —
+   * a steer that changed nothing never mints an empty tip advance.
+   */
+  pushed: boolean;
+};
+
+/**
+ * The publish CAS lost (ADR-0019): the observed branch tip is neither the
+ * deterministic snapshot commit nor the chain's expected tip. The remote is
+ * never overwritten — a human push to the branch wins by default, and
+ * reconciliation is a human decision.
+ */
+export class TipConflictError extends Error {
+  readonly observedTip: string | null;
+
+  constructor(observedTip: string | null) {
+    super(
+      "publish branch tip does not match the approved snapshot commit or the chain's expected tip — refusing to overwrite",
+    );
+    this.name = "TipConflictError";
+    this.observedTip = observedTip;
+  }
+}
 
 /**
  * Publication inversion (ADR-0017 Decision 5, amending ADR-0011/0012): apply
@@ -359,9 +450,14 @@ export type ApplyApprovedPatchResult = { commitSha: string; treeSha: string };
  * published tree derives from approved evidence alone. Idempotency is
  * re-derived without the sidecar branch ref: identity, message, tree, parent,
  * and both dates (pinned to the base commit) are fixed, so every retry
- * reproduces the byte-identical commit SHA, and the push is a remote-ref CAS
- * (--force-with-lease against the observed tip; an existing tip must BE that
- * commit or the publish fails rather than clobbering someone's work).
+ * reproduces the byte-identical commit SHA, and the push is a remote-ref CAS.
+ *
+ * The CAS is an expected-tip CAS (ADR-0019): with no `expectedTip` the branch
+ * must be absent (or already be this exact commit — a retry); with one, the
+ * observed tip must BE that expected tip, and the push advances it with a
+ * lease against exactly it. Every other observed tip — including an absent
+ * branch whose chain says it published before — refuses typed rather than
+ * clobbering someone's work.
  */
 export async function applyApprovedPatch(
   spec: ApplyApprovedPatchSpec,
@@ -376,12 +472,46 @@ export async function applyApprovedPatch(
     // the base must be exactly the pinned commit, whatever we fetched by
     await git(["cat-file", "-e", `${spec.baseSha}^{commit}`], tmp);
 
+    const branchRef = `refs/heads/${spec.branch}`;
+    const observeTip = async (): Promise<string | null> => {
+      const tip = (await git(["ls-remote", spec.pushUrl, branchRef], tmp)).split("\t")[0]?.trim();
+      return tip ? tip : null;
+    };
+
+    if (spec.expectedTip !== undefined) {
+      // commit-tree needs the parent OBJECT, and E rides the branch it was
+      // pushed to (it is an ancestor of every honest tip). A fetch that fails
+      // or does not bring E means the remote no longer descends from what
+      // this chain published — a deleted branch, a force-push — which is the
+      // conflict below, observed early.
+      await git(["fetch", "--quiet", spec.pushUrl, branchRef], tmp).catch(() => {});
+      const parentPresent = await git(["cat-file", "-e", `${spec.expectedTip}^{commit}`], tmp).then(
+        () => true,
+        () => false,
+      );
+      if (!parentPresent) throw new TipConflictError(await observeTip());
+    }
+
     await git(["read-tree", spec.baseSha], tmp);
     const patchFile = path.join(tmp, ".agrippa-approved.patch");
     await Bun.write(patchFile, spec.patch);
     await git(["apply", "--cached", "--binary", "--whitespace=nowarn", patchFile], tmp);
     await rm(patchFile, { force: true });
     const treeSha = (await git(["write-tree"], tmp)).trim();
+
+    const remoteTip = await observeTip();
+    // ADR-0019 no-op guard: the approved tree already IS the published tree —
+    // a steer that changed nothing must not mint an empty tip advance. Valid
+    // only against the tip it claims (review round 3): an unchanged steer on
+    // a branch a human has since moved is the conflict below, never a stale
+    // success over a remote the chain no longer describes.
+    if (spec.expectedTip !== undefined) {
+      const expectedTree = (await git(["rev-parse", `${spec.expectedTip}^{tree}`], tmp)).trim();
+      if (expectedTree === treeSha) {
+        if (remoteTip !== spec.expectedTip) throw new TipConflictError(remoteTip);
+        return { commitSha: spec.expectedTip, treeSha, pushed: false };
+      }
+    }
 
     const baseDate = (await git(["show", "-s", "--format=%cI", spec.baseSha], tmp)).trim();
     const commitSha = (
@@ -390,7 +520,7 @@ export async function applyApprovedPatch(
           "commit-tree",
           treeSha,
           "-p",
-          spec.baseSha,
+          spec.expectedTip ?? spec.baseSha,
           "-m",
           spec.message ?? "chore: publish approved Agrippa changes",
         ],
@@ -406,30 +536,42 @@ export async function applyApprovedPatch(
       )
     ).trim();
 
-    const branchRef = `refs/heads/${spec.branch}`;
-    const remoteTip = (await git(["ls-remote", spec.pushUrl, branchRef], tmp))
-      .split("\t")[0]
-      ?.trim();
-    if (remoteTip) {
-      if (remoteTip !== commitSha) {
-        throw new Error(
-          "publish branch tip does not match the approved snapshot commit — refusing to overwrite",
-        );
-      }
-      return { commitSha, treeSha }; // idempotent retry: already published
+    if (remoteTip === commitSha) {
+      return { commitSha, treeSha, pushed: true }; // idempotent retry: already published
     }
+    // The tip can move between observation and push; the lease is the real
+    // guard. A rejected lease must surface as the TYPED conflict (review
+    // round 3) — and a push that failed with the tip unmoved is a real error
+    // (transport, auth, a broken remote) that must never masquerade as one.
+    const pushWithLease = async (lease: string): Promise<void> => {
+      try {
+        await git(
+          [
+            "push",
+            "--quiet",
+            spec.pushUrl,
+            `${commitSha}:${branchRef}`,
+            `--force-with-lease=${branchRef}:${lease}`,
+          ],
+          tmp,
+        );
+      } catch (err) {
+        const now = await observeTip();
+        if (now === commitSha) return; // the racer was our own byte-identical retry
+        if (now !== (lease === "" ? null : lease)) throw new TipConflictError(now);
+        throw err;
+      }
+    };
+    if (spec.expectedTip !== undefined) {
+      if (remoteTip !== spec.expectedTip) throw new TipConflictError(remoteTip);
+      // tip-advance CAS: the lease requires the tip to still be E
+      await pushWithLease(spec.expectedTip);
+      return { commitSha, treeSha, pushed: true };
+    }
+    if (remoteTip !== null) throw new TipConflictError(remoteTip);
     // creation CAS: the lease requires the branch to still be absent
-    await git(
-      [
-        "push",
-        "--quiet",
-        spec.pushUrl,
-        `${commitSha}:${branchRef}`,
-        `--force-with-lease=${branchRef}:`,
-      ],
-      tmp,
-    );
-    return { commitSha, treeSha };
+    await pushWithLease("");
+    return { commitSha, treeSha, pushed: true };
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

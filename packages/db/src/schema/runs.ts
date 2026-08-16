@@ -109,6 +109,17 @@ export const runs = pgTable(
      */
     workspaceExpiresAt: tstz("workspace_expires_at"),
     /**
+     * Which HOST'S storage holds this central run's workspace (the per-host
+     * queue, ADR-0018 amendment). The identity of the storage, not the
+     * container: a uuid persisted at `WORKSPACE_ROOT/.agrippa-host-id`, so
+     * compose replicas sharing the volume share it and a redeploy never looks
+     * like a new host. Stamped first-writer-wins at repo checkout and
+     * inherited by follow-ups; never set for daemon-routed runs (the
+     * `runtime_id` pin owns their affinity) nor for scratch runs this
+     * milestone (deliberately non-host-routed).
+     */
+    workspaceHost: text("workspace_host"),
+    /**
      * What the operator asked for, on a follow-up (ADR-0018). Untrusted text
      * on the same footing as a task parameter: the engine appends it to the
      * step's instructions AFTER interpolation, so a message containing
