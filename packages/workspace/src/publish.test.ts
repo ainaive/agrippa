@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   buildPlatformGitEnv,
   checkoutFromUrl,
   platformBaseSha,
+  TipConflictError,
   workspaceDirFor,
 } from "./index";
 
@@ -127,6 +128,93 @@ describe("applyApprovedPatch (publication inversion)", () => {
         pushUrl: origin,
       }),
     ).rejects.toThrow(/nothing to publish/);
+  });
+});
+
+describe("applyApprovedPatch expected-tip CAS (ADR-0019)", () => {
+  let chainOrigin: string;
+  let chainBase: string;
+  let patch1: string; // base → one.ts
+  let patch2: string; // base → one.ts + two.ts — CUMULATIVE, the chain's shape
+
+  const spec = (branch: string, patch: string, expectedTip?: string) => ({
+    fetchSource: chainOrigin,
+    fetchRef: chainBase,
+    baseSha: chainBase,
+    branch,
+    patch,
+    pushUrl: chainOrigin,
+    expectedTip,
+  });
+
+  beforeAll(() => {
+    chainOrigin = `${mkdtempSync(path.join(tmpdir(), "agrippa-chain-origin-"))}/repo.git`;
+    sh(["init", "--bare", "-b", "main", chainOrigin]);
+    const work = mkdtempSync(path.join(tmpdir(), "agrippa-chain-work-"));
+    sh(["clone", chainOrigin, work]);
+    writeFileSync(path.join(work, "README.md"), "# chain\n");
+    sh(["add", "-A"], work);
+    sh(["commit", "-m", "init"], work);
+    sh(["push", "origin", "main"], work);
+    chainBase = sh(["rev-parse", "HEAD"], work).trim();
+
+    writeFileSync(path.join(work, "one.ts"), "one\n");
+    sh(["add", "-A"], work);
+    patch1 = sh(["diff", "--cached", "--binary", chainBase], work);
+    writeFileSync(path.join(work, "two.ts"), "two\n");
+    sh(["add", "-A"], work);
+    patch2 = sh(["diff", "--cached", "--binary", chainBase], work);
+  });
+
+  it("advances the tip by exactly one commit parented on the last published snapshot", async () => {
+    const branch = "agrippa/chain-advance";
+    const first = await applyApprovedPatch(spec(branch, patch1));
+
+    const advance = await applyApprovedPatch(spec(branch, patch2, first.commitSha));
+    expect(advance.pushed).toBe(true);
+    expect(sh(["rev-parse", `${branch}^`], chainOrigin).trim()).toBe(first.commitSha);
+    expect(sh(["show", `${branch}:two.ts`], chainOrigin)).toBe("two\n");
+
+    // determinism holds with the extra input: a retry reproduces the commit
+    const retry = await applyApprovedPatch(spec(branch, patch2, first.commitSha));
+    expect(retry).toEqual(advance);
+    expect(sh(["rev-list", "--count", `main..${branch}`], chainOrigin).trim()).toBe("2");
+  });
+
+  it("an unchanged steer returns the expected tip and pushes nothing", async () => {
+    const branch = "agrippa/chain-noop";
+    const first = await applyApprovedPatch(spec(branch, patch1));
+
+    const noop = await applyApprovedPatch(spec(branch, patch1, first.commitSha));
+    expect(noop).toEqual({ commitSha: first.commitSha, treeSha: first.treeSha, pushed: false });
+    expect(sh(["rev-parse", branch], chainOrigin).trim()).toBe(first.commitSha);
+  });
+
+  it("a diverged tip refuses typed and leaves the branch untouched", async () => {
+    const branch = "agrippa/chain-conflict";
+    const first = await applyApprovedPatch(spec(branch, patch1));
+    // someone moved the branch: the platform's record no longer matches
+    sh(["update-ref", `refs/heads/${branch}`, chainBase], chainOrigin);
+
+    const err = await applyApprovedPatch(spec(branch, patch2, first.commitSha)).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(TipConflictError);
+    expect((err as TipConflictError).observedTip).toBe(chainBase);
+    expect(sh(["rev-parse", branch], chainOrigin).trim()).toBe(chainBase);
+  });
+
+  it("a chain whose branch was deleted after publishing refuses typed", async () => {
+    const branch = "agrippa/chain-deleted";
+    const first = await applyApprovedPatch(spec(branch, patch1));
+    sh(["update-ref", "-d", `refs/heads/${branch}`], chainOrigin);
+
+    // the expected parent is unreachable AND the tip is gone — never recreated
+    const err = await applyApprovedPatch(spec(branch, patch2, first.commitSha)).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(TipConflictError);
+    expect((err as TipConflictError).observedTip).toBeNull();
   });
 });
 
