@@ -1386,7 +1386,25 @@ class RunEngine {
           "workspace changed while preparing the approved snapshot — refusing to publish",
         );
       }
-      await this.emit("branch.pushed", { branch });
+      if (result.status === "tip_conflict") {
+        // The expected-tip CAS lost (ADR-0019): the branch no longer matches
+        // what this chain last published — a human push wins by default, the
+        // remote was not touched, and reconciliation is a human decision. A
+        // retry reproduces the refusal deterministically, so this is terminal.
+        throw new RunFailure(
+          "publish_conflict",
+          "the publish branch no longer matches what this chain last published — refusing to overwrite",
+        );
+      }
+      // The chain's publication record, written where the work happened (the
+      // work_branch pattern): a crash between push and record re-runs an
+      // idempotent push on resume, and the record lands then.
+      await this.db
+        .update(runs)
+        .set({ publishedSha: result.commitSha })
+        .where(eq(runs.id, this.run.id));
+      this.run.publishedSha = result.commitSha;
+      await this.emit("branch.pushed", { branch, commitSha: result.commitSha });
       return;
     }
 

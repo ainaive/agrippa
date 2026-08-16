@@ -144,6 +144,15 @@ export const runs = pgTable(
       .notNull()
       .default({}),
     workBranch: text("work_branch"), // created by the git.branch system action
+    /**
+     * The snapshot commit this run's git.push landed (ADR-0019). The chain's
+     * expected tip E = the latest non-null value across the `workspace_key`
+     * group by run number — what the next follow-up's publish parents on and
+     * force-with-leases against. Written by the engine right after the push
+     * resolves (the work_branch pattern): a crash between push and record
+     * re-runs an idempotent push and the record lands.
+     */
+    publishedSha: text("published_sha"),
     // Execution lease (ADR-0017 Decision 4, resolving ADR-0009's future work):
     // claiming a run takes the lease by CAS, the owning worker renews it, the
     // sweeper expires dead leases and re-enqueues. A second at-least-once

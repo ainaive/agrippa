@@ -6,6 +6,7 @@ import type { Logger, ResolvedMcpServer, ResolvedSkill } from "@agrippa/executor
 import type {
   ArtifactStore,
   PullRequestSpec,
+  PushResult,
   ResourceMaterializer,
   ScmService,
   StoredArtifact,
@@ -201,6 +202,10 @@ export class FakeScmService implements ScmService {
   readonly pushes: Array<{ runId: string; branch: string }> = [];
   readonly pullRequests: Array<{ runId: string; spec: PullRequestSpec }> = [];
   evidenceMismatchNext = false;
+  /** Set to make the next push lose the expected-tip CAS (ADR-0019) — the
+   *  value is the observed tip the conflict reports. "Fails closed" is
+   *  untestable until the fake can lie. */
+  tipConflictNext: string | null | undefined = undefined;
   /** Set to make the next call of that action throw once (retry testing). */
   failNext: Partial<Record<"branch" | "push" | "pr", number>> = {};
 
@@ -217,14 +222,16 @@ export class FakeScmService implements ScmService {
     this.branches.push({ runId, name });
   }
 
-  async push(
-    runId: string,
-    spec: { branch: string },
-  ): Promise<{ status: "pushed"; commitSha: string } | { status: "evidence_mismatch" }> {
+  async push(runId: string, spec: { branch: string }): Promise<PushResult> {
     this.consumeFailure("push");
     if (this.evidenceMismatchNext) {
       this.evidenceMismatchNext = false;
       return { status: "evidence_mismatch" };
+    }
+    if (this.tipConflictNext !== undefined) {
+      const observedTip = this.tipConflictNext;
+      this.tipConflictNext = undefined;
+      return { status: "tip_conflict", observedTip };
     }
     this.pushes.push({ runId, branch: spec.branch });
     return { status: "pushed", commitSha: `fake-${this.pushes.length}` };

@@ -2729,6 +2729,36 @@ for (const transport of TRANSPORTS) {
         expect(fx.scm.pushes).toHaveLength(0);
       });
 
+      it("records the chain's publication and stamps the commit on the timeline", async () => {
+        // ADR-0019: published_sha is the chain's expected-tip record — the
+        // next follow-up's publish parents on it; the branch.pushed event
+        // carries the commit so the timeline names what actually landed
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+        expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("succeeded");
+
+        const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        expect(run?.publishedSha).toBe("fake-1");
+        const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+        const pushed = events.find((e) => e.type === "branch.pushed");
+        expect((pushed?.payload as { commitSha?: string } | null)?.commitSha).toBe("fake-1");
+      });
+
+      it("a lost expected-tip CAS fails the run publish_conflict, with no record", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+        fx.scm.tipConflictNext = "1111111111111111111111111111111111111111";
+
+        expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
+        const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        const error = run?.error as { code: string; message: string } | null;
+        expect(error?.code).toBe("publish_conflict");
+        expect(error?.message).toContain("refusing to overwrite");
+        // nothing landed, nothing recorded: the chain's E is unchanged
+        expect(run?.publishedSha).toBeNull();
+        expect(fx.scm.pushes).toHaveLength(0);
+      });
+
       it("fails instead of publishing drifted, empty, or atomically changed evidence", async () => {
         for (const scenario of [
           { diff: "diff --git a/drifted b/drifted\n+somebody touched this\n", atomic: false },

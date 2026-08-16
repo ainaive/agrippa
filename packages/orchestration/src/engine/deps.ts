@@ -141,7 +141,13 @@ export type PushSpec = {
   expectedPatch?: string;
 };
 
-export type PushResult = { status: "pushed"; commitSha: string } | { status: "evidence_mismatch" };
+export type PushResult =
+  | { status: "pushed"; commitSha: string }
+  | { status: "evidence_mismatch" }
+  /** The expected-tip CAS lost (ADR-0019): the observed branch tip is neither
+   *  the deterministic commit nor what this chain last published. The remote
+   *  was not touched; the engine fails the run typed (`publish_conflict`). */
+  | { status: "tip_conflict"; observedTip: string | null };
 
 /**
  * Platform-side git write-path (ADR-0011): branch creation before the

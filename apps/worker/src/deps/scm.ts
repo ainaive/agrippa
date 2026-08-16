@@ -6,8 +6,13 @@ import {
   type ScmService,
   workspaceKeyOf,
 } from "@agrippa/orchestration";
-import { applyApprovedPatch, platformGitDirFor, workspaceIntact } from "@agrippa/workspace";
-import { and, desc, eq } from "drizzle-orm";
+import {
+  applyApprovedPatch,
+  platformGitDirFor,
+  TipConflictError,
+  workspaceIntact,
+} from "@agrippa/workspace";
+import { and, desc, eq, isNotNull } from "drizzle-orm";
 import {
   credentialedUrl,
   git,
@@ -145,15 +150,38 @@ export class GitScmService implements ScmService {
       baseSha = pinnedBase;
     }
 
-    const { commitSha } = await applyApprovedPatch({
-      fetchSource,
-      fetchRef,
-      baseSha,
-      branch: spec.branch,
-      patch,
-      pushUrl,
-    });
-    return { status: "pushed", commitSha };
+    // The chain's expected tip E (ADR-0019): the latest snapshot any run of
+    // this workspace chain published. Absent → first publish (creation CAS);
+    // present → the new commit parents on it and the push advances it.
+    const expectedTip = await this.chainExpectedTip(key);
+    try {
+      const { commitSha } = await applyApprovedPatch({
+        fetchSource,
+        fetchRef,
+        baseSha,
+        branch: spec.branch,
+        patch,
+        pushUrl,
+        ...(expectedTip === undefined ? {} : { expectedTip }),
+      });
+      return { status: "pushed", commitSha };
+    } catch (err) {
+      if (err instanceof TipConflictError) {
+        return { status: "tip_conflict", observedTip: err.observedTip };
+      }
+      throw err;
+    }
+  }
+
+  /** E = the latest non-null published_sha across the workspace chain. */
+  private async chainExpectedTip(workspaceKey: string): Promise<string | undefined> {
+    const [row] = await this.db
+      .select({ publishedSha: runs.publishedSha })
+      .from(runs)
+      .where(and(eq(runs.workspaceKey, workspaceKey), isNotNull(runs.publishedSha)))
+      .orderBy(desc(runs.number))
+      .limit(1);
+    return row?.publishedSha ?? undefined;
   }
 
   /** The base the SERVER pinned at checkout (runs.workspace_ref, remote runs). */

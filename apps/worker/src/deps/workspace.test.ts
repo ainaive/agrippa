@@ -347,6 +347,82 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(await workspace.diff(runId)).toContain("committed line");
   });
 
+  it("a follow-up publish advances the chain tip; a human advance conflicts typed (ADR-0019)", async () => {
+    const branch = publishBranch;
+    const dir = workspaceDirFor(workspaceKey);
+    // the ancestor's publication record, as the engine's git.push handler writes it
+    const tip1 = (await git(["rev-parse", branch], sourceDir)).trim();
+    await db.update(runs).set({ publishedSha: tip1 }).where(eq(runs.id, runId));
+
+    const followupRow = async (): Promise<string> => {
+      runNumber += 1;
+      const [row] = await db
+        .insert(runs)
+        .values({
+          ...newRunIdentity(),
+          workspaceKey, // the CHAIN's directory, inherited like the API does
+          kind: "followup",
+          parentRunId: runId,
+          taskId,
+          projectId,
+          number: runNumber,
+          templateVersionId,
+          faberId,
+          executorId: "fake",
+          paramsSnapshot: {},
+          modelResolution: {},
+          createdBy: userId,
+        })
+        .returning();
+      return row?.id as string;
+    };
+
+    // the steer adds one more thing; evidence stays cumulative against the base
+    const followupId = await followupRow();
+    await Bun.write(path.join(dir, "steer-addition.txt"), "asked for one more thing\n");
+    const approved = await workspace.diff(followupId);
+    const advanced = await scm.push(followupId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+    if (advanced.status !== "pushed") throw new Error(`expected pushed, got ${advanced.status}`);
+    // exactly one new commit, parented on what the chain last published
+    expect((await git(["rev-parse", `${branch}^`], sourceDir)).trim()).toBe(tip1);
+    expect((await git(["rev-list", "--count", `main..${branch}`], sourceDir)).trim()).toBe("2");
+    // cumulative: the ancestor's work rides along with the steer's
+    const show = (spec: string) =>
+      Bun.spawnSync(["git", "show", spec], { cwd: sourceDir, stdout: "pipe", stderr: "pipe" });
+    expect(show(`${branch}:left-uncommitted.txt`).exitCode).toBe(0);
+    expect(show(`${branch}:steer-addition.txt`).exitCode).toBe(0);
+    await db.update(runs).set({ publishedSha: advanced.commitSha }).where(eq(runs.id, followupId));
+
+    // a human advances the branch; the next steer's publish must refuse typed
+    const human = (
+      await gitIn(sourceDir, [
+        "commit-tree",
+        `${advanced.commitSha}^{tree}`,
+        "-p",
+        advanced.commitSha,
+        "-m",
+        "human touch-up",
+      ])
+    ).trim();
+    await git(["update-ref", `refs/heads/${branch}`, human], sourceDir);
+
+    const conflictedId = await followupRow();
+    await Bun.write(path.join(dir, "another-steer.txt"), "and one more\n");
+    const conflicted = await scm.push(conflictedId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: await workspace.diff(conflictedId),
+    });
+    expect(conflicted).toEqual({ status: "tip_conflict", observedTip: human });
+    expect((await git(["rev-parse", branch], sourceDir)).trim()).toBe(human);
+  });
+
   it("refuses to publish a run with no commits and no changes", async () => {
     const emptyRunId = await newRunRow();
     await workspace.checkout(emptyRunId, {
