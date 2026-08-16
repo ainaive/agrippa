@@ -348,6 +348,23 @@ describe("codex executor", () => {
     expect(seen.codexHome).toBe(`${workspaceDir}.codex-home`);
   });
 
+  it("no project credential leaves the ambient CODEX_HOME untouched", async () => {
+    // Without providerAuth the ambient home IS the auth source (env keys or a
+    // ChatGPT login's auth.json) — redirecting it would sever auth. Those
+    // sessions deliberately live in the executor's own home, outside
+    // workspace collection; the sibling home exists only under a project
+    // credential.
+    savedEnv.CODEX_HOME = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = "/home/worker/.codex";
+
+    const events = await collect(makeReq(makeWorkspace("env")));
+    const done = events.find((e) => e.type === "step.completed");
+    const seen = JSON.parse(done?.type === "step.completed" ? done.output : "{}") as {
+      codexHome: string | null;
+    };
+    expect(seen.codexHome).toBe("/home/worker/.codex");
+  });
+
   it("scrubs the subprocess environment down to the allow-list", async () => {
     savedEnv.AGRIPPA_SECRET_KEY = process.env.AGRIPPA_SECRET_KEY;
     savedEnv.NODE_OPTIONS = process.env.NODE_OPTIONS;
