@@ -315,7 +315,8 @@ describe("codex executor", () => {
       return seen.codexHome;
     };
     const first = await homeOf("run-ancestor");
-    expect(first).toContain("agrippa-codex-home");
+    // a workspace SIBLING, not OS tmp: reapable only with the workspace itself
+    expect(first).toBe(`${workspaceDir}.codex-home`);
     expect(await homeOf("run-followup")).toBe(first as string);
   });
 
@@ -344,8 +345,7 @@ describe("codex executor", () => {
     expect(seen.openai).toBe("sk-openai-project"); // project key wins over env
     expect(seen.openaiBaseUrl).toBe("https://proxy.example.com/v1");
     // ambient auth.json under the worker's CODEX_HOME must not outrank the key
-    expect(seen.codexHome).toContain("agrippa-codex-home");
-    expect(seen.codexHome).toContain(path.basename(workspaceDir));
+    expect(seen.codexHome).toBe(`${workspaceDir}.codex-home`);
   });
 
   it("scrubs the subprocess environment down to the allow-list", async () => {

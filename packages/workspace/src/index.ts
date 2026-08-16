@@ -150,6 +150,18 @@ export function platformGitDirFor(workspaceKey: string): string {
   return path.join(platformDirFor(workspaceKey), "git");
 }
 
+/**
+ * The Codex executor's per-workspace session home — a workspace sibling, like
+ * the platform sidecar. The executor derives the identical path from its
+ * `workspaceDir` by suffix alone (`${workspaceDir}.codex-home`); this package
+ * owning the layout is what lets collection remove the threads with the
+ * workspace, so session lifetime equals workspace lifetime (ADR-0018: session
+ * scope follows the workspace — an OS-tmp home could be reaped mid-chain).
+ */
+export function codexHomeDirFor(workspaceKey: string): string {
+  return path.join(workspaceRoot(), `${workspaceKey}.codex-home`);
+}
+
 /** Run Git with trusted metadata and the agent workspace only as a worktree. */
 export async function platformGit(
   workspaceKey: string,
@@ -332,6 +344,7 @@ export async function workspaceIntact(workspaceKey: string): Promise<boolean> {
 export async function removeWorkspace(workspaceKey: string): Promise<void> {
   await rm(workspaceDirFor(workspaceKey), { recursive: true, force: true });
   await rm(platformDirFor(workspaceKey), { recursive: true, force: true });
+  await rm(codexHomeDirFor(workspaceKey), { recursive: true, force: true });
 }
 
 export type ApplyApprovedPatchSpec = {

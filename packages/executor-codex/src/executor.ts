@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   ARTIFACT_DIR,
@@ -199,9 +199,10 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         // run (ADR-0018): resume threads live under CODEX_HOME, and a
         // follow-up is a new run continuing the same workspace — keyed by run
         // it could not find its own thread, then reported success as though it
-        // had. The workspace directory's own name is that key, on every host
-        // and both transports. Left for OS tmp reaping.
-        const home = path.join(tmpdir(), "agrippa-codex-home", path.basename(req.workspaceDir));
+        // had. A sibling of the workspace directory, not OS tmp: tmp reaping
+        // could take the thread mid-chain, and the sibling is collected with
+        // the workspace (`removeWorkspace` owns the suffix's other half).
+        const home = `${req.workspaceDir}.codex-home`;
         mkdirSync(home, { recursive: true });
         env.CODEX_HOME = home;
       }

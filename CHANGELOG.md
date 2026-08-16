@@ -6,6 +6,10 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The Codex executor's session home moved from OS tmp to a workspace sibling (`<workspaceDir>.codex-home`), and `removeWorkspace` collects it with the workspace — the OS can no longer reap a chain's resume threads mid-steering, and session lifetime now equals workspace lifetime (the bug ADR-0018's Consequences recorded; closed by the ADR-0019 landing).
+
 ## [0.4.0] — 2026-08-14
 
 The M2 milestone: execution goes to where the code and credentials live; governance stays on the platform. Remote runtime daemons with capability-routed dispatch, follow-up steering of finished runs, cron/webhook-triggered submission with API keys, and checkpoint notifications — proven end to end on the deployed stack, including a live laptop-daemon follow-up smoke.
