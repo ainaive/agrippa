@@ -8,6 +8,7 @@ All notable changes to Agrippa are documented here. The format follows
 
 ### Fixed
 
+- A Codex resume whose session is gone (collected or migrated session home — the CLI dies before `thread.started` with "no rollout found") now reports the resume **rejected**, so the engine runs its context-loss disclosure and continues fresh, instead of failing the step `model_error` and re-offering the dead session on every retry.
 - The Codex executor's private session home — project-credential invocations, the only ones that get one — moved from OS tmp to a workspace sibling (`<workspaceDir>.codex-home`), and `removeWorkspace` collects it with the workspace: the OS can no longer reap a chain's resume threads mid-steering, and those sessions now live exactly as long as their workspace (the bug ADR-0018's Consequences recorded; closed by the ADR-0019 landing). Scope notes: ambient-auth flows (worker env keys, daemon ChatGPT login) keep the executor's own home unchanged, since that home is also where their auth lives; and a workspace-less chain's Codex session is now bounded by workspace retention — a later follow-up still runs and degrades honestly through the resume-disclosure path.
 
 ## [0.4.0] — 2026-08-14

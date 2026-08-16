@@ -179,6 +179,16 @@ switch (scenario) {
     process.exit(1);
     break;
   }
+  case "missing-rollout": {
+    // pinned live against codex-cli 0.147.0: resuming a thread whose rollout
+    // file is gone (collected or migrated session home) writes this to stderr
+    // and exits 1 with NOTHING on stdout — no thread.started at all
+    console.error(
+      "Error: thread/resume: thread/resume failed: no rollout found for thread id 01890000-0000-7000-8000-000000000000 (code -32600)",
+    );
+    process.exit(1);
+    break;
+  }
   case "hang": {
     emit({ type: "thread.started", thread_id: "sess-hang" });
     // stay alive until SIGTERM (default handler exits)

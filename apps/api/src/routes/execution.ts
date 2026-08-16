@@ -803,8 +803,8 @@ export const executionRoutes = new Hono<AppEnv>()
     // sessions mostly outlive the filesystem — Claude threads live in the
     // executor's own home; a Codex thread under a project credential lives
     // beside the scratch directory and is collected with it (ADR-0019
-    // landing). In that one case a late follow-up starts honestly fresh:
-    // resume reports unresumed, and the engine's context-loss disclosure plus
+    // landing). In that one case a late follow-up starts honestly fresh: the
+    // resume reports rejected, and the engine's context-loss disclosure plus
     // the parent's outputs carry it. Still steerable either way, so no 409.
     //
     // Check-then-act where it does apply, knowingly: the collector can take

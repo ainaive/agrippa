@@ -70,7 +70,11 @@ afterEach(() => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
-  for (const dir of workspaces.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of workspaces.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+    // the executor materializes a session-home sibling for providerAuth runs
+    rmSync(`${dir}.codex-home`, { recursive: true, force: true });
+  }
 });
 
 describe("codex executor", () => {
@@ -234,6 +238,24 @@ describe("codex executor", () => {
     const terminal = events.at(-1);
     expect(terminal?.type === "step.failed" && terminal.error.message).toBe(
       "codex produced no output",
+    );
+  });
+
+  it("a resume that dies before thread.started reports rejection, not failure", async () => {
+    // The engine's context-loss disclosure runs only on a reported rejection —
+    // a step.failed here would burn retry budget re-offering the dead session.
+    const events = await collect(
+      makeReq(makeWorkspace("missing-rollout"), { resumeSessionId: "0189-dead" }),
+    );
+    expect(events).toEqual([{ type: "step.started", resumed: "rejected" }]);
+  });
+
+  it("the same pre-start death without a resume stays a model_error", async () => {
+    const events = await collect(makeReq(makeWorkspace("missing-rollout")));
+    const terminal = events.at(-1);
+    expect(terminal?.type === "step.failed" && terminal.error.code).toBe("model_error");
+    expect(terminal?.type === "step.failed" && terminal.error.message).toContain(
+      "no rollout found",
     );
   });
 
