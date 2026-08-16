@@ -1,6 +1,6 @@
 import { type CheckpointStoredResponse, canTransitionRun, type RunStatus } from "@agrippa/core";
-import { checkpoints, type Db, type DbOrTx, runEvents, runs } from "@agrippa/db";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { checkpoints, type Db, type DbOrTx, runEvents, runs, workerHeartbeats } from "@agrippa/db";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { workspaceExpiryAt } from "../workspace-retention";
 
 /**
@@ -114,6 +114,81 @@ export async function findStrandedCheckpointRuns(db: DbOrTx): Promise<string[]> 
       ),
     );
   return rows.map((r) => r.id);
+}
+
+/** How long a host must be silent, and a run parked, before the dead-pin rule fires. */
+export const DEAD_HOST_GRACE_MS = 5 * 60_000;
+
+/**
+ * ADR-0018's "a dead pin fails `workspace_lost` and is never re-routed", made
+ * mechanical for the per-host queue. A central run pinned to a workspace host
+ * waits on a queue only that host's workers poll; when no live-and-ready
+ * heartbeat has advertised the host for the grace window AND the run itself
+ * has been parked at least as long, honesty beats hope: it finalizes failed,
+ * typed. A host back within the grace simply drains its queue and the runs
+ * proceed — and a rolling deploy never trips this, because the identity
+ * belongs to the storage and survives the container.
+ *
+ * Covered states, each with its own parked-since marker:
+ * - `queued` (queued_at): a follow-up or re-enqueued resume nobody can claim;
+ * - `running` with no lease and a stale-or-cleared expiry: the host died
+ *   mid-run, the lease sweeper re-enqueued it, and only the holder could
+ *   ever pick it back up;
+ * - `waiting_approval` with every checkpoint decided (grace past the
+ *   decision): the resume enqueue went to a queue nobody polls, so the
+ *   decision would never take effect.
+ *
+ * Finalization is the same CAS every other path uses, so replicas racing
+ * this sweep fail each run exactly once; like the worker's retry-exhaustion
+ * path, usage rows stay the source of truth for accounting.
+ */
+export async function sweepDeadHostRuns(
+  db: Db,
+  graceMs: number = DEAD_HOST_GRACE_MS,
+): Promise<string[]> {
+  const grace = sql`${Math.round(graceMs / 1000)} * interval '1 second'`;
+  const rows = await db
+    .select({ id: runs.id, status: runs.status })
+    .from(runs)
+    .where(
+      and(
+        isNull(runs.runtimeId),
+        isNotNull(runs.workspaceHost),
+        sql`not exists (select 1 from ${workerHeartbeats}
+              where ${workerHeartbeats.workspaceHost} = ${runs.workspaceHost}
+                and ${workerHeartbeats.consumersReadyAt} is not null
+                and ${workerHeartbeats.heartbeatAt} > now() - ${grace})`,
+        sql`(
+          (${runs.status} = 'queued' and ${runs.queuedAt} < now() - ${grace})
+          or (${runs.status} = 'running' and ${runs.leaseOwner} is null
+              and coalesce(${runs.leaseExpiresAt}, ${runs.queuedAt}) < now() - ${grace})
+          or (${runs.status} = 'waiting_approval'
+              and not exists (select 1 from ${checkpoints}
+                    where ${checkpoints.runId} = ${runs.id}
+                      and ${checkpoints.status} = 'pending')
+              and exists (select 1 from ${checkpoints}
+                    where ${checkpoints.runId} = ${runs.id}
+                      and ${checkpoints.decidedAt} < now() - ${grace}))
+        )`,
+      ),
+    );
+  const failed: string[] = [];
+  for (const row of rows) {
+    const result = await finalizeRun(db, {
+      runId: row.id,
+      from: row.status as RunStatus,
+      to: "failed",
+      error: {
+        code: "workspace_lost",
+        message:
+          "the host holding this run's workspace has stopped heartbeating — a dead pin is never re-routed",
+      },
+      usageTotals: {},
+      eventPayload: { workspaceHost: "dead" },
+    });
+    if (result.outcome === "finalized") failed.push(row.id);
+  }
+  return failed;
 }
 
 /** Default execution-lease TTL: survives two missed 30s renewals. */

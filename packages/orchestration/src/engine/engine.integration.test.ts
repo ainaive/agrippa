@@ -23,6 +23,7 @@ import {
   templateVersions,
   tokenUsage,
   users,
+  workerHeartbeats,
 } from "@agrippa/db";
 import {
   type Executor,
@@ -63,6 +64,7 @@ import {
   findStrandedCheckpointRuns,
   releaseRunLease,
   renewRunLeases,
+  sweepDeadHostRuns,
   sweepRunLeases,
   transitionRun,
 } from "./run-lifecycle";
@@ -1501,6 +1503,66 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     // cp-1 decided too → now every approval is decided → stranded, re-enqueue
     await decideCheckpoint(db, a1?.id as string, { status: "approved" });
     expect(await findStrandedCheckpointRuns(db)).toContain(runId);
+  });
+
+  it("sweepDeadHostRuns fails only parked runs whose host is silent past grace", async () => {
+    const { db, runId } = await setupFixture();
+    await db
+      .update(runs)
+      .set({ workspaceHost: "host-dying", queuedAt: sql`now() - interval '10 minutes'` })
+      .where(eq(runs.id, runId));
+
+    // a live-and-ready worker advertising the host keeps the run waiting
+    await db.insert(workerHeartbeats).values({
+      containerId: "w-live",
+      workspaceHost: "host-dying",
+      consumersReadyAt: sql`now()`,
+      heartbeatAt: sql`now()`,
+    });
+    expect(await sweepDeadHostRuns(db)).not.toContain(runId);
+
+    // the host goes silent — but a freshly parked run still gets its grace
+    await db
+      .update(workerHeartbeats)
+      .set({ heartbeatAt: sql`now() - interval '10 minutes'` })
+      .where(eq(workerHeartbeats.containerId, "w-live"));
+    await db.update(runs).set({ queuedAt: sql`now()` }).where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).not.toContain(runId);
+
+    // silent host + parked past grace → the dead-pin rule, typed
+    await db
+      .update(runs)
+      .set({ queuedAt: sql`now() - interval '10 minutes'` })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).toContain(runId);
+    const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("failed");
+    expect((row?.error as { code: string } | null)?.code).toBe("workspace_lost");
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.some((e) => e.type === "run.failed")).toBe(true);
+  });
+
+  it("sweepDeadHostRuns ignores unpinned runs and catches a leaseless running one", async () => {
+    const { db, runId } = await setupFixture();
+    // unpinned: not a candidate however long it queues
+    await db
+      .update(runs)
+      .set({ queuedAt: sql`now() - interval '10 minutes'` })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).not.toContain(runId);
+
+    // running with no lease on a silent host: the crash-recovery re-enqueue
+    // only the holder could ever claim
+    await db
+      .update(runs)
+      .set({
+        workspaceHost: "host-gone",
+        status: "running",
+        leaseOwner: null,
+        leaseExpiresAt: sql`now() - interval '10 minutes'`,
+      })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).toContain(runId);
   });
 
   it("finalizeRun lets a late cancel win over a success (atomic, no read/CAS gap)", async () => {

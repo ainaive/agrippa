@@ -34,6 +34,7 @@ import {
   RedisEventBus,
   reconcileScheduleCalendar,
   type ScheduleFireOutcome,
+  sweepDeadHostRuns,
   sweepNotificationDeliveries,
   sweepOfflineRuntimes,
   sweepRunLeases,
@@ -503,6 +504,16 @@ setInterval(async () => {
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
+    // the dead-pin rule made mechanical (ADR-0018 amendment): a run parked on
+    // a host queue no live-and-ready worker serves fails workspace_lost,
+    // typed, instead of waiting forever on a directory that is gone
+    await stage("dead-host-runs", async () => {
+      for (const runId of await sweepDeadHostRuns(db)) {
+        deps.logger.warn(`run ${runId}: workspace host dead past grace — failed workspace_lost`);
+        await consumer.syncNotificationsBestEffort(runId);
+      }
+    });
+
     await stage("stranded-checkpoints", async () => {
       for (const runId of await findStrandedCheckpointRuns(db)) {
         await enqueueAfterCommit(() => queue.enqueueRun(runId), `stranded ${runId}`);

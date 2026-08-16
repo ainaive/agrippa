@@ -95,6 +95,13 @@ Documented in `infra/env/.env.example`; the full set:
 
 Workers advertise the executors they can actually run on their per-container heartbeat row (`worker_heartbeats`, refreshed every 60 s); the API refuses a submission for an executor no live worker advertises — and one whose full executor set fits no single worker. `claude-agent-sdk` and `fake` always register. `codex-cli` registers only if a Codex CLI new enough for `codex exec --ignore-user-config` / `--ignore-rules` is on the worker's `PATH` — the worker image installs one at `/opt/codex` and its build fails if that check doesn't pass.
 
+## Workspace host affinity
+
+A run's workspace lives on one host's storage, and follow-ups (plus resumes) of a repository run are routed back to it: the workspaces volume identifies itself with a `.agrippa-host-id` file, workers advertise that identity on their heartbeat, and pinned runs wait on that host's own queue. Two operational consequences:
+
+- **The workspaces volume is the host.** Replicas sharing it are one host; deleting or recreating the volume makes a *new* host, and runs pinned to the old one fail with `workspace_lost` about five minutes after its last heartbeat — with a notification, so nothing waits silently. A rolling redeploy that keeps the volume never trips this.
+- **Decommissioning a worker host** fails its parked pinned runs the same way after the same grace. That is deliberate — a directory nobody holds should say so rather than circulate. Re-submit the affected tasks on the surviving fleet.
+
 ## Remote runtime daemons (bring your own compute)
 
 A daemon on a team member's machine can execute agent work with that machine's own CLI logins — quotas, checkpoints, audit, and git publication stay on the platform (see [design/03](../../design/03-executor-abstraction.md) and ADR-0017).
