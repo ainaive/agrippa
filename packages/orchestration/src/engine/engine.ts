@@ -46,10 +46,12 @@ import {
   UsageLimitExceededError,
   UsageMeter,
 } from "@agrippa/executor-core";
-import { and, eq, gte, inArray, max, ne, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, max, ne, notInArray, sql } from "drizzle-orm";
 import { upgradeCompiledTemplate } from "../compile";
 import { evaluateCondition, evaluateExpression, interpolate } from "../expression";
 import {
+  FOLLOWUP_PUBLISH_CHECKPOINT_ID,
+  FOLLOWUP_PUBLISH_PHASE_ID,
   FOLLOWUP_STEER_STEP_ID,
   type FollowupSeed,
   followupSeed,
@@ -313,7 +315,7 @@ export async function executeRun(
   // an ancestor's workspace, publishing included. Missing parentage costs the
   // inherited session (an honest fresh start); it must never cost the flow.
   const seed = run.kind === "followup" ? await followupSeed(db, run.parentRunId, base) : null;
-  const template = seed ? followupTemplate(base, seed) : base;
+  const template = seed ? followupTemplate(base, seed, { workBranch: run.workBranch }) : base;
 
   const [task] = await db.select().from(tasks).where(eq(tasks.id, run.taskId));
   const [project] = await db.select().from(projects).where(eq(projects.id, run.projectId));
@@ -1040,6 +1042,11 @@ class RunEngine {
     loop: LoopNode | null,
   ): Promise<"done" | "waiting"> {
     const spec = step.checkpoint;
+    const tailSkip = await this.followupTailSkip(phase, step);
+    if (tailSkip) {
+      await this.markSkipped(phase, step, tailSkip);
+      return "done";
+    }
     if (step.when && !evaluateCondition(step.when, this.expressionContext())) {
       await this.markSkipped(phase, step, "when_false");
       return "done";
@@ -1203,6 +1210,11 @@ class RunEngine {
     const startAttempt = (this.stepRows.get(this.rowKey(step.id))?.attempt ?? 0) + 1;
 
     // conditional / requires gating
+    const tailSkip = await this.followupTailSkip(phase, step);
+    if (tailSkip) {
+      await this.markSkipped(phase, step, tailSkip);
+      return;
+    }
     if (step.when && !evaluateCondition(step.when, this.expressionContext())) {
       await this.markSkipped(phase, step, "when_false");
       return;
@@ -2174,6 +2186,87 @@ class RunEngine {
       .where(eq(runSteps.id, row.id));
     row.status = status;
     row.error = error;
+  }
+
+  /** Lazily computed once per engine leg — see {@link computeTailGuards}. */
+  private tailGuardState?: Promise<{ skipTail: boolean; skipCheckpoint: boolean }>;
+
+  /**
+   * The publish tail's guards (ADR-0019), keyed on the synthetic phase id so
+   * the template language never sees them. Returns the skip reason, or null
+   * to run the step.
+   */
+  private async followupTailSkip(
+    phase: TemplatePhaseV2,
+    step: TemplateStepV2,
+  ): Promise<string | null> {
+    if (this.run.kind !== "followup" || phase.id !== FOLLOWUP_PUBLISH_PHASE_ID) return null;
+    this.tailGuardState ??= this.computeTailGuards();
+    const state = await this.tailGuardState;
+    if (state.skipTail) return "nothing_to_publish";
+    if (step.id === FOLLOWUP_PUBLISH_CHECKPOINT_ID && state.skipCheckpoint) {
+      return "approved_bytes_carried_forward";
+    }
+    return null;
+  }
+
+  /**
+   * Approved and published are separate facts, each read from its own record
+   * (the review round that shaped ADR-0019 Decision 3 found the first draft
+   * conflating them). The WHOLE tail is skipped only when the steer's
+   * cumulative patch is empty — nothing to publish. The CHECKPOINT alone is
+   * skipped when the patch is byte-identical (store-time sha256) to bytes
+   * this chain already approved: at an earlier follow-up's publish
+   * checkpoint, or by publishing them (nothing publishes unapproved bytes).
+   * A base-flow approval that never reached a push is deliberately not
+   * counted — the conservative direction re-asks a human; it never pushes
+   * unapproved bytes. Push and pr.open always run when the tail runs: both
+   * are idempotent, so an approved-but-unpublished chain is completed by the
+   * next follow-up rather than skipped past.
+   */
+  private async computeTailGuards(): Promise<{ skipTail: boolean; skipCheckpoint: boolean }> {
+    const patchKey = this.template.spec.outputs.artifacts.find((a) => a.kind === "patch")?.key;
+    if (!patchKey) return { skipTail: true, skipCheckpoint: false };
+    const [own] = await this.db
+      .select({ sha256: artifacts.sha256 })
+      .from(artifacts)
+      .where(and(eq(artifacts.runId, this.run.id), eq(artifacts.artifactKey, patchKey)))
+      .orderBy(desc(artifacts.iteration))
+      .limit(1);
+    const emptyDigest = new Bun.CryptoHasher("sha256").update("").digest("hex");
+    if (!own?.sha256 || own.sha256 === emptyDigest) {
+      return { skipTail: true, skipCheckpoint: false };
+    }
+
+    const chainRuns = await this.db
+      .select({ id: runs.id, publishedSha: runs.publishedSha })
+      .from(runs)
+      .where(and(eq(runs.workspaceKey, this.run.workspaceKey), ne(runs.id, this.run.id)));
+    const approvedRunIds = new Set(
+      chainRuns.filter((r) => r.publishedSha !== null).map((r) => r.id),
+    );
+    const chainIds = chainRuns.map((r) => r.id);
+    if (chainIds.length > 0) {
+      const approvedCheckpoints = await this.db
+        .select({ runId: checkpoints.runId })
+        .from(checkpoints)
+        .where(
+          and(
+            inArray(checkpoints.runId, chainIds),
+            eq(checkpoints.checkpointId, FOLLOWUP_PUBLISH_CHECKPOINT_ID),
+            eq(checkpoints.status, "approved"),
+          ),
+        );
+      for (const row of approvedCheckpoints) approvedRunIds.add(row.runId);
+    }
+    if (approvedRunIds.size === 0) return { skipTail: false, skipCheckpoint: false };
+    const digests = await this.db
+      .select({ sha256: artifacts.sha256 })
+      .from(artifacts)
+      .where(
+        and(inArray(artifacts.runId, [...approvedRunIds]), eq(artifacts.artifactKey, patchKey)),
+      );
+    return { skipTail: false, skipCheckpoint: digests.some((d) => d.sha256 === own.sha256) };
   }
 
   private async markSkipped(

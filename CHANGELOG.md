@@ -6,6 +6,11 @@ All notable changes to Agrippa are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A follow-up can publish what it was steered to produce** (ADR-0019). When the base flow delivers to a branch, a follow-up that changed the workspace pauses at its own approval presenting the full cumulative patch, then pushes exactly one deterministic commit on top of what the chain last published (an expected-tip CAS — `runs.published_sha` is the chain's record) and re-targets the same PR. A steer that changed nothing publishes nothing; a byte-identical patch carries its earlier approval forward instead of re-asking; and a branch that no longer matches the chain's record — a human push, a post-merge deletion — fails typed as `publish_conflict` with the remote untouched.
+- **Central runs route to the host that holds their workspace** (the per-host queue, ADR-0018 amendment). Hosts are identified by their storage (`WORKSPACE_ROOT/.agrippa-host-id`); repo checkouts stamp `runs.workspace_host` first-writer-wins; follow-ups inherit it; producers send host-pinned jobs to `run.host.<id>`, which only workers mounting that storage poll — follow-ups and resumes land where the directory lives instead of bouncing off claim-time declines, which remain as the deploy-skew fallback.
+
 ### Fixed
 
 - A Codex resume whose session is gone (collected or migrated session home — the CLI dies before `thread.started` with "no rollout found") now reports the resume **rejected**, so the engine runs its context-loss disclosure and continues fresh, instead of failing the step `model_error` and re-offering the dead session on every retry.

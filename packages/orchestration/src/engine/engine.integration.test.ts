@@ -2015,7 +2015,7 @@ for (const transport of TRANSPORTS) {
         });
 
         const seed = await followupSeed(db, runId, base);
-        const synthetic = followupTemplate(base, seed);
+        const synthetic = followupTemplate(base, seed, { workBranch: null });
         const [steer] = synthetic.spec.phases.flatMap((p) =>
           "steps" in p ? p.steps : [],
         ) as Array<{ skills: string[] }>;
@@ -2727,6 +2727,139 @@ for (const transport of TRANSPORTS) {
         expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
         expect((run?.error as { message: string } | null)?.message).toContain("integrity digest");
         expect(fx.scm.pushes).toHaveLength(0);
+      });
+
+      /** A follow-up row of the v2 fixture's run — the endpoint's insert shape. */
+      const v2FollowupOf = async (fx: V2Fixture, message: string): Promise<string> => {
+        const [parent] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        const [head] = await fx.db
+          .select({ number: runs.number })
+          .from(runs)
+          .where(eq(runs.taskId, parent?.taskId as string))
+          .orderBy(desc(runs.number))
+          .limit(1);
+        const [row] = await fx.db
+          .insert(runs)
+          .values({
+            ...newRunIdentity(),
+            workspaceKey: parent?.workspaceKey as string,
+            kind: "followup",
+            parentRunId: fx.runId,
+            steeringMessage: message,
+            taskId: parent?.taskId as string,
+            projectId: parent?.projectId as string,
+            number: (head?.number ?? 1) + 1,
+            templateVersionId: parent?.templateVersionId as string,
+            faberId: parent?.faberId as string,
+            executorId: parent?.executorId as string,
+            agentBindings: parent?.agentBindings ?? {},
+            paramsSnapshot: parent?.paramsSnapshot ?? {},
+            modelResolution: parent?.modelResolution ?? {},
+            resourceManifest: parent?.resourceManifest ?? { mcpServers: [], skills: [] },
+            workBranch: parent?.workBranch ?? null,
+            workspaceRef: parent?.workspaceRef ?? null,
+            createdBy: parent?.createdBy as string,
+          })
+          .returning();
+        return row?.id as string;
+      };
+
+      const publishParent = async (fx: V2Fixture) => {
+        const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+        expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("succeeded");
+        return {
+          impl: { ...impl, steer: { kind: "succeed", output: "steered" } as FakeStepBehavior },
+          rev,
+        };
+      };
+
+      it("a changed follow-up publishes through its approval-gated tail, and a chain advances twice", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+        expect(fx.scm.pushes).toHaveLength(1);
+
+        // the steer changes the workspace further — cumulative evidence
+        fx.workspace.diffOutput = `${BIG_DIFF}+one more thing\n`;
+        const f1 = await v2FollowupOf(fx, "also handle the empty-list case");
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("waiting_approval");
+        const [pending] = await fx.db
+          .select()
+          .from(checkpoints)
+          .where(and(eq(checkpoints.runId, f1), eq(checkpoints.status, "pending")));
+        // the tail's own approval, presenting the cumulative patch
+        expect(pending?.checkpointId).toBe("approve-publish");
+        await decideCheckpoint(fx.db, pending?.id as string, {
+          status: "approved",
+          decidedBy: fx.userId,
+          response: { kind: "approval", outcome: "approved" },
+        });
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("succeeded");
+        expect(fx.scm.pushes).toHaveLength(2);
+        const [f1Row] = await fx.db.select().from(runs).where(eq(runs.id, f1));
+        expect(f1Row?.publishedSha).toBe("fake-2");
+        // the PR is re-targeted, never duplicated (same head/base recovers)
+        expect(fx.scm.pullRequests).toHaveLength(1);
+
+        // the chain advances AGAIN: a second changed steer publishes on top
+        fx.workspace.diffOutput = `${BIG_DIFF}+one more thing\n+and another\n`;
+        const f2 = await v2FollowupOf(fx, "and another");
+        expect(await executeRun(fx.makeDeps(impl, rev), f2)).toBe("waiting_approval");
+        const [pending2] = await fx.db
+          .select()
+          .from(checkpoints)
+          .where(and(eq(checkpoints.runId, f2), eq(checkpoints.status, "pending")));
+        await decideCheckpoint(fx.db, pending2?.id as string, {
+          status: "approved",
+          decidedBy: fx.userId,
+          response: { kind: "approval", outcome: "approved" },
+        });
+        expect(await executeRun(fx.makeDeps(impl, rev), f2)).toBe("succeeded");
+        const [f2Row] = await fx.db.select().from(runs).where(eq(runs.id, f2));
+        expect(f2Row?.publishedSha).toBe("fake-3");
+      });
+
+      it("an unchanged steer carries the approval forward: push runs, nobody is re-asked", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+
+        // byte-identical to what the parent already published (and had
+        // approved) — the checkpoint is skipped, the idempotent push still
+        // runs, and the whole follow-up completes in one leg
+        const f1 = await v2FollowupOf(fx, "just answer a question about it");
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("succeeded");
+        const steps = await fx.db
+          .select()
+          .from(runSteps)
+          .where(eq(runSteps.runId, f1))
+          .orderBy(asc(runSteps.seq));
+        const byId = new Map(steps.map((s) => [s.stepId, s.status]));
+        expect(byId.get("approve-publish")).toBe("skipped");
+        expect(byId.get("push")).toBe("succeeded");
+        expect(
+          await fx.db.select().from(checkpoints).where(eq(checkpoints.runId, f1)),
+        ).toHaveLength(0);
+      });
+
+      it("a steer that changed nothing to publish skips the tail entirely", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+        const pushesBefore = fx.scm.pushes.length;
+
+        fx.workspace.diffOutput = "";
+        const f1 = await v2FollowupOf(fx, "what did you change and why?");
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("succeeded");
+        const steps = await fx.db
+          .select()
+          .from(runSteps)
+          .where(eq(runSteps.runId, f1))
+          .orderBy(asc(runSteps.seq));
+        const byId = new Map(steps.map((s) => [s.stepId, s.status]));
+        expect(byId.get("steer")).toBe("succeeded");
+        expect(byId.get("approve-publish")).toBe("skipped");
+        expect(byId.get("push")).toBe("skipped");
+        expect(fx.scm.pushes).toHaveLength(pushesBefore);
+        const [f1Row] = await fx.db.select().from(runs).where(eq(runs.id, f1));
+        expect(f1Row?.publishedSha).toBeNull();
       });
 
       it("records the chain's publication and stamps the commit on the timeline", async () => {
