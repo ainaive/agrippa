@@ -268,17 +268,17 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
             yield { type: "step.started", resumed: "rejected" };
             return;
           }
-          // the CLI died before announcing a thread (bad auth, bad flags…)
+          // the CLI died before announcing a thread (bad auth, bad flags…) —
+          // normalized like every other terminal path: a pre-start 429 is
+          // still a rate limit, and the platform allowance owns it
           ctx.logger.warn("codex died before starting a thread", { exitCode, stderr });
+          const preStartMessage =
+            collector.fatalMessage ??
+            collector.itemErrorMessage ??
+            (stderr || "codex produced no output");
           yield {
             type: "step.failed",
-            error: {
-              code: "model_error",
-              message:
-                collector.fatalMessage ??
-                collector.itemErrorMessage ??
-                (stderr || "codex produced no output"),
-            },
+            error: { code: normalizedErrorCode(preStartMessage), message: preStartMessage },
           };
           return;
         }
@@ -310,9 +310,10 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         if (ctx.signal.aborted) {
           yield { type: "step.failed", error: { code: "aborted", message: "aborted" } };
         } else {
+          const text = String(err).slice(0, 2000);
           yield {
             type: "step.failed",
-            error: { code: "model_error", message: String(err).slice(0, 2000) },
+            error: { code: normalizedErrorCode(text), message: text },
           };
         }
       } finally {

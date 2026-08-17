@@ -109,10 +109,10 @@ Artifacts: agents write files to `.agrippa/artifacts/<key>` in the workspace (th
 
 ## Keep prompts cache-friendly
 
-Model providers cache prompt prefixes, and the platform is built so two runs of the same template version send **byte-identical** stable content — the Faber's system prompt, materialized skills, instructions. Keep it that way in what you author:
+Model providers cache prompt prefixes, and the platform is built so every run of a template version sends a **byte-identical stable prefix** — the Faber's system prompt and the materialized skills. Rendered step instructions sit *after* that prefix and differ from run to run only by what you interpolate. Keep the split clean in what you author:
 
 - **Never put run-specific facts in a Faber's system prompt** — no dates, no project names it should learn from parameters. The persona is shared across every run that binds it.
-- **Volatile values belong in step `instructions`** via `${inputs.*}` and fire-time date tokens — they are interpolated per run by design, and that is the one channel priced for it.
+- **Volatile values belong in step `instructions`** via `${inputs.*}` — instructions are the one channel priced for per-run content. For scheduled tasks, fire-time date tokens are resolved in the **schedule's parameter values**; the instructions then read them as `${inputs.*}` like any other input.
 - **Skills ship fixed content.** A skill that wants "today's date" should ask for it as an instruction interpolation, not bake it into its body — an edited skill version invalidates the cache for every run that uses it, which is correct exactly once per edit.
 
 A compliance test enforces the platform's half of this; your half is not smuggling volatility into the stable channels.

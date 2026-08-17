@@ -168,7 +168,19 @@ export class FakeExecutor implements Executor {
       case "babble": {
         while (!ctx.signal.aborted) {
           yield { type: "message.delta", text: "…still thinking about it…" };
-          await sleep(behavior.intervalMs ?? 20);
+          // abort-aware sleep: a large interval must not delay the aborted
+          // event past the watchdog's teardown — executors stop promptly
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, behavior.intervalMs ?? 20);
+            ctx.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
         }
         yield abortError();
         return;

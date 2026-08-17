@@ -122,6 +122,11 @@ export type NormalizedErrorCode =
   | "runtime_offline"
   | "executor_stalled"
   | "no_progress";
+// Deliberately NOT here: engine-authored codes — `crashed` (the engine
+// records a died-mid-step attempt itself), `workspace_lost`,
+// `publish_conflict`, `no_capable_runtime`, … — are run/step ROW codes an
+// executor never emits as an event. The taxonomy in @agrippa/core
+// classifies the superset; this union is only the executor contract.
 
 export type NormalizedError = {
   code: NormalizedErrorCode;

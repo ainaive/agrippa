@@ -489,12 +489,15 @@ for (const transport of TRANSPORTS) {
       });
 
       it("the stable channel is byte-identical across runs; volatility rides the step prompt", async () => {
-        // The prompt-cache discipline (ADR-0020 / m2-plan craft): everything
-        // an executor's cache could key on — system prompt, model, resources,
-        // limits, contracts, instructions — must be byte-identical for two
-        // runs of the same template version and params. Volatile facts (run
-        // id, workspace path, prior context, sessions) belong to their own
-        // request fields, never interpolated into the stable ones. This test
+        // The prompt-cache discipline (ADR-0020 / m2-plan craft): the
+        // cache-stable prefix — system prompt, model, resources, limits,
+        // contracts, materialized layout — must be byte-identical across
+        // runs of a template version. Instructions are the VOLATILE channel,
+        // asserted here only as DETERMINISM: identical params and decisions
+        // must render identical instructions (no run ids or timestamps
+        // smuggled in) — a steering message or disclosure would rightly
+        // differ. Remaining volatile facts (run id, workspace path, prior
+        // context, sessions) belong to their own request fields. This test
         // is the regression net for any future "write a brief into the
         // workspace" or "stamp a date into instructions" change.
         const runOnce = async () => {
