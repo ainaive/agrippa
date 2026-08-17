@@ -1,6 +1,30 @@
 import { describe, expect, it } from "bun:test";
 import type { ExecutorEvent } from "@agrippa/executor-core";
+import { envNumber } from "./engine";
 import { withInactivityWatchdog } from "./watchdog";
+
+describe("envNumber (the watchdog/backoff knobs)", () => {
+  it("unset and EMPTY both fall back — Number('') is 0, and a watchdog silently disabled by an unset variable was the bug", () => {
+    delete process.env.AGRIPPA_TEST_KNOB;
+    expect(envNumber("AGRIPPA_TEST_KNOB", 10)).toBe(10);
+    process.env.AGRIPPA_TEST_KNOB = "";
+    expect(envNumber("AGRIPPA_TEST_KNOB", 10)).toBe(10);
+    process.env.AGRIPPA_TEST_KNOB = "  ";
+    expect(envNumber("AGRIPPA_TEST_KNOB", 10)).toBe(10);
+  });
+
+  it("an explicit 0 means what it says; garbage and negatives fall back", () => {
+    process.env.AGRIPPA_TEST_KNOB = "0";
+    expect(envNumber("AGRIPPA_TEST_KNOB", 10)).toBe(0);
+    process.env.AGRIPPA_TEST_KNOB = "7";
+    expect(envNumber("AGRIPPA_TEST_KNOB", 10)).toBe(7);
+    process.env.AGRIPPA_TEST_KNOB = "banana";
+    expect(envNumber("AGRIPPA_TEST_KNOB", 10)).toBe(10);
+    process.env.AGRIPPA_TEST_KNOB = "-5";
+    expect(envNumber("AGRIPPA_TEST_KNOB", 10)).toBe(10);
+    delete process.env.AGRIPPA_TEST_KNOB;
+  });
+});
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

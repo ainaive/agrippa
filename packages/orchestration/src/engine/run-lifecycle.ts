@@ -134,6 +134,12 @@ export async function findStuckCheckpoints(
   const rows = (await db.execute(sql`
     select id, run_id from ${checkpoints}
     where ${checkpoints.status} = 'pending'
+      -- only runs still WAITING: cancelling a paused run leaves its
+      -- checkpoint row pending, and expiring that later would append a
+      -- misleading event to a terminal run (codex round on feat/m3-craft)
+      and exists (select 1 from ${runs}
+            where ${runs.id} = ${checkpoints.runId}
+              and ${runs.status} = 'waiting_approval')
       and ${checkpoints.requestedAt}
           -- (#>> '{}')::jsonb normalizes BOTH encodings: drizzle-under-bun-sql
           -- stores jsonb double-encoded (a JSON string), raw writers store the

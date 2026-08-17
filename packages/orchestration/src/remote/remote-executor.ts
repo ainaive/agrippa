@@ -170,7 +170,7 @@ export class RemoteExecutor implements Executor {
         if (Date.now() - lastContact.getTime() > deadmanMs) {
           // kill it so a zombie daemon reviving later can't resurrect the
           // dispatch under an engine that has moved on
-          await db
+          const killed = await db
             .update(dispatches)
             .set({
               status: "failed",
@@ -182,7 +182,16 @@ export class RemoteExecutor implements Executor {
                 eq(dispatches.id, dispatchId),
                 inArray(dispatches.status, ["pending", "claimed"]),
               ),
-            );
+            )
+            .returning({ id: dispatches.id });
+          if (killed.length === 0) {
+            // The CAS lost: the daemon settled the dispatch between our read
+            // and the kill. The next poll reads that terminal state and
+            // delivers its REAL result — synthesizing runtime_offline here
+            // would re-run work that may have completed, and its transient
+            // class would make the duplication automatic (codex round).
+            continue;
+          }
           yield {
             type: "step.failed",
             error: {

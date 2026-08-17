@@ -623,6 +623,64 @@ for (const transport of TRANSPORTS) {
         expect(attempts.map((a) => a.status)).toEqual(["failed", "failed", "failed"]);
       });
 
+      it("a crash mid-backoff neither loses the free retry nor completes over the failure", async () => {
+        // The free retry lives only in memory during the backoff; a worker
+        // death there resumes with startAttempt PAST a maxAttempts that
+        // forgot the transient rows — and an exhausted loop falling through
+        // silently completes the phase over a failed step (codex round).
+        const { db, runId, makeDeps } = await setupFixture();
+        await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+        await approve(db, runId);
+        // as if the crashed leg had spent attempt 1 on a rate limit
+        await db.insert(runSteps).values({
+          runId,
+          phaseId: "fix",
+          stepId: "implement-fix",
+          iteration: 1,
+          attempt: 1,
+          seq: 90,
+          status: "failed",
+          error: { code: "provider_rate_limited", message: "429" },
+        });
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("succeeded");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        // the reconstructed entitlement ran attempt 2 — the row is there
+        expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+          [1, "failed"],
+          [2, "succeeded"],
+        ]);
+      });
+
+      it("a resume whose transient entitlement is already spent fails typed, never silently", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+        await approve(db, runId);
+        // one real attempt plus the full cap, all consumed by the dead leg
+        for (const attempt of [1, 2, 3]) {
+          await db.insert(runSteps).values({
+            runId,
+            phaseId: "fix",
+            stepId: "implement-fix",
+            iteration: 1,
+            attempt,
+            seq: 90 + attempt,
+            status: "failed",
+            error: { code: "provider_rate_limited", message: "429" },
+          });
+        }
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("provider_rate_limited");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts).toHaveLength(3); // no fourth attempt past the cap
+      });
+
       it("a silent executor trips the idle watchdog: executor_stalled, retried free, capped", async () => {
         const { db, runId, makeDeps } = await setupFixture();
         // hang responds only to abort — the transport (both of them) is alive,
@@ -1742,6 +1800,26 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     await decideCheckpoint(db, stuck?.id as string, { status: "approved" });
     expect((await findStuckCheckpoints(db, 60_000)).map((c) => c.approvalId)).not.toContain(
       stuck?.id,
+    );
+  });
+
+  it("findStuckCheckpoints never touches a terminal run's leftover checkpoint", async () => {
+    // cancelling a paused run leaves its checkpoint row pending — expiring
+    // it later would append a misleading event to a terminal run
+    const { db, runId } = await setupFixture();
+    await db.update(runs).set({ status: "cancelled" }).where(eq(runs.id, runId));
+    const [leftover] = await db
+      .insert(checkpoints)
+      .values({
+        runId,
+        checkpointId: "cp-leftover",
+        status: "pending",
+        payload: { timeoutMinutes: 1 },
+        requestedAt: new Date(Date.now() - 10 * 60_000),
+      })
+      .returning();
+    expect((await findStuckCheckpoints(db, 60_000)).map((c) => c.approvalId)).not.toContain(
+      leftover?.id as string,
     );
   });
 
