@@ -25,6 +25,9 @@ export type FakeStepBehavior =
       code?: NormalizedErrorCode;
     }
   | { kind: "hang" } // runs until aborted — for cancellation/timeout tests
+  // streams message.delta forever without ever completing anything — the
+  // semantic watchdog's prey (ADR-0020): plausible tokens are not progress
+  | { kind: "babble"; intervalMs?: number }
   | { kind: "crash"; usage?: FakeUsage } // throws mid-step — simulates a dying worker
   | { kind: "script"; events: ExecutorEvent[] };
 
@@ -159,6 +162,14 @@ export class FakeExecutor implements Executor {
           if (ctx.signal.aborted) return resolve();
           ctx.signal.addEventListener("abort", () => resolve(), { once: true });
         });
+        yield abortError();
+        return;
+      }
+      case "babble": {
+        while (!ctx.signal.aborted) {
+          yield { type: "message.delta", text: "…still thinking about it…" };
+          await sleep(behavior.intervalMs ?? 20);
+        }
         yield abortError();
         return;
       }

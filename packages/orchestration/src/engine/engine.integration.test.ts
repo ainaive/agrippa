@@ -562,6 +562,48 @@ for (const transport of TRANSPORTS) {
         expect(attempts.map((a) => a.status)).toEqual(["failed", "failed", "failed"]);
       });
 
+      it("a silent executor trips the idle watchdog: executor_stalled, retried free, capped", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        // hang responds only to abort — the transport (both of them) is alive,
+        // the executor is not: precisely the gap the deadman cannot see
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "hang" },
+        };
+        await executeRun({ ...makeDeps(script), watchdog: { idleMs: 250, semanticMs: 0 } }, runId);
+        await approve(db, runId);
+        const deps = { ...makeDeps(script), watchdog: { idleMs: 250, semanticMs: 0 } };
+        expect(await executeRun(deps, runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("executor_stalled");
+        // platform-transient: one real attempt plus the free-cap of two
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts.map((a) => a.status)).toEqual(["failed", "failed", "failed"]);
+      });
+
+      it("an agent streaming tokens forever trips the semantic watchdog: no_progress", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "babble", intervalMs: 30 },
+        };
+        await executeRun({ ...makeDeps(script), watchdog: { idleMs: 0, semanticMs: 400 } }, runId);
+        await approve(db, runId);
+        const deps = { ...makeDeps(script), watchdog: { idleMs: 0, semanticMs: 400 } };
+        expect(await executeRun(deps, runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("no_progress");
+        // agent-class: the step declares no retry, so exactly one attempt
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts.map((a) => a.status)).toEqual(["failed"]);
+      });
+
       it("onFailure: continue lets the run proceed past a permanently failing step", async () => {
         const { db, runId, makeDeps } = await setupFixture();
         const script: Record<string, FakeStepBehavior> = {

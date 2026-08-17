@@ -82,6 +82,7 @@ import {
   releaseRunLease,
   transitionRun,
 } from "./run-lifecycle";
+import { withInactivityWatchdog } from "./watchdog";
 
 type RunRow = typeof runs.$inferSelect;
 type StepRow = typeof runSteps.$inferSelect;
@@ -247,6 +248,12 @@ const PLATFORM_TRANSIENT_RETRY_CAP = 2;
 const platformRetryBackoffMs = (): number => {
   const raw = Number(process.env.AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS ?? "");
   return (Number.isFinite(raw) && raw >= 0 ? raw : 5) * 1000;
+};
+
+/** A minute-denominated env knob; 0 means "off" and passes through as 0. */
+const envMinutes = (name: string, defaultMinutes: number): number => {
+  const raw = Number(process.env[name] ?? "");
+  return (Number.isFinite(raw) && raw >= 0 ? raw : defaultMinutes) * 60_000;
 };
 
 /** Normalize runs.model_resolution (flat legacy or slot-keyed) to one slot's entries. */
@@ -1728,8 +1735,17 @@ class RunEngine {
     let failure: StepFailed | null = null;
     let resumed: ResumeOutcome | undefined;
 
+    // ADR-0020 Decision 5: both transports pass through the same seam, so the
+    // watchdogs wrap here. A trip aborts THIS invocation (never the run) and
+    // surfaces as a synthetic step.failed whose class carries the treatment.
+    const stream = withInactivityWatchdog(binding.executor.executeStep(request, ctx), {
+      idleMs: this.deps.watchdog?.idleMs ?? envMinutes("AGRIPPA_STEP_IDLE_MINUTES", 10),
+      semanticMs:
+        this.deps.watchdog?.semanticMs ?? envMinutes("AGRIPPA_STEP_NO_PROGRESS_MINUTES", 30),
+      onTrip: () => invocation.abort(),
+    });
     try {
-      for await (const event of binding.executor.executeStep(request, ctx)) {
+      for await (const event of stream) {
         await this.persistExecutorEvent(phase, step, row, event);
         if (event.type === "step.started" && event.resumed) {
           resumed = event.resumed;
