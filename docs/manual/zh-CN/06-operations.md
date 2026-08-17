@@ -89,6 +89,7 @@ docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env 
 | `AGRIPPA_STEP_IDLE_MINUTES` | worker | 硬空闲看门狗：执行器持续无任何事件达到该时长时，步骤以 `executor_stalled` 失败并免费重试（不消耗模板重试预算；默认 10 分钟，`0` 关闭） |
 | `AGRIPPA_STEP_NO_PROGRESS_MINUTES` | worker | 语义看门狗：持续无已完成的工具调用、消息或产出物达到该时长时，步骤以 `no_progress` 失败（默认 30 分钟，`0` 关闭）。流式输出的 token 不算进展 |
 | `AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS` | worker | 平台瞬时故障（限流、守护进程离线、卡死）免费重试之间的退避时长（默认 5 秒） |
+| `AGRIPPA_RUN_QUEUED_DEADLINE_HOURS` | worker | 排队超过该时长的执行会以 `no_capable_runtime` 失败并发送通知，而不是永远等待（默认 24 小时） |
 | `AGRIPPA_SSE_KEEPALIVE_MS` | api | 执行事件流发送保活注释帧的间隔（默认 15000 毫秒）。仅当中间层回收空闲连接更快时才需要调小 |
 | `PORT` | api | 监听端口（默认 3000） |
 | `AGRIPPA_PORT` | compose | 对外发布的端口映射，可带网卡地址。反向代理之后请用 `127.0.0.1:3000`，否则明文 HTTP 的 API 会监听 `0.0.0.0` |

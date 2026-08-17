@@ -62,9 +62,11 @@ import {
   decideCheckpoint,
   finalizeRun,
   findStrandedCheckpointRuns,
+  findStuckCheckpoints,
   releaseRunLease,
   renewRunLeases,
   sweepDeadHostRuns,
+  sweepDeferredRuns,
   sweepRunLeases,
   transitionRun,
 } from "./run-lifecycle";
@@ -1645,6 +1647,58 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     // cp-1 decided too → now every approval is decided → stranded, re-enqueue
     await decideCheckpoint(db, a1?.id as string, { status: "approved" });
     expect(await findStrandedCheckpointRuns(db)).toContain(runId);
+  });
+
+  it("findStuckCheckpoints selects only checkpoints past their own timeout plus slack", async () => {
+    const { db, runId } = await setupFixture();
+    await db.update(runs).set({ status: "waiting_approval" }).where(eq(runs.id, runId));
+    // fresh pending, inside its 60-minute timeout → not stuck
+    const [fresh] = await db
+      .insert(checkpoints)
+      .values({
+        runId,
+        checkpointId: "cp-fresh",
+        status: "pending",
+        payload: { timeoutMinutes: 60 },
+      })
+      .returning();
+    expect((await findStuckCheckpoints(db, 60_000)).map((c) => c.approvalId)).not.toContain(
+      fresh?.id,
+    );
+    // pending well past a 1-minute timeout → its expiry job was lost
+    const [stuck] = await db
+      .insert(checkpoints)
+      .values({
+        runId,
+        checkpointId: "cp-stuck",
+        status: "pending",
+        payload: { timeoutMinutes: 1 },
+        requestedAt: new Date(Date.now() - 10 * 60_000),
+      })
+      .returning();
+    const found = await findStuckCheckpoints(db, 60_000);
+    expect(found.map((c) => c.approvalId)).toContain(stuck?.id as string);
+    expect(found.find((c) => c.approvalId === stuck?.id)?.runId).toBe(runId);
+    // decided → out of the query the moment the CAS lands
+    await decideCheckpoint(db, stuck?.id as string, { status: "approved" });
+    expect((await findStuckCheckpoints(db, 60_000)).map((c) => c.approvalId)).not.toContain(
+      stuck?.id,
+    );
+  });
+
+  it("sweepDeferredRuns fails only runs queued past the deadline, typed", async () => {
+    const { db, runId } = await setupFixture();
+    expect(await sweepDeferredRuns(db)).not.toContain(runId); // freshly queued
+    await db
+      .update(runs)
+      .set({ queuedAt: new Date(Date.now() - 25 * 3_600_000) })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeferredRuns(db)).toContain(runId);
+    const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("failed");
+    expect((row?.error as { code: string } | null)?.code).toBe("no_capable_runtime");
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.some((e) => e.type === "run.failed")).toBe(true);
   });
 
   it("sweepDeadHostRuns fails only parked runs whose host is silent past grace", async () => {

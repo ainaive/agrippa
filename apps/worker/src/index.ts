@@ -27,6 +27,7 @@ import {
   enqueueAfterCommit,
   FakeScmService,
   findStrandedCheckpointRuns,
+  findStuckCheckpoints,
   fireSchedule,
   fireTrigger,
   InProcessEventBus,
@@ -35,8 +36,10 @@ import {
   reconcileScheduleCalendar,
   type ScheduleFireOutcome,
   sweepDeadHostRuns,
+  sweepDeferredRuns,
   sweepNotificationDeliveries,
   sweepOfflineRuntimes,
+  sweepOrphanedDispatches,
   sweepRunLeases,
   sweepTriggerDeliveries,
   type TriggerFireOutcome,
@@ -512,6 +515,39 @@ setInterval(async () => {
     await stage("dead-host-runs", async () => {
       for (const runId of await sweepDeadHostRuns(db)) {
         deps.logger.warn(`run ${runId}: workspace host dead past grace — failed workspace_lost`);
+        await consumer.syncNotificationsBestEffort(runId);
+      }
+    });
+
+    // a pending checkpoint whose expiry job was lost would otherwise wait
+    // forever; the re-arm fires the ordinary expiry handler, which decides by
+    // CAS on pending — racing re-arms land exactly one decision (ADR-0020)
+    await stage("stuck-checkpoints", async () => {
+      for (const { approvalId, runId } of await findStuckCheckpoints(db)) {
+        deps.logger.warn(
+          `checkpoint ${approvalId}: past its timeout with no expiry job — re-arming`,
+        );
+        await queue.enqueueApprovalExpiry({ approvalId, runId }, Date.now());
+      }
+    });
+
+    // dispatches whose run or step no longer wants them — the backstop for
+    // engines that died between insert and consumption (ADR-0020)
+    await stage("orphaned-dispatches", async () => {
+      const swept = await sweepOrphanedDispatches(db);
+      if (swept.superseded + swept.flagged + swept.failed > 0) {
+        deps.logger.warn(
+          `orphaned dispatches: ${swept.superseded} superseded, ${swept.flagged} abort-flagged, ${swept.failed} failed after grace`,
+        );
+      }
+    });
+
+    // a run nobody can execute says so within a day instead of emitting
+    // run.deferred every thirty seconds forever (ADR-0020, reversing M2's
+    // wait-forever stance for runtime-upgrade deferrals by decision)
+    await stage("deferred-runs", async () => {
+      for (const runId of await sweepDeferredRuns(db)) {
+        deps.logger.warn(`run ${runId}: queued past the deadline — failed no_capable_runtime`);
         await consumer.syncNotificationsBestEffort(runId);
       }
     });
