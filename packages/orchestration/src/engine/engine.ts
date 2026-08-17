@@ -1,5 +1,6 @@
 import {
   type CheckpointStoredResponse,
+  failureClassOf,
   INTERACTION_ARTIFACT_MAX_BYTES,
   isCredentialGatedExecutor,
   isTerminalRunStatus,
@@ -235,6 +236,18 @@ export class WorkspaceElsewhereError extends Error {
  * had a turn, short enough that a directory nobody has fails quickly.
  */
 const WORKSPACE_AFFINITY_GRACE_MS = 5 * 60_000;
+
+/**
+ * Bounded non-budget retries for platform-transient step failures (ADR-0020
+ * Decision 4): the surroundings hiccupped, so the extra attempts cost the
+ * agent nothing. The cap mirrors crash recovery's shape; when it exhausts the
+ * failure proceeds as if permanent.
+ */
+const PLATFORM_TRANSIENT_RETRY_CAP = 2;
+const platformRetryBackoffMs = (): number => {
+  const raw = Number(process.env.AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS ?? "");
+  return (Number.isFinite(raw) && raw >= 0 ? raw : 5) * 1000;
+};
 
 /** Normalize runs.model_resolution (flat legacy or slot-keyed) to one slot's entries. */
 function slotResolutionEntries(raw: Record<string, unknown>, slot: string): ModelResolutionEntry[] {
@@ -1257,8 +1270,12 @@ class RunEngine {
     // no-retry step that died mid-run still re-executes instead of silently
     // being skipped (its loop would otherwise be `for (2; 2 <= 1)`)
     const recovery = this.crashRecovery.get(this.rowKey(step.id));
-    const maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0);
+    let maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0);
     const startAttempt = (this.stepRows.get(this.rowKey(step.id))?.attempt ?? 0) + 1;
+    // ADR-0020: platform-transient failures get their own bounded retries on
+    // top of the budget — the surroundings hiccupped, and the template's
+    // retry.max is the AGENT's to spend
+    let platformRetries = 0;
 
     // conditional / requires gating
     const tailSkip = await this.followupTailSkip(phase, step);
@@ -1331,7 +1348,29 @@ class RunEngine {
         if (err instanceof StepFailed) {
           await this.failStepRow(row, err);
           if (this.abortReason) throw this.abortFailure();
-          if (attempt < maxAttempts) {
+          // The class decides whose move the retry is (ADR-0020):
+          // - platform+transient → a bounded extra attempt that costs the
+          //   agent nothing (never the template budget), with a short backoff;
+          // - agent → the template's retry budget, exactly as always;
+          // - platform-permanent and user_policy → no retry at all: the one
+          //   reproduces its refusal, the other would override a decision.
+          const reason = failureClassOf(err.errorPayload.code);
+          if (reason.class === "platform" && reason.transient) {
+            if (platformRetries < PLATFORM_TRANSIENT_RETRY_CAP) {
+              platformRetries += 1;
+              maxAttempts += 1;
+              await this.emit("step.retrying", {
+                phaseId: phase.id,
+                stepId: step.id,
+                iteration: this.currentIteration,
+                attempt,
+                transient: true,
+                error: err.errorPayload,
+              });
+              await Bun.sleep(platformRetryBackoffMs() * platformRetries);
+              continue;
+            }
+          } else if (reason.class === "agent" && attempt < maxAttempts) {
             await this.emit("step.retrying", {
               phaseId: phase.id,
               stepId: step.id,

@@ -71,6 +71,8 @@ import {
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates");
+// platform-transient retries back off in production; tests must not sleep
+process.env.AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS ??= "0";
 
 // one pool for the whole suite — a pool per fixture exhausts max_connections
 const sharedDb = createDb(TEST_DATABASE_URL);
@@ -481,6 +483,83 @@ for (const transport of TRANSPORTS) {
         // usage recorded once per attempt — no double counting
         const usageRows = await db.select().from(tokenUsage).where(eq(tokenUsage.runId, runId));
         expect(usageRows.filter((u) => u.attempt === 1).length).toBeGreaterThan(0);
+      });
+
+      it("a platform-transient failure retries without the agent's budget (ADR-0020)", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        // implement-fix declares NO retry: under the one-treatment policy a
+        // single rate limit killed the run on a budget the author never spent
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": {
+            kind: "fail",
+            code: "provider_rate_limited",
+            failuresBeforeSuccess: 1,
+          },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("succeeded");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+          [1, "failed"],
+          [2, "succeeded"],
+        ]);
+      });
+
+      it("an agent-class failure on a no-retry step stays terminal — the contrast pin", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "fail", code: "tool_error", failuresBeforeSuccess: 1 },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("tool_error");
+      });
+
+      it("a platform-permanent failure short-circuits the remaining budget", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        // run-tests carries retry.max 2 — but retrying a workspace_lost
+        // reproduces the refusal, so not one budgeted attempt is spent on it
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "run-tests": { kind: "fail", code: "workspace_lost" as never },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("workspace_lost");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "run-tests")));
+        expect(attempts.map((a) => a.status)).toEqual(["failed"]);
+      });
+
+      it("platform-transient retries are capped, then the failure stands", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "fail", code: "provider_unavailable" },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("provider_unavailable");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        // one real attempt plus the cap of two non-budget retries
+        expect(attempts.map((a) => a.status)).toEqual(["failed", "failed", "failed"]);
       });
 
       it("onFailure: continue lets the run proceed past a permanently failing step", async () => {

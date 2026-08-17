@@ -1,5 +1,11 @@
 import type { ResumeCapability } from "@agrippa/core";
-import type { ExecutionContext, Executor, ExecutorEvent, StepExecutionRequest } from "./types";
+import type {
+  ExecutionContext,
+  Executor,
+  ExecutorEvent,
+  NormalizedErrorCode,
+  StepExecutionRequest,
+} from "./types";
 
 export type FakeStepBehavior =
   | {
@@ -9,7 +15,15 @@ export type FakeStepBehavior =
       usage?: FakeUsage;
       delayMs?: number;
     }
-  | { kind: "fail"; message?: string; failuresBeforeSuccess?: number; usage?: FakeUsage }
+  | {
+      kind: "fail";
+      message?: string;
+      failuresBeforeSuccess?: number;
+      usage?: FakeUsage;
+      /** Failure code — the retry policy branches on its CLASS (ADR-0020),
+       *  so compliance tests script the exact code, not just "a failure". */
+      code?: NormalizedErrorCode;
+    }
   | { kind: "hang" } // runs until aborted — for cancellation/timeout tests
   | { kind: "crash"; usage?: FakeUsage } // throws mid-step — simulates a dying worker
   | { kind: "script"; events: ExecutorEvent[] };
@@ -163,7 +177,10 @@ export class FakeExecutor implements Executor {
         }
         yield {
           type: "step.failed",
-          error: { code: "tool_error", message: behavior.message ?? "scripted failure" },
+          error: {
+            code: behavior.code ?? "tool_error",
+            message: behavior.message ?? "scripted failure",
+          },
         };
         return;
       }
