@@ -181,6 +181,12 @@ export class RemoteExecutor implements Executor {
               and(
                 eq(dispatches.id, dispatchId),
                 inArray(dispatches.status, ["pending", "claimed"]),
+                // atomic staleness recheck on the DATABASE clock: a heartbeat
+                // landing between our stale read and this update must win —
+                // killing a live dispatch would transiently retry work the
+                // daemon is still executing (codex round 2)
+                sql`coalesce(${dispatches.lastContactAt}, ${dispatches.createdAt})
+                    < now() - ${Math.round(deadmanMs / 1000)} * interval '1 second'`,
               ),
             )
             .returning({ id: dispatches.id });

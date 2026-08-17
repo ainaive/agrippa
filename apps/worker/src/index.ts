@@ -25,6 +25,7 @@ import {
   decideCheckpoint,
   type EngineDeps,
   enqueueAfterCommit,
+  expireApproval,
   FakeScmService,
   findStrandedCheckpointRuns,
   findStuckCheckpoints,
@@ -226,28 +227,11 @@ const leaseRenewal = setInterval(() => {
 
 await queue.boss.work(QUEUE_APPROVAL_EXPIRE, async (jobs: Job<ApprovalExpirePayload>[]) => {
   for (const job of jobs) {
-    // CAS pending → expired and its timeline event commit TOGETHER: the CAS
-    // makes this job's retry a no-op, so a crash between the two would leave
-    // an expired checkpoint that event-derived notifications can never see.
-    // null means a user already decided it (or a prior run of this job did).
-    const expired = await db.transaction(async (tx) => {
-      const row = await decideCheckpoint(tx, job.data.approvalId, { status: "expired" });
-      if (!row) return null;
-      // the expiry previously left no trace until the engine resumed — one
-      // timeline event so the timeline (and notifications) can show it
-      await appendRunEvent(tx, {
-        runId: job.data.runId,
-        type: "checkpoint.expired",
-        payload: {
-          checkpointRowId: row.id,
-          checkpointId: row.checkpointId,
-          kind: row.kind,
-          iteration: row.iteration,
-          title: (row.payload as { title?: unknown }).title,
-        },
-      });
-      return row;
-    });
+    // CAS pending → expired and its timeline event commit TOGETHER, with the
+    // run locked and required to still be WAITING (a cancelled run's leftover
+    // checkpoint must not sprout an expiry on a terminal timeline). null
+    // means a user decided first, a prior job run did, or the run moved on.
+    const expired = await expireApproval(db, job.data);
     if (!expired) continue;
     deps.logger.warn(`approval ${expired.id} expired — resuming run for onTimeout handling`);
     // the onTimeout resume must never wait on delivery bookkeeping

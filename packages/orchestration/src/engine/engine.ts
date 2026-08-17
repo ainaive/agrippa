@@ -1307,13 +1307,45 @@ class RunEngine {
     // retry.max is the AGENT's to spend. Persisted transient rows re-grant
     // their extra attempts (capped) so recovery neither loses the
     // entitlement nor forgets the rows already spent against it.
-    const priorTransient = Math.min(
-      this.platformRetried.get(this.rowKey(step.id)) ?? 0,
-      PLATFORM_TRANSIENT_RETRY_CAP,
-    );
+    const priorTransientRows = this.platformRetried.get(this.rowKey(step.id)) ?? 0;
+    const priorTransient = Math.min(priorTransientRows, PLATFORM_TRANSIENT_RETRY_CAP);
     let platformRetries = priorTransient;
     let maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0) + priorTransient;
     const startAttempt = (this.stepRows.get(this.rowKey(step.id))?.attempt ?? 0) + 1;
+
+    // Recovery reconstructs the TERMINAL DECISION, not just the attempt
+    // arithmetic (codex round 2): a persisted last failure that live
+    // execution would have finalized on the spot — permanent, policy, or the
+    // transient failure past the cap — must finalize here too, never earn
+    // fresh attempts because the crash landed between the failure row and
+    // its decision. `crashed` stays the crash-recovery channel.
+    const priorRow = this.stepRows.get(this.rowKey(step.id));
+    if (priorRow?.status === "failed") {
+      const priorCode = (priorRow.error as { code?: string } | null)?.code;
+      if (priorCode !== "crashed") {
+        const priorReason = failureClassOf(priorCode);
+        const terminal =
+          priorReason.class === "user_policy" ||
+          (priorReason.class === "platform" && !priorReason.transient) ||
+          (priorReason.class === "platform" &&
+            priorReason.transient &&
+            priorTransientRows > PLATFORM_TRANSIENT_RETRY_CAP);
+        if (terminal) {
+          if (step.onFailure === "continue") {
+            await this.emit("step.continued", {
+              phaseId: phase.id,
+              stepId: step.id,
+              iteration: this.currentIteration,
+            });
+            return;
+          }
+          throw new RunFailure(
+            priorCode ?? "internal",
+            `step ${step.id}: resumed onto a failure live execution finalizes immediately`,
+          );
+        }
+      }
+    }
 
     // conditional / requires gating
     const tailSkip = await this.followupTailSkip(phase, step);

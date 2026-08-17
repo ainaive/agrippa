@@ -116,6 +116,45 @@ export async function findStrandedCheckpointRuns(db: DbOrTx): Promise<string[]> 
   return rows.map((r) => r.id);
 }
 
+/**
+ * Expire a pending approval — the expiry job's whole transaction. The run
+ * must still be WAITING and is locked FOR UPDATE first: a cancelled run's
+ * leftover pending checkpoint must never sprout an expiry event on a
+ * terminal timeline, and the row lock makes the status check and the decide
+ * atomic against a concurrent cancel (its finalize updates the same run row,
+ * so one of the two orders cleanly). Returns the decided row, or null when a
+ * user decided first, a prior job run did, or the run has moved on.
+ */
+export async function expireApproval(
+  db: Db,
+  payload: { approvalId: string; runId: string },
+): Promise<typeof checkpoints.$inferSelect | null> {
+  return await db.transaction(async (tx) => {
+    const [run] = await tx
+      .select({ status: runs.status })
+      .from(runs)
+      .where(eq(runs.id, payload.runId))
+      .for("update");
+    if (run?.status !== "waiting_approval") return null;
+    const row = await decideCheckpoint(tx, payload.approvalId, { status: "expired" });
+    if (!row) return null;
+    // the expiry previously left no trace until the engine resumed — one
+    // timeline event so the timeline (and notifications) can show it
+    await appendRunEvent(tx, {
+      runId: payload.runId,
+      type: "checkpoint.expired",
+      payload: {
+        checkpointRowId: row.id,
+        checkpointId: row.checkpointId,
+        kind: row.kind,
+        iteration: row.iteration,
+        title: (row.payload as { title?: unknown }).title,
+      },
+    });
+    return row;
+  });
+}
+
 /** Slack past a checkpoint's own timeout before its expiry job is re-armed. */
 export const STUCK_CHECKPOINT_SLACK_MS = 5 * 60_000;
 
