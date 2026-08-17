@@ -23,6 +23,7 @@ import {
   templateVersions,
   tokenUsage,
   users,
+  workerHeartbeats,
 } from "@agrippa/db";
 import {
   type Executor,
@@ -63,6 +64,7 @@ import {
   findStrandedCheckpointRuns,
   releaseRunLease,
   renewRunLeases,
+  sweepDeadHostRuns,
   sweepRunLeases,
   transitionRun,
 } from "./run-lifecycle";
@@ -1107,6 +1109,27 @@ for (const transport of TRANSPORTS) {
         expect(deps.executor.requests.filter((r) => r.stepId === "steer")).toHaveLength(0);
       });
 
+      it("a run pinned to another host's storage declines — even a crashed initial run", async () => {
+        // pg-boss's own retry of a crashed job bypasses the enqueue-side
+        // resolver, so the wrong host can still be handed a pinned run —
+        // failing it there would be a false workspace_lost while the holder
+        // is healthy (codex round 4)
+        const { db, runId, makeDeps } = await setupFixture();
+        await db
+          .update(runs)
+          .set({ workspaceHost: "host-a", status: "running", startedAt: new Date() })
+          .where(eq(runs.id, runId));
+
+        const away = { ...makeDeps(HAPPY_SCRIPT), workspaceHost: "host-b" };
+        await expect(executeRun(away, runId)).rejects.toThrow("not on this host");
+        const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect(row?.status).toBe("running"); // untouched: no claim, no false terminal
+
+        // on ITS host the pin is satisfied and the run proceeds normally
+        const home = { ...makeDeps(HAPPY_SCRIPT), workspaceHost: "host-a" };
+        expect(await executeRun(home, runId)).toBe("waiting_approval");
+      });
+
       it("a follow-up whose workspace is gone for good fails workspace_lost", async () => {
         const { db, runId, makeDeps, workspace } = await setupFixture();
         await runToSuccess(db, runId, makeDeps);
@@ -1501,6 +1524,97 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     // cp-1 decided too → now every approval is decided → stranded, re-enqueue
     await decideCheckpoint(db, a1?.id as string, { status: "approved" });
     expect(await findStrandedCheckpointRuns(db)).toContain(runId);
+  });
+
+  it("sweepDeadHostRuns fails only parked runs whose host is silent past grace", async () => {
+    const { db, runId } = await setupFixture();
+    await db
+      .update(runs)
+      .set({ workspaceHost: "host-dying", queuedAt: sql`now() - interval '10 minutes'` })
+      .where(eq(runs.id, runId));
+
+    // a live-and-ready worker advertising the host keeps the run waiting
+    await db.insert(workerHeartbeats).values({
+      containerId: "w-live",
+      workspaceHost: "host-dying",
+      consumersReadyAt: sql`now()`,
+      heartbeatAt: sql`now()`,
+    });
+    expect(await sweepDeadHostRuns(db)).not.toContain(runId);
+
+    // the host goes silent — but a freshly parked run still gets its grace
+    await db
+      .update(workerHeartbeats)
+      .set({ heartbeatAt: sql`now() - interval '10 minutes'` })
+      .where(eq(workerHeartbeats.containerId, "w-live"));
+    await db.update(runs).set({ queuedAt: sql`now()` }).where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).not.toContain(runId);
+
+    // silent host + parked past grace → the dead-pin rule, typed
+    await db
+      .update(runs)
+      .set({ queuedAt: sql`now() - interval '10 minutes'` })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).toContain(runId);
+    const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("failed");
+    expect((row?.error as { code: string } | null)?.code).toBe("workspace_lost");
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.some((e) => e.type === "run.failed")).toBe(true);
+  });
+
+  it("sweepDeadHostRuns measures the grace from the NEWEST decision", async () => {
+    const { db, runId } = await setupFixture();
+    await db
+      .update(runs)
+      .set({ workspaceHost: "host-quiet", status: "waiting_approval" })
+      .where(eq(runs.id, runId));
+    // an hour-old decision plus a seconds-old one: the run became actionable
+    // just now, so the dead-pin grace has not elapsed for it (codex round 4 —
+    // any-old-decision satisfied the first draft's EXISTS)
+    await db.insert(checkpoints).values({
+      runId,
+      checkpointId: "cp-old",
+      status: "approved",
+      decidedAt: new Date(Date.now() - 3600_000),
+    });
+    await db.insert(checkpoints).values({
+      runId,
+      checkpointId: "cp-new",
+      status: "approved",
+      decidedAt: new Date(),
+    });
+    expect(await sweepDeadHostRuns(db)).not.toContain(runId);
+
+    // once the NEWEST decision ages past the grace, the dead pin fails
+    await db
+      .update(checkpoints)
+      .set({ decidedAt: new Date(Date.now() - 600_000) })
+      .where(and(eq(checkpoints.runId, runId), eq(checkpoints.checkpointId, "cp-new")));
+    expect(await sweepDeadHostRuns(db)).toContain(runId);
+  });
+
+  it("sweepDeadHostRuns ignores unpinned runs and catches a leaseless running one", async () => {
+    const { db, runId } = await setupFixture();
+    // unpinned: not a candidate however long it queues
+    await db
+      .update(runs)
+      .set({ queuedAt: sql`now() - interval '10 minutes'` })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).not.toContain(runId);
+
+    // running with no lease on a silent host: the crash-recovery re-enqueue
+    // only the holder could ever claim
+    await db
+      .update(runs)
+      .set({
+        workspaceHost: "host-gone",
+        status: "running",
+        leaseOwner: null,
+        leaseExpiresAt: sql`now() - interval '10 minutes'`,
+      })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeadHostRuns(db)).toContain(runId);
   });
 
   it("finalizeRun lets a late cancel win over a success (atomic, no read/CAS gap)", async () => {
@@ -2015,7 +2129,7 @@ for (const transport of TRANSPORTS) {
         });
 
         const seed = await followupSeed(db, runId, base);
-        const synthetic = followupTemplate(base, seed);
+        const synthetic = followupTemplate(base, seed, { workBranch: null });
         const [steer] = synthetic.spec.phases.flatMap((p) =>
           "steps" in p ? p.steps : [],
         ) as Array<{ skills: string[] }>;
@@ -2726,6 +2840,261 @@ for (const transport of TRANSPORTS) {
         const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
         expect((run?.error as { code: string } | null)?.code).toBe("contract_violation");
         expect((run?.error as { message: string } | null)?.message).toContain("integrity digest");
+        expect(fx.scm.pushes).toHaveLength(0);
+      });
+
+      /** A follow-up row of the v2 fixture's run — the endpoint's insert shape. */
+      const v2FollowupOf = async (fx: V2Fixture, message: string): Promise<string> => {
+        const [parent] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        const [head] = await fx.db
+          .select({ number: runs.number })
+          .from(runs)
+          .where(eq(runs.taskId, parent?.taskId as string))
+          .orderBy(desc(runs.number))
+          .limit(1);
+        const [row] = await fx.db
+          .insert(runs)
+          .values({
+            ...newRunIdentity(),
+            workspaceKey: parent?.workspaceKey as string,
+            kind: "followup",
+            parentRunId: fx.runId,
+            steeringMessage: message,
+            taskId: parent?.taskId as string,
+            projectId: parent?.projectId as string,
+            number: (head?.number ?? 1) + 1,
+            templateVersionId: parent?.templateVersionId as string,
+            faberId: parent?.faberId as string,
+            executorId: parent?.executorId as string,
+            agentBindings: parent?.agentBindings ?? {},
+            paramsSnapshot: parent?.paramsSnapshot ?? {},
+            modelResolution: parent?.modelResolution ?? {},
+            resourceManifest: parent?.resourceManifest ?? { mcpServers: [], skills: [] },
+            workBranch: parent?.workBranch ?? null,
+            workspaceRef: parent?.workspaceRef ?? null,
+            createdBy: parent?.createdBy as string,
+          })
+          .returning();
+        return row?.id as string;
+      };
+
+      const publishParent = async (fx: V2Fixture) => {
+        const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+        expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("succeeded");
+        return {
+          impl: { ...impl, steer: { kind: "succeed", output: "steered" } as FakeStepBehavior },
+          rev,
+        };
+      };
+
+      it("a changed follow-up publishes through its approval-gated tail, and a chain advances twice", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+        expect(fx.scm.pushes).toHaveLength(1);
+
+        // the steer changes the workspace further — cumulative evidence
+        fx.workspace.diffOutput = `${BIG_DIFF}+one more thing\n`;
+        const f1 = await v2FollowupOf(fx, "also handle the empty-list case");
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("waiting_approval");
+        const [pending] = await fx.db
+          .select()
+          .from(checkpoints)
+          .where(and(eq(checkpoints.runId, f1), eq(checkpoints.status, "pending")));
+        // the tail's own approval, presenting the cumulative patch
+        expect(pending?.checkpointId).toBe("approve-publish");
+        await decideCheckpoint(fx.db, pending?.id as string, {
+          status: "approved",
+          decidedBy: fx.userId,
+          response: { kind: "approval", outcome: "approved" },
+        });
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("succeeded");
+        expect(fx.scm.pushes).toHaveLength(2);
+        const [f1Row] = await fx.db.select().from(runs).where(eq(runs.id, f1));
+        expect(f1Row?.publishedSha).toBe("fake-2");
+        // the PR is re-targeted, never duplicated (same head/base recovers)
+        expect(fx.scm.pullRequests).toHaveLength(1);
+
+        // the chain advances AGAIN: a second changed steer publishes on top
+        fx.workspace.diffOutput = `${BIG_DIFF}+one more thing\n+and another\n`;
+        const f2 = await v2FollowupOf(fx, "and another");
+        expect(await executeRun(fx.makeDeps(impl, rev), f2)).toBe("waiting_approval");
+        const [pending2] = await fx.db
+          .select()
+          .from(checkpoints)
+          .where(and(eq(checkpoints.runId, f2), eq(checkpoints.status, "pending")));
+        await decideCheckpoint(fx.db, pending2?.id as string, {
+          status: "approved",
+          decidedBy: fx.userId,
+          response: { kind: "approval", outcome: "approved" },
+        });
+        expect(await executeRun(fx.makeDeps(impl, rev), f2)).toBe("succeeded");
+        const [f2Row] = await fx.db.select().from(runs).where(eq(runs.id, f2));
+        expect(f2Row?.publishedSha).toBe("fake-3");
+      });
+
+      it("approval carry-forward binds to the EXACT bytes a publish checkpoint approved", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+
+        // Publication is NOT approval: the parent's bytes rode out through a
+        // skipped gate (outcome pass auto-publishes), so the FIRST unchanged
+        // steer must still present its checkpoint — codex round 4 caught the
+        // first draft treating every published run's artifacts as approved.
+        const f1 = await v2FollowupOf(fx, "just answer a question about it");
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("waiting_approval");
+        const [pending] = await fx.db
+          .select()
+          .from(checkpoints)
+          .where(and(eq(checkpoints.runId, f1), eq(checkpoints.status, "pending")));
+        expect(pending?.checkpointId).toBe("approve-publish");
+        // the presented digest is recorded ON the checkpoint — the record a
+        // later identical steer proves its carry-forward against
+        expect((pending?.payload as { patchSha256?: string })?.patchSha256).toMatch(
+          /^[0-9a-f]{64}$/,
+        );
+        await decideCheckpoint(fx.db, pending?.id as string, {
+          status: "approved",
+          decidedBy: fx.userId,
+          response: { kind: "approval", outcome: "approved" },
+        });
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("succeeded");
+
+        // NOW the bytes carry a real approval: a second identical steer
+        // completes in one leg, checkpoint skipped, idempotent push still run
+        const f2 = await v2FollowupOf(fx, "one more question");
+        expect(await executeRun(fx.makeDeps(impl, rev), f2)).toBe("succeeded");
+        const steps = await fx.db
+          .select()
+          .from(runSteps)
+          .where(eq(runSteps.runId, f2))
+          .orderBy(asc(runSteps.seq));
+        const byId = new Map(steps.map((s) => [s.stepId, s.status]));
+        expect(byId.get("approve-publish")).toBe("skipped");
+        expect(byId.get("push")).toBe("succeeded");
+        expect(
+          await fx.db.select().from(checkpoints).where(eq(checkpoints.runId, f2)),
+        ).toHaveLength(0);
+      });
+
+      it("the tail guard reads the run's newest patch row, never a stale attempt's", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+
+        // a retried steer plain-INSERTS a second patch row with the same key
+        // and the same iteration; ordering by iteration alone ties and lets
+        // Postgres hand publication a stale attempt's digest. The stale row
+        // here carries the empty digest — picked, it would skip the whole
+        // tail and publish nothing.
+        const f1 = await v2FollowupOf(fx, "just answer a question about it");
+        await fx.db.insert(artifacts).values({
+          runId: f1,
+          artifactKey: "changes",
+          iteration: 1,
+          kind: "patch",
+          name: "changes",
+          inline: "",
+          sha256: new Bun.CryptoHasher("sha256").update("").digest("hex"),
+          createdAt: new Date(Date.now() - 3600_000),
+        });
+        // the NEWEST row (the steer's real patch) decided: the tail RUNS and
+        // pauses at its approval — the stale empty digest would have skipped
+        // the whole tail and reported success without ever presenting one
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("waiting_approval");
+        const [pending] = await fx.db
+          .select()
+          .from(checkpoints)
+          .where(and(eq(checkpoints.runId, f1), eq(checkpoints.status, "pending")));
+        expect(pending?.checkpointId).toBe("approve-publish");
+      });
+
+      it("a follow-up recovers the ancestor's failed PR with the chain's full story", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+        // the publish leg pushes, then PR creation dies for good — the run
+        // fails AFTER recording its publication (exactly one attempt: the
+        // fixture's open-pr declares no retry)
+        fx.scm.failNext = { pr: 1 };
+        expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
+        const [parent] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        expect(parent?.publishedSha).toBe("fake-1");
+        expect(fx.scm.pullRequests).toHaveLength(0);
+
+        // an unchanged steer completes the delivery: approval, idempotent
+        // push, and a recovery PR carrying the ANCESTOR's accepted findings —
+        // its gate rows live on the ancestor run, and the body interpolates
+        // from the chain's context, not the follow-up's empty one
+        const script = {
+          ...impl,
+          steer: { kind: "succeed", output: "steered" } as FakeStepBehavior,
+        };
+        const f1 = await v2FollowupOf(fx, "please finish the delivery");
+        expect(await executeRun(fx.makeDeps(script, rev), f1)).toBe("waiting_approval");
+        const [pending] = await fx.db
+          .select()
+          .from(checkpoints)
+          .where(and(eq(checkpoints.runId, f1), eq(checkpoints.status, "pending")));
+        await decideCheckpoint(fx.db, pending?.id as string, {
+          status: "approved",
+          decidedBy: fx.userId,
+          response: { kind: "approval", outcome: "approved" },
+        });
+        expect(await executeRun(fx.makeDeps(script, rev), f1)).toBe("succeeded");
+        expect(fx.scm.pullRequests).toHaveLength(1);
+        const pr = fx.scm.pullRequests[0]?.spec;
+        expect(pr?.body).toContain("Delivered:");
+        expect(pr?.body).toContain("## Accepted review findings");
+        expect(pr?.body).toContain("Unhandled null");
+      });
+
+      it("a steer that changed nothing to publish skips the tail entirely", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await publishParent(fx);
+        const pushesBefore = fx.scm.pushes.length;
+
+        fx.workspace.diffOutput = "";
+        const f1 = await v2FollowupOf(fx, "what did you change and why?");
+        expect(await executeRun(fx.makeDeps(impl, rev), f1)).toBe("succeeded");
+        const steps = await fx.db
+          .select()
+          .from(runSteps)
+          .where(eq(runSteps.runId, f1))
+          .orderBy(asc(runSteps.seq));
+        const byId = new Map(steps.map((s) => [s.stepId, s.status]));
+        expect(byId.get("steer")).toBe("succeeded");
+        expect(byId.get("approve-publish")).toBe("skipped");
+        expect(byId.get("push")).toBe("skipped");
+        expect(fx.scm.pushes).toHaveLength(pushesBefore);
+        const [f1Row] = await fx.db.select().from(runs).where(eq(runs.id, f1));
+        expect(f1Row?.publishedSha).toBeNull();
+      });
+
+      it("records the chain's publication and stamps the commit on the timeline", async () => {
+        // ADR-0019: published_sha is the chain's expected-tip record — the
+        // next follow-up's publish parents on it; the branch.pushed event
+        // carries the commit so the timeline names what actually landed
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+        expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("succeeded");
+
+        const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        expect(run?.publishedSha).toBe("fake-1");
+        const events = await fx.db.select().from(runEvents).where(eq(runEvents.runId, fx.runId));
+        const pushed = events.find((e) => e.type === "branch.pushed");
+        expect((pushed?.payload as { commitSha?: string } | null)?.commitSha).toBe("fake-1");
+      });
+
+      it("a lost expected-tip CAS fails the run publish_conflict, with no record", async () => {
+        const fx = await setupV2Fixture();
+        const { impl, rev } = await walkBigPatchToDecidedGate(fx);
+        fx.scm.tipConflictNext = "1111111111111111111111111111111111111111";
+
+        expect(await executeRun(fx.makeDeps(impl, rev), fx.runId)).toBe("failed");
+        const [run] = await fx.db.select().from(runs).where(eq(runs.id, fx.runId));
+        const error = run?.error as { code: string; message: string } | null;
+        expect(error?.code).toBe("publish_conflict");
+        expect(error?.message).toContain("refusing to overwrite");
+        // nothing landed, nothing recorded: the chain's E is unchanged
+        expect(run?.publishedSha).toBeNull();
         expect(fx.scm.pushes).toHaveLength(0);
       });
 

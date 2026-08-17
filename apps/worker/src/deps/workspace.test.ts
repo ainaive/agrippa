@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { appendFile, chmod, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runExecuteQueueName, runHostQueueName } from "@agrippa/core";
 import {
   createDb,
   encryptSecret,
@@ -20,7 +21,7 @@ import {
   taskTypes,
   users,
 } from "@agrippa/db";
-import { seedBuiltinTemplates } from "@agrippa/orchestration";
+import { dbRunQueueResolver, seedBuiltinTemplates } from "@agrippa/orchestration";
 import { eq, sql } from "drizzle-orm";
 
 // WORKSPACE_ROOT is read at module load — point it at a scratch dir BEFORE
@@ -252,6 +253,39 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     expect(await hostOf(pinnedRunId)).toBeNull();
   });
 
+  it("dbRunQueueResolver: a host pin routes to the host queue; a runtime pin never does", async () => {
+    const resolve = dbRunQueueResolver(db);
+
+    const hostPinned = await newRunRow();
+    await db.update(runs).set({ workspaceHost: "host-q" }).where(eq(runs.id, hostPinned));
+    expect(await resolve(hostPinned)).toBe(runHostQueueName("host-q"));
+
+    const plain = await newRunRow();
+    expect(await resolve(plain)).toBe(runExecuteQueueName(["fake"]));
+
+    // a daemon-pinned run's affinity IS its runtime pin — it routes by
+    // executor set even if a workspace host somehow got stamped
+    const [runtime] = await db
+      .insert(runtimes)
+      .values({
+        orgId,
+        name: "route-guard",
+        tokenHash: "h",
+        tokenPrefix: `agrd_${Bun.randomUUIDv7().slice(-7)}`,
+        executors: [],
+        createdBy: userId,
+      })
+      .returning({ id: runtimes.id });
+    const daemonPinned = await newRunRow();
+    await db
+      .update(runs)
+      .set({ runtimeId: runtime?.id as string, workspaceHost: "host-q" })
+      .where(eq(runs.id, daemonPinned));
+    expect(await resolve(daemonPinned)).toBe(runExecuteQueueName(["fake"]));
+
+    expect(await resolve(Bun.randomUUIDv7())).toBeNull();
+  });
+
   it("records the clone base and keeps sanitization out of the diff", async () => {
     const dir = workspaceDirFor(workspaceKey);
     const base = await platformBaseSha(workspaceKey);
@@ -345,6 +379,82 @@ describe.skipIf(!dbUp)("GitWorkspaceManager + GitScmService (real git)", () => {
     );
     // the diff still reports against the clone base after branching
     expect(await workspace.diff(runId)).toContain("committed line");
+  });
+
+  it("a follow-up publish advances the chain tip; a human advance conflicts typed (ADR-0019)", async () => {
+    const branch = publishBranch;
+    const dir = workspaceDirFor(workspaceKey);
+    // the ancestor's publication record, as the engine's git.push handler writes it
+    const tip1 = (await git(["rev-parse", branch], sourceDir)).trim();
+    await db.update(runs).set({ publishedSha: tip1 }).where(eq(runs.id, runId));
+
+    const followupRow = async (): Promise<string> => {
+      runNumber += 1;
+      const [row] = await db
+        .insert(runs)
+        .values({
+          ...newRunIdentity(),
+          workspaceKey, // the CHAIN's directory, inherited like the API does
+          kind: "followup",
+          parentRunId: runId,
+          taskId,
+          projectId,
+          number: runNumber,
+          templateVersionId,
+          faberId,
+          executorId: "fake",
+          paramsSnapshot: {},
+          modelResolution: {},
+          createdBy: userId,
+        })
+        .returning();
+      return row?.id as string;
+    };
+
+    // the steer adds one more thing; evidence stays cumulative against the base
+    const followupId = await followupRow();
+    await Bun.write(path.join(dir, "steer-addition.txt"), "asked for one more thing\n");
+    const approved = await workspace.diff(followupId);
+    const advanced = await scm.push(followupId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: approved,
+    });
+    if (advanced.status !== "pushed") throw new Error(`expected pushed, got ${advanced.status}`);
+    // exactly one new commit, parented on what the chain last published
+    expect((await git(["rev-parse", `${branch}^`], sourceDir)).trim()).toBe(tip1);
+    expect((await git(["rev-list", "--count", `main..${branch}`], sourceDir)).trim()).toBe("2");
+    // cumulative: the ancestor's work rides along with the steer's
+    const show = (spec: string) =>
+      Bun.spawnSync(["git", "show", spec], { cwd: sourceDir, stdout: "pipe", stderr: "pipe" });
+    expect(show(`${branch}:left-uncommitted.txt`).exitCode).toBe(0);
+    expect(show(`${branch}:steer-addition.txt`).exitCode).toBe(0);
+    await db.update(runs).set({ publishedSha: advanced.commitSha }).where(eq(runs.id, followupId));
+
+    // a human advances the branch; the next steer's publish must refuse typed
+    const human = (
+      await gitIn(sourceDir, [
+        "commit-tree",
+        `${advanced.commitSha}^{tree}`,
+        "-p",
+        advanced.commitSha,
+        "-m",
+        "human touch-up",
+      ])
+    ).trim();
+    await git(["update-ref", `refs/heads/${branch}`, human], sourceDir);
+
+    const conflictedId = await followupRow();
+    await Bun.write(path.join(dir, "another-steer.txt"), "and one more\n");
+    const conflicted = await scm.push(conflictedId, {
+      projectId,
+      repo: { repoConnectionId },
+      branch,
+      expectedPatch: await workspace.diff(conflictedId),
+    });
+    expect(conflicted).toEqual({ status: "tip_conflict", observedTip: human });
+    expect((await git(["rev-parse", branch], sourceDir)).trim()).toBe(human);
   });
 
   it("refuses to publish a run with no commits and no changes", async () => {

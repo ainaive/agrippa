@@ -141,7 +141,13 @@ export type PushSpec = {
   expectedPatch?: string;
 };
 
-export type PushResult = { status: "pushed"; commitSha: string } | { status: "evidence_mismatch" };
+export type PushResult =
+  | { status: "pushed"; commitSha: string }
+  | { status: "evidence_mismatch" }
+  /** The expected-tip CAS lost (ADR-0019): the observed branch tip is neither
+   *  the deterministic commit nor what this chain last published. The remote
+   *  was not touched; the engine fails the run typed (`publish_conflict`). */
+  | { status: "tip_conflict"; observedTip: string | null };
 
 /**
  * Platform-side git write-path (ADR-0011): branch creation before the
@@ -178,6 +184,14 @@ export type EngineDeps = {
    * renewal is unavailable.
    */
   lease?: { owner: string; ttlMs?: number };
+  /**
+   * This worker's workspace-storage identity (ADR-0018 amendment — the
+   * per-host queue). A central run pinned to another host's storage is
+   * declined before the claim: pg-boss's own retry of a crashed job bypasses
+   * the enqueue-side resolver, so the pin must also hold here. Absent (tests,
+   * daemons via RemoteExecutor deps), the guard is off.
+   */
+  workspaceHost?: string | null;
 };
 
 export type RunOutcome =

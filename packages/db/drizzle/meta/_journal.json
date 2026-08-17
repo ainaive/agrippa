@@ -239,6 +239,13 @@
       "when": 1786842827801,
       "tag": "0033_workspace_host",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1786847414942,
+      "tag": "0034_published_sha",
+      "breakpoints": true
     }
   ]
 }

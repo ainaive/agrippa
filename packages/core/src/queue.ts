@@ -14,6 +14,20 @@ export const QUEUE_SCHEDULE_FIRE = "schedule.fire";
 export const QUEUE_TRIGGER_FIRE = "trigger.fire";
 
 export const RUN_EXECUTE_QUEUE_PREFIX = "run.execute.";
+export const RUN_HOST_QUEUE_PREFIX = "run.host.";
+
+/**
+ * Queue for runs pinned to a workspace host (the per-host queue, ADR-0018
+ * amendment): central runs whose `workspace_host` is stamped route here, and
+ * only workers advertising that storage identity poll it — the chain lands on
+ * the host that holds its directory instead of bouncing off claim-time
+ * declines. Cleanly disjoint from the executor-set family; names are only
+ * ever generated, never parsed back.
+ */
+export function runHostQueueName(hostId: string): string {
+  if (!hostId) throw new Error("runHostQueueName: empty host id");
+  return RUN_HOST_QUEUE_PREFIX + hostId;
+}
 
 /**
  * Queue name for a run's required executor set: `run.execute.` plus the

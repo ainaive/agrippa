@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { runExecuteQueueName, runExecuteSubsetQueues } from "@agrippa/core";
+import { runExecuteQueueName, runExecuteSubsetQueues, runHostQueueName } from "@agrippa/core";
 import { createDb } from "@agrippa/db";
 import { type BossQueue, createRunQueue } from "@agrippa/orchestration";
 import { sql } from "drizzle-orm";
@@ -60,9 +60,17 @@ describe.skipIf(!dbUp)("executor-set queue routing + fetch loop", () => {
     await queue?.stop();
   });
 
+  // name-level routes (host queues) win over executor-id derivation — the
+  // same precedence dbRunQueueResolver gives a stamped workspace_host
+  const routes = new Map<string, string>();
   const setup = async (): Promise<BossQueue> => {
     queue ??= await createRunQueue(TEST_DATABASE_URL, {
-      resolveRunExecutors: async (runId) => resolvers.get(runId) ?? [],
+      resolveRunQueue: async (runId) => {
+        const named = routes.get(runId);
+        if (named) return named;
+        const ids = resolvers.get(runId);
+        return ids && ids.length > 0 ? runExecuteQueueName(ids) : null;
+      },
     });
     return queue;
   };
@@ -81,7 +89,7 @@ describe.skipIf(!dbUp)("executor-set queue routing + fetch loop", () => {
     const runId = Bun.randomUUIDv7(); // no resolver entry → []
     // post-M2-flush nothing consumes `run.execute` — parking the job there
     // would strand it silently, so the enqueue must throw instead
-    await expect(q.enqueueRun(runId)).rejects.toThrow(/cannot derive an executor set/);
+    await expect(q.enqueueRun(runId)).rejects.toThrow(/cannot derive a queue/);
     expect(await jobRow(runId)).toBeUndefined();
   });
 
@@ -128,6 +136,51 @@ describe.skipIf(!dbUp)("executor-set queue routing + fetch loop", () => {
     const deliveries =
       seenByA.filter((id) => id === needsA).length + seenByB.filter((id) => id === needsA).length;
     expect(deliveries).toBe(1);
+  });
+
+  it("a host-pinned run lands only on the worker mounting that storage", async () => {
+    // the two-root fleet, at the fetch level (ADR-0018 amendment): the holder
+    // polls its own run.host.<id> queue; a peer with the SAME executor set
+    // does not, so it can never fetch a chain whose directory it lacks
+    const q = await setup();
+    const execH = `exec-h-${suite}`;
+    const hostQueue = runHostQueueName(`host-fleet-${suite}`);
+    for (const name of [...runExecuteSubsetQueues([execH]), hostQueue]) {
+      await q.boss.createQueue(name);
+    }
+    const seenByHolder: string[] = [];
+    const seenByPeer: string[] = [];
+    loops.push(
+      startRunFetchLoop({
+        boss: q.boss,
+        queues: [...runExecuteSubsetQueues([execH]), hostQueue],
+        slots: 2,
+        handler: async (job) => void seenByHolder.push(job.data.runId),
+        logger: noopLogger,
+        tickMs: 100,
+      }),
+      startRunFetchLoop({
+        boss: q.boss,
+        queues: runExecuteSubsetQueues([execH]),
+        slots: 2,
+        handler: async (job) => void seenByPeer.push(job.data.runId),
+        logger: noopLogger,
+        tickMs: 100,
+      }),
+    );
+
+    const pinned = Bun.randomUUIDv7();
+    routes.set(pinned, hostQueue);
+    await q.enqueueRun(pinned);
+    await waitFor(() => seenByHolder.includes(pinned));
+    expect(seenByPeer).not.toContain(pinned);
+    await waitFor(async () => (await jobRow(pinned))?.state === "completed");
+
+    // an unpinned run of the same executor set stays fair game for either
+    const unpinned = Bun.randomUUIDv7();
+    resolvers.set(unpinned, [execH]);
+    await q.enqueueRun(unpinned);
+    await waitFor(() => seenByHolder.includes(unpinned) || seenByPeer.includes(unpinned));
   });
 
   it("updateQueues extends a live loop to a daemon-covered set queue", async () => {

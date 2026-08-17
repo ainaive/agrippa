@@ -7,6 +7,7 @@ import {
   type RunQueue,
   requiredExecutorIds,
   runExecuteQueueName,
+  runHostQueueName,
 } from "@agrippa/core";
 import { type Db, runs } from "@agrippa/db";
 import { eq } from "drizzle-orm";
@@ -45,20 +46,36 @@ export async function enqueueAfterCommit(
 }
 
 /**
- * Resolves the executor ids a run requires, so enqueueRun can derive its
- * executor-set queue name. Returning [] (unknown run) falls back to the
- * legacy queue — the job then fails visibly instead of being silently lost.
+ * Resolves a run to the queue its job belongs on — null for an unknown run
+ * (the enqueue then fails loudly instead of parking the job where nobody
+ * polls). Owning the name derivation here means every send path — submit,
+ * follow-up, straggler sweep, stranded-checkpoint sweep, lease sweeper, drain
+ * re-enqueue — routes identically with zero call-site changes.
  */
-export type RunExecutorResolver = (runId: string) => Promise<readonly string[]>;
+export type RunQueueNameResolver = (runId: string) => Promise<string | null>;
 
-/** The standard resolver: one indexed select on the run row. */
-export function dbRunExecutorResolver(db: Db): RunExecutorResolver {
+/**
+ * The standard resolver: one indexed select on the run row. A central run
+ * with a stamped workspace host routes to that host's queue (ADR-0018
+ * amendment — follow-ups AND resumes of initial runs land where the
+ * directory lives); a daemon-pinned run's affinity is its runtime pin, so it
+ * routes by executor set like any other; everything else routes by the
+ * executor-set queue family.
+ */
+export function dbRunQueueResolver(db: Db): RunQueueNameResolver {
   return async (runId) => {
     const [run] = await db
-      .select({ executorId: runs.executorId, agentBindings: runs.agentBindings })
+      .select({
+        executorId: runs.executorId,
+        agentBindings: runs.agentBindings,
+        runtimeId: runs.runtimeId,
+        workspaceHost: runs.workspaceHost,
+      })
       .from(runs)
       .where(eq(runs.id, runId));
-    return run ? requiredExecutorIds(run) : [];
+    if (!run) return null;
+    if (run.runtimeId === null && run.workspaceHost) return runHostQueueName(run.workspaceHost);
+    return runExecuteQueueName(requiredExecutorIds(run));
   };
 }
 
@@ -76,7 +93,7 @@ export function dbRunExecutorResolver(db: Db): RunExecutorResolver {
  */
 export async function createRunQueue(
   connectionString: string,
-  opts: { resolveRunExecutors: RunExecutorResolver },
+  opts: { resolveRunQueue: RunQueueNameResolver },
 ): Promise<BossQueue> {
   const boss = new PgBoss({ connectionString });
   boss.on("error", (err: Error) => console.error("[pg-boss]", err));
@@ -130,23 +147,17 @@ export async function createRunQueue(
     boss,
     stop: () => boss.stop({ graceful: true }),
     async enqueueRun(runId: string): Promise<void> {
-      const executorIds = await opts.resolveRunExecutors(runId);
-      // Post-M2-flush there is no legacy fallback queue: a run whose executor
-      // set cannot be derived has no consumer, so failing the enqueue loudly
-      // beats parking the job on a queue nobody polls.
-      if (executorIds.length === 0) {
-        throw new Error(`enqueueRun: cannot derive an executor set for run ${runId}`);
-      }
-      const name = runExecuteQueueName(executorIds);
+      // Post-M2-flush there is no legacy fallback queue: a run whose queue
+      // cannot be derived has no consumer, so failing the enqueue loudly
+      // beats parking the job where nobody polls.
+      const name = await opts.resolveRunQueue(runId);
+      if (!name) throw new Error(`enqueueRun: cannot derive a queue for run ${runId}`);
       await ensureQueue(name);
       await boss.send(name, { runId }, { singletonKey: runId, retryLimit: 2, retryDelay: 5 });
     },
     async enqueueRunAfter(runId: string, delaySeconds: number): Promise<void> {
-      const executorIds = await opts.resolveRunExecutors(runId);
-      if (executorIds.length === 0) {
-        throw new Error(`enqueueRunAfter: cannot derive an executor set for run ${runId}`);
-      }
-      const name = runExecuteQueueName(executorIds);
+      const name = await opts.resolveRunQueue(runId);
+      if (!name) throw new Error(`enqueueRunAfter: cannot derive a queue for run ${runId}`);
       await ensureQueue(name);
       await boss.sendAfter(
         name,

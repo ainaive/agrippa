@@ -2,7 +2,7 @@ import path from "node:path";
 import { createDb, migrateDb, seed } from "@agrippa/db";
 import {
   createRunQueue,
-  dbRunExecutorResolver,
+  dbRunQueueResolver,
   RedisEventBus,
   seedBuiltinTemplates,
 } from "@agrippa/orchestration";
@@ -20,7 +20,7 @@ if (process.env.AGRIPPA_MIGRATE_ON_BOOT !== "0") {
 }
 
 const queue = await createRunQueue(process.env.DATABASE_URL as string, {
-  resolveRunExecutors: dbRunExecutorResolver(db),
+  resolveRunQueue: dbRunQueueResolver(db),
 });
 const bus = process.env.REDIS_URL ? new RedisEventBus(process.env.REDIS_URL) : null;
 if (!bus) console.warn("[api] REDIS_URL not set — SSE falls back to DB polling");

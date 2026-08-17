@@ -21,7 +21,7 @@ import {
   collectExpiredWorkspaces,
   createRunQueue,
   DiskArtifactStore,
-  dbRunExecutorResolver,
+  dbRunQueueResolver,
   decideCheckpoint,
   type EngineDeps,
   enqueueAfterCommit,
@@ -34,6 +34,7 @@ import {
   RedisEventBus,
   reconcileScheduleCalendar,
   type ScheduleFireOutcome,
+  sweepDeadHostRuns,
   sweepNotificationDeliveries,
   sweepOfflineRuntimes,
   sweepRunLeases,
@@ -135,7 +136,7 @@ const bus = process.env.REDIS_URL
   ? new RedisEventBus(process.env.REDIS_URL)
   : new InProcessEventBus();
 const queue = await createRunQueue(process.env.DATABASE_URL as string, {
-  resolveRunExecutors: dbRunExecutorResolver(db),
+  resolveRunQueue: dbRunQueueResolver(db),
 });
 
 const deps: EngineDeps = {
@@ -153,6 +154,8 @@ const deps: EngineDeps = {
   },
   // execution-lease identity: claims, renewals, and releases all key on it
   lease: { owner: containerId },
+  // claim-side half of the per-host queue: a run pinned elsewhere declines
+  workspaceHost,
 };
 
 const SLOTS = Number(process.env.WORKER_SLOTS ?? 2);
@@ -185,6 +188,7 @@ async function computeRunQueues(): Promise<string[]> {
   const liveWorkers = await liveCentralWorkerSets(db);
   const list = selectRunQueues({
     localExecutorIds: Object.keys(executors),
+    ownWorkspaceHost: workspaceHost,
     centralWorkerSets: liveWorkers.map((ads) => ads.map((e) => e.id)),
     runtimeAds: liveRuntimes.map((r) => ({
       name: r.name,
@@ -502,6 +506,16 @@ setInterval(async () => {
     // runs paused on an approval that has since been decided but whose resume
     // enqueue was lost (e.g. the API/worker died between the decision and the
     // send) — re-enqueue so the decision actually takes effect
+    // the dead-pin rule made mechanical (ADR-0018 amendment): a run parked on
+    // a host queue no live-and-ready worker serves fails workspace_lost,
+    // typed, instead of waiting forever on a directory that is gone
+    await stage("dead-host-runs", async () => {
+      for (const runId of await sweepDeadHostRuns(db)) {
+        deps.logger.warn(`run ${runId}: workspace host dead past grace — failed workspace_lost`);
+        await consumer.syncNotificationsBestEffort(runId);
+      }
+    });
+
     await stage("stranded-checkpoints", async () => {
       for (const runId of await findStrandedCheckpointRuns(db)) {
         await enqueueAfterCommit(() => queue.enqueueRun(runId), `stranded ${runId}`);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { runExecuteQueueName } from "@agrippa/core";
+import { runExecuteQueueName, runHostQueueName } from "@agrippa/core";
 import { selectRunQueues } from "./run-queues";
 
 const collect = (): { warnings: string[]; logger: { warn: (m: string) => void } } => {
@@ -90,6 +90,28 @@ describe("selectRunQueues (dynamic coverage, codex round-2)", () => {
     });
     expect(names.some((n) => n.includes("exec-0"))).toBe(false);
     expect(warnings.some((w) => w.includes("skipping its queues"))).toBe(true);
+  });
+
+  it("polls its own host queue, never a peer's, and none without an identity", () => {
+    const { logger } = collect();
+    const withHost = selectRunQueues({
+      localExecutorIds: ["fake"],
+      ownWorkspaceHost: "host-a",
+      centralWorkerSets: [],
+      runtimeAds: [],
+      logger,
+    });
+    expect(withHost).toContain(runHostQueueName("host-a"));
+    // exactly one host queue — a worker never fetches a peer's pinned runs
+    expect(withHost.filter((n) => n.startsWith("run.host."))).toHaveLength(1);
+
+    const withoutHost = selectRunQueues({
+      localExecutorIds: ["fake"],
+      centralWorkerSets: [],
+      runtimeAds: [],
+      logger,
+    });
+    expect(withoutHost.some((n) => n.startsWith("run.host."))).toBe(false);
   });
 
   it("hard-caps the total queue set and logs", () => {

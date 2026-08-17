@@ -49,7 +49,8 @@ A few things worth knowing:
 - **Several messages in a row become one run.** Send two thoughts in quick succession and they are delivered together rather than starting two runs. Once the follow-up begins, the next message becomes the next follow-up.
 - **Your message is always on the timeline**, immediately, whether or not the run starts promptly.
 - **There is a window.** A finished run holds its workspace for a while (one hour by default; an administrator can change it). After that the workspace is collected and **Continue** disappears — submit a new task instead.
-- **Publishing stays with the original run.** A follow-up produces an updated patch and diff you can read; pushing to the branch and opening the PR remain the first run's business.
+- **A follow-up that changed the work publishes it — after you approve.** When the original flow delivers to a branch, a follow-up that modified the workspace pauses at its own approval presenting the **full updated patch** (everything delivered so far, not just this message's edits); approving pushes exactly one new commit on top of what the chain last published and re-targets the same PR. A follow-up that only answered a question publishes nothing, and a patch identical to one you already approved is not re-asked.
+- **A branch someone pushed to by hand is never overwritten.** If the delivery branch no longer matches what the chain last published — a teammate committed to it, or it was deleted after a merge — the follow-up's publish fails with *publish conflict* and the branch is left untouched. Reconcile by pushing manually, or submit a new task from the branch's current state.
 
 ## Cancel, retry, and failures
 

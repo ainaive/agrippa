@@ -24,7 +24,7 @@ import {
   type BossQueue,
   buildParamsValidator,
   createRunQueue,
-  dbRunExecutorResolver,
+  dbRunQueueResolver,
   type EngineDeps,
   FakeResourceMaterializer,
   FakeWorkspaceManager,
@@ -179,7 +179,7 @@ describe.skipIf(!dbUp)("heterogeneous fleet routing (Phase A verify)", () => {
     defaultFaberId = taskType?.defaultFaberId as string;
 
     queue = await createRunQueue(TEST_DATABASE_URL, {
-      resolveRunExecutors: dbRunExecutorResolver(db),
+      resolveRunQueue: dbRunQueueResolver(db),
     });
 
     const workerA = createRunConsumer(db, depsFor({ fake: fakeOnA }), queue);

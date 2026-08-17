@@ -38,7 +38,7 @@ infra/docker-compose.yml
 | `ANTHROPIC_API_KEY` | Claude executor (worker only) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | Codex executor's `openai` provider (worker only); both optional — a keyless worker still registers `codex-cli` and defers runs needing env auth it lacks |
 | `WORKER_SLOTS` | run concurrency per worker (default 2) |
-| `WORKSPACE_ROOT` | workspaces volume, one directory per workspace key (default `/work/runs`) |
+| `WORKSPACE_ROOT` | workspaces volume, one directory per workspace key (default `/work/runs`); its top-level `.agrippa-host-id` **is the host identity** central runs pin to (ADR-0018 amendment) — replicas sharing the volume are one host, and recreating the volume makes a new host, after which runs pinned to the old one fail `workspace_lost` once the five-minute dead-host grace passes |
 | `AGRIPPA_WORKSPACE_RETENTION_MINUTES` | how long a released workspace stays on disk — and therefore how long a finished run can be steered, since a follow-up attaches to that directory (default `60`). `0` restores immediate collection and gives up follow-ups; a live run in the chain holds its workspace regardless |
 | `AGRIPPA_FOLLOWUP_MAX_TOKENS` | per-follow-up token bound (default `200000`, capped by the template's own `maxTokens`) |
 | `AGRIPPA_DAEMON_WORKSPACE_TTL_DAYS` | daemon-side floor for deleting workspaces it was never told about (default `30`) |

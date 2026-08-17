@@ -9,8 +9,11 @@ import { flattenPhases } from "./template-schema";
  * A follow-up does not re-enter the compiled template. Re-entry replays
  * answered checkpoints and reopens loops the run already closed, and the
  * obvious target templates end in `git.push` + `pr.open` — a steering message
- * would republish. Nor is it a new template kind: that would make every
- * template author responsible for a flow with exactly one correct shape.
+ * would republish UNGATED, behind approvals answered for different bytes. The
+ * synthetic flow instead carries its own publish tail (ADR-0019), always
+ * approval-gated on the cumulative patch. Nor is it a new template kind: that
+ * would make every template author responsible for a flow with exactly one
+ * correct shape.
  *
  * What executes is built in memory from the base template: the same agents,
  * models, resources and workspace, with a single agent step bound to the slot
@@ -21,6 +24,9 @@ import { flattenPhases } from "./template-schema";
 /** The synthetic phase and step ids, stable so the timeline and tests can name them. */
 export const FOLLOWUP_PHASE_ID = "followup";
 export const FOLLOWUP_STEER_STEP_ID = "steer";
+/** The publish tail (ADR-0019): its phase id is what the engine's guards key on. */
+export const FOLLOWUP_PUBLISH_PHASE_ID = "publish";
+export const FOLLOWUP_PUBLISH_CHECKPOINT_ID = "approve-publish";
 
 /**
  * Token bound for one follow-up. A follow-up's meter starts at zero, so the
@@ -169,14 +175,30 @@ export async function followupSeed(
 
 /**
  * The in-memory template a follow-up executes: everything the base declares
- * about *what the agent is*, and a one-step flow for what it does now.
+ * about *what the agent is*, and a one-step flow for what it does now — plus,
+ * when the base flow publishes, a publish tail of its own (ADR-0019): an
+ * approval checkpoint presenting the CUMULATIVE patch, then the base's own
+ * `git.push` and `pr.open` steps verbatim. The checkpoint is unconditional by
+ * decision — the ancestor's approval covered the ancestor's bytes, and even a
+ * base flow that auto-published does not exempt its follow-ups — while the
+ * engine's guards (keyed on the phase id, never expressible in the template
+ * language) skip the whole tail for a steer that changed nothing to publish
+ * and carry a byte-identical approval forward instead of re-asking.
  *
  * The instructions here are engine-authored and free of template syntax; the
  * operator's message is appended by the engine AFTER interpolation, so a
  * message containing `${...}` is delivered rather than evaluated (ADR-0018
  * Decision 6).
  */
-export function followupTemplate(base: CompiledTemplate, seed: FollowupSeed): CompiledTemplate {
+export function followupTemplate(
+  base: CompiledTemplate,
+  seed: FollowupSeed,
+  opts: {
+    /** The chain's delivery branch (runs.work_branch, inherited) — without
+     *  one there is nothing to advance, so no tail is appended. */
+    workBranch: string | null;
+  },
+): CompiledTemplate {
   const produces = seed.patchArtifactKey && base.spec.workspace ? [seed.patchArtifactKey] : [];
   const steer: TemplateStepV2 = {
     id: FOLLOWUP_STEER_STEP_ID,
@@ -195,6 +217,39 @@ export function followupTemplate(base: CompiledTemplate, seed: FollowupSeed): Co
     onFailure: "fail",
   };
 
+  // The tail exists only when every part of the publication story does: the
+  // base flow pushes, the base declares a workspace, the seed found a patch
+  // key to present, and the chain has a branch to advance. The base's own
+  // push/pr steps ride along verbatim — their `with` config (custom PR
+  // titles, base branch) is author intent the synthetic flow must not lose.
+  const baseSteps = flattenPhases(base.spec.phases).flatMap(({ phase }) => phase.steps);
+  const pushStep = baseSteps.find((s) => s.kind === "system" && s.action === "git.push");
+  const prStep = baseSteps.find((s) => s.kind === "system" && s.action === "pr.open");
+  const publishPhases =
+    pushStep && base.spec.workspace && seed.patchArtifactKey && opts.workBranch
+      ? [
+          {
+            id: FOLLOWUP_PUBLISH_PHASE_ID,
+            name: { en: "Publish", "zh-CN": "发布" },
+            steps: [
+              {
+                id: FOLLOWUP_PUBLISH_CHECKPOINT_ID,
+                kind: "checkpoint",
+                checkpoint: {
+                  kind: "approval",
+                  title: { en: "Approve the updated delivery", "zh-CN": "确认更新后的交付" },
+                  present: [seed.patchArtifactKey],
+                  timeout: "24h",
+                  onTimeout: "cancel",
+                },
+              } satisfies TemplateStepV2,
+              { ...pushStep, when: undefined },
+              ...(prStep ? [{ ...prStep, when: undefined }] : []),
+            ],
+          },
+        ]
+      : [];
+
   return {
     ...base,
     spec: {
@@ -205,6 +260,7 @@ export function followupTemplate(base: CompiledTemplate, seed: FollowupSeed): Co
           name: { en: "Follow-up", "zh-CN": "追加" },
           steps: [steer],
         },
+        ...publishPhases,
       ],
       // Nothing is required of a follow-up's outputs: it may only answer a
       // question. The patch key stays declared so a change to the workspace is

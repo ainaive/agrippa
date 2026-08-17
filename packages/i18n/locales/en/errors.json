@@ -58,5 +58,6 @@
   "invite_already_accepted": "This invite has already been used",
   "invite_self": "You cannot invite yourself",
   "contract_violation": "An agent output violated its contract",
-  "workspace_lost": "The run's workspace is no longer on this worker host"
+  "workspace_lost": "The run's workspace is no longer on this worker host",
+  "publish_conflict": "The delivery branch no longer matches what this chain last published — a human push wins; publish manually or submit a new task"
 }
