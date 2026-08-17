@@ -91,7 +91,7 @@ export type ExecutorEvent =
 
 The engine consumes this stream and: appends each event to `run_events` (assigning per-run `seq`), publishes it to Redis for live SSE, updates the `run_steps` projection, records `token_usage` rows, and feeds `usage` into the `UsageMeter`. Executors know nothing about persistence or transport.
 
-`NormalizedError` carries a stable `code` (`aborted` | `usage_limit_exceeded` | `timeout` | `model_error` | `tool_error` | `contract_violation` | `internal`), an en/zh-localizable message key, and provider detail for debugging.
+`NormalizedError` carries a stable `code` (`aborted` | `usage_limit_exceeded` | `timeout` | `model_error` | `tool_error` | `contract_violation` | `internal` — plus, per [ADR-0020](../adr/0020-failure-taxonomy-and-retry-policy.md), `max_turns_exceeded`, `provider_rate_limited`, `provider_unavailable`, `runtime_offline`, `executor_stalled`, `no_progress`), an en/zh-localizable message key, and provider detail for debugging. Codes are **flat strings whose class is derived** — `@agrippa/core` `failureClassOf` maps each to `{class: platform | agent | user_policy, transient}`, unknown codes conservatively to platform/non-transient — and the engine's retry policy branches on that class, so an adapter mapping a new signal must pick the code whose class carries the treatment it deserves: ambiguous provider errors stay `model_error` (agent budget) rather than risk auto-retrying a fault the agent owned.
 
 ## Claude Agent SDK Mapping
 

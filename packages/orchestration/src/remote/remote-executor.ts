@@ -186,7 +186,10 @@ export class RemoteExecutor implements Executor {
           yield {
             type: "step.failed",
             error: {
-              code: "internal",
+              // its own code (ADR-0020): a dead transport is platform-class
+              // and transient — 'internal' hid it from the retry policy and
+              // from every operator reading the error
+              code: "runtime_offline",
               message: `runtime ${this.opts.runtimeId} stopped reporting (deadman ${Math.round(deadmanMs / 1000)}s)`,
               retryable: true,
             },

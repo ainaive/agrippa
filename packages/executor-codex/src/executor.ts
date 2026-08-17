@@ -98,7 +98,13 @@ function buildPrompt(req: StepExecutionRequest): string {
   return [role, priorContextBlock(req), req.instructions, artifactBlock].join("");
 }
 
-function normalizedErrorCode(message: string): "model_error" | "tool_error" {
+function normalizedErrorCode(
+  message: string,
+): "model_error" | "tool_error" | "provider_rate_limited" | "provider_unavailable" {
+  // distinguishable provider failures are platform-transient (ADR-0020) —
+  // the engine auto-retries them without burning the template budget
+  if (/rate.?limit|too many requests|\b429\b/i.test(message)) return "provider_rate_limited";
+  if (/service unavailable|\b(?:529|503|502)\b/i.test(message)) return "provider_unavailable";
   return /sandbox|denied|permission/i.test(message) ? "tool_error" : "model_error";
 }
 

@@ -111,7 +111,17 @@ export type NormalizedErrorCode =
   | "tool_error"
   | "contract_violation"
   | "approval_rejected"
-  | "internal";
+  | "internal"
+  // ADR-0020: signals that were collapsed into the above now carry their own
+  // codes, because the engine's retry policy branches on the CLASS derived
+  // from them (@agrippa/core failure-reasons) — an exhausted agent and a
+  // rate-limited provider deserve opposite treatment
+  | "max_turns_exceeded"
+  | "provider_rate_limited"
+  | "provider_unavailable"
+  | "runtime_offline"
+  | "executor_stalled"
+  | "no_progress";
 
 export type NormalizedError = {
   code: NormalizedErrorCode;

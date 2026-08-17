@@ -660,12 +660,14 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
 
     const controller = new AbortController();
     const events: string[] = [];
+    let failedCode: string | undefined;
     const consume = (async () => {
       for await (const event of executor.executeStep(baseRequest(run.id, "step-b"), {
         signal: controller.signal,
         logger: silentLogger,
       })) {
         events.push(event.type);
+        if (event.type === "step.failed") failedCode = event.error.code;
       }
     })();
 
@@ -675,9 +677,12 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     const [d] = await db.select().from(dispatches).where(eq(dispatches.runId, run.id));
     expect(d?.abortRequested).toBe(true);
 
-    // nobody ever claims it — the deadman fails the dispatch and the stream
+    // nobody ever claims it — the deadman fails the dispatch and the stream,
+    // TYPED: a dead transport is platform-class and transient (ADR-0020),
+    // and 'internal' hid it from the retry policy and the operator alike
     await consume;
     expect(events).toEqual(["step.failed"]);
+    expect(failedCode).toBe("runtime_offline");
     const [after] = await db.select().from(dispatches).where(eq(dispatches.runId, run.id));
     expect(after?.status).toBe("failed");
   });
