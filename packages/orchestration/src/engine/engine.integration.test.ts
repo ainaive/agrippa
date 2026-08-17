@@ -1874,6 +1874,21 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
     expect(events.filter((e) => e.type === "checkpoint.expired")).toHaveLength(1);
 
+    // a COMMITTED cancel request wins even before its finalize lands: the
+    // flag commits in its own transaction, and expiry firing in that window
+    // must not mint the very event the cancel exists to prevent
+    const [midCancel] = await db
+      .insert(checkpoints)
+      .values({ runId, checkpointId: "cp-mid", status: "pending", payload: {} })
+      .returning();
+    await db.update(runs).set({ cancelRequested: true }).where(eq(runs.id, runId));
+    expect(await expireApproval(db, { approvalId: midCancel?.id as string, runId })).toBeNull();
+    const [midRow] = await db
+      .select()
+      .from(checkpoints)
+      .where(eq(checkpoints.id, midCancel?.id as string));
+    expect(midRow?.status).toBe("pending");
+
     // cancelled: a leftover pending checkpoint stays untouched — a scheduled
     // job firing after the cancel must not append to a terminal run
     const [leftover] = await db

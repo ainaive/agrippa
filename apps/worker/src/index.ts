@@ -17,12 +17,10 @@ import { createClaudeExecutor } from "@agrippa/executor-claude";
 import { createCodexExecutor, probeCodexCli } from "@agrippa/executor-codex";
 import type { Executor } from "@agrippa/executor-core";
 import {
-  appendRunEvent,
   collectExpiredWorkspaces,
   createRunQueue,
   DiskArtifactStore,
   dbRunQueueResolver,
-  decideCheckpoint,
   type EngineDeps,
   enqueueAfterCommit,
   expireApproval,

@@ -118,24 +118,35 @@ export async function findStrandedCheckpointRuns(db: DbOrTx): Promise<string[]> 
 
 /**
  * Expire a pending approval — the expiry job's whole transaction. The run
- * must still be WAITING and is locked FOR UPDATE first: a cancelled run's
+ * must still be WAITING with no committed cancel request: a cancelled run's
  * leftover pending checkpoint must never sprout an expiry event on a
- * terminal timeline, and the row lock makes the status check and the decide
- * atomic against a concurrent cancel (its finalize updates the same run row,
- * so one of the two orders cleanly). Returns the decided row, or null when a
- * user decided first, a prior job run did, or the run has moved on.
+ * terminal timeline, and a cancel REQUEST that has committed must win even
+ * before its finalize lands.
+ *
+ * LOCK ORDER IS LOAD-BEARING: checkpoint first, then run — the response
+ * endpoint's transaction acquires them in exactly that order (the decide's
+ * checkpoint-row UPDATE, then the event-seq runs-row UPDATE), and taking
+ * them reversed here deadlocks a concurrent human approval into a 500.
+ * Returns the decided row, or null when a user decided first, a prior job
+ * run did, or the run has moved on.
  */
 export async function expireApproval(
   db: Db,
   payload: { approvalId: string; runId: string },
 ): Promise<typeof checkpoints.$inferSelect | null> {
   return await db.transaction(async (tx) => {
+    const [cp] = await tx
+      .select({ id: checkpoints.id, status: checkpoints.status })
+      .from(checkpoints)
+      .where(and(eq(checkpoints.id, payload.approvalId), eq(checkpoints.runId, payload.runId)))
+      .for("update");
+    if (!cp || cp.status !== "pending") return null;
     const [run] = await tx
-      .select({ status: runs.status })
+      .select({ status: runs.status, cancelRequested: runs.cancelRequested })
       .from(runs)
       .where(eq(runs.id, payload.runId))
       .for("update");
-    if (run?.status !== "waiting_approval") return null;
+    if (run?.status !== "waiting_approval" || run.cancelRequested) return null;
     const row = await decideCheckpoint(tx, payload.approvalId, { status: "expired" });
     if (!row) return null;
     // the expiry previously left no trace until the engine resumed — one

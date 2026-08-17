@@ -185,8 +185,11 @@ export class RemoteExecutor implements Executor {
                 // landing between our stale read and this update must win —
                 // killing a live dispatch would transiently retry work the
                 // daemon is still executing (codex round 2)
+                // exact milliseconds: rounding to seconds turned sub-second
+                // test deadmans into a zero cutoff, making the recheck a
+                // no-op exactly where it is exercised (codex round 3)
                 sql`coalesce(${dispatches.lastContactAt}, ${dispatches.createdAt})
-                    < now() - ${Math.round(deadmanMs / 1000)} * interval '1 second'`,
+                    < now() - ${deadmanMs} * interval '1 millisecond'`,
               ),
             )
             .returning({ id: dispatches.id });
