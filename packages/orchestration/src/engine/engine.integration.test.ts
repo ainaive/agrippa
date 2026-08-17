@@ -487,6 +487,65 @@ for (const transport of TRANSPORTS) {
         expect(usageRows.filter((u) => u.attempt === 1).length).toBeGreaterThan(0);
       });
 
+      it("the stable channel is byte-identical across runs; volatility rides the step prompt", async () => {
+        // The prompt-cache discipline (ADR-0020 / m2-plan craft): everything
+        // an executor's cache could key on — system prompt, model, resources,
+        // limits, contracts, instructions — must be byte-identical for two
+        // runs of the same template version and params. Volatile facts (run
+        // id, workspace path, prior context, sessions) belong to their own
+        // request fields, never interpolated into the stable ones. This test
+        // is the regression net for any future "write a brief into the
+        // workspace" or "stamp a date into instructions" change.
+        const runOnce = async () => {
+          const { db, runId, makeDeps } = await setupFixture();
+          const deps = makeDeps(HAPPY_SCRIPT);
+          await executeRun(deps, runId);
+          await approve(db, runId);
+          expect(await executeRun(deps, runId)).toBe("succeeded");
+          return deps.executor.requests;
+        };
+        const first = await runOnce();
+        const second = await runOnce();
+        expect(second.length).toBe(first.length);
+        for (let i = 0; i < first.length; i++) {
+          const a = first[i] as (typeof first)[number];
+          const b = second[i] as (typeof first)[number];
+          expect(b.stepId).toBe(a.stepId);
+          expect(b.systemPrompt).toBe(a.systemPrompt);
+          expect(b.instructions).toBe(a.instructions);
+          // modelId is a registry-row identity, not part of the executor's
+          // cache key — provider + providerModelId are what reach the wire
+          expect({ provider: b.model.provider, id: b.model.providerModelId }).toEqual({
+            provider: a.model.provider,
+            id: a.model.providerModelId,
+          });
+          // registry-row uuids differ per database and workspace paths per
+          // run; the cache-relevant bytes — names, prompts, provider model
+          // ids, and the WORKSPACE-RELATIVE layout — must not
+          const stable = (v: unknown, dir: string): unknown =>
+            JSON.parse(
+              JSON.stringify(v, (key, value) => (key === "modelId" ? undefined : value))
+                .split(dir)
+                .join("<ws>"),
+            );
+          expect(stable(b.subagents, b.workspaceDir)).toEqual(stable(a.subagents, a.workspaceDir));
+          expect(stable(b.skills, b.workspaceDir)).toEqual(stable(a.skills, a.workspaceDir));
+          expect(stable(b.mcpServers, b.workspaceDir)).toEqual(
+            stable(a.mcpServers, a.workspaceDir),
+          );
+          expect(b.limits).toEqual(a.limits);
+          expect(b.expectedArtifacts).toEqual(a.expectedArtifacts);
+          expect(b.toolPolicy.access).toBe(a.toolPolicy.access);
+          // the volatile channel is exactly these, and nothing else (on the
+          // remote transport workspaceDir is the symbolic placeholder the
+          // daemon substitutes, identical by design):
+          expect(b.runId).not.toBe(a.runId);
+          if (a.workspaceDir !== "${workspaceDir}") {
+            expect(b.workspaceDir).not.toBe(a.workspaceDir);
+          }
+        }
+      });
+
       it("a platform-transient failure retries without the agent's budget (ADR-0020)", async () => {
         const { db, runId, makeDeps } = await setupFixture();
         // implement-fix declares NO retry: under the one-treatment policy a
