@@ -28,7 +28,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { EngineDeps } from "../engine/deps";
 import { FakeResourceMaterializer, silentLogger } from "../engine/fakes";
 import { seedBuiltinTemplates } from "../seed-builtins";
-import { sweepOfflineRuntimes } from "./offline";
+import { sweepOfflineRuntimes, sweepOrphanedDispatches } from "./offline";
 import { remoteEngineDeps } from "./remote-deps";
 import { RemoteExecutor } from "./remote-executor";
 import { RemoteWorkspaceManager } from "./remote-workspace";
@@ -660,12 +660,14 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
 
     const controller = new AbortController();
     const events: string[] = [];
+    let failedCode: string | undefined;
     const consume = (async () => {
       for await (const event of executor.executeStep(baseRequest(run.id, "step-b"), {
         signal: controller.signal,
         logger: silentLogger,
       })) {
         events.push(event.type);
+        if (event.type === "step.failed") failedCode = event.error.code;
       }
     })();
 
@@ -675,11 +677,80 @@ describe.skipIf(!dbUp)("remote routing + transport (ADR-0017)", () => {
     const [d] = await db.select().from(dispatches).where(eq(dispatches.runId, run.id));
     expect(d?.abortRequested).toBe(true);
 
-    // nobody ever claims it — the deadman fails the dispatch and the stream
+    // nobody ever claims it — the deadman fails the dispatch and the stream,
+    // TYPED: a dead transport is platform-class and transient (ADR-0020),
+    // and 'internal' hid it from the retry policy and the operator alike
     await consume;
     expect(events).toEqual(["step.failed"]);
+    expect(failedCode).toBe("runtime_offline");
     const [after] = await db.select().from(dispatches).where(eq(dispatches.runId, run.id));
     expect(after?.status).toBe("failed");
+  });
+
+  it("sweepOrphanedDispatches settles dispatches whose run or step moved on", async () => {
+    const runtimeId = await newRuntime([{ id: "claude-agent-sdk" }]);
+
+    // (a) pending dispatch of a run that finalized → superseded immediately
+    const doneRun = await newRun({ runtimeId });
+    const doneStep = await runningStepRow(doneRun.id, "s-done");
+    await db
+      .insert(dispatches)
+      .values({ runId: doneRun.id, stepRowId: doneStep, runtimeId, payload: {} });
+    await db.update(runs).set({ status: "failed" }).where(eq(runs.id, doneRun.id));
+
+    // (b) claimed dispatch of a settled step, daemon silent → flagged AND
+    // failed in one pass (the grace is about silence, and it has elapsed)
+    const staleRun = await newRun({ runtimeId });
+    const staleStep = await runningStepRow(staleRun.id, "s-stale");
+    await db.insert(dispatches).values({
+      runId: staleRun.id,
+      stepRowId: staleStep,
+      runtimeId,
+      status: "claimed",
+      payload: {},
+      lastContactAt: sql`now() - interval '10 minutes'`,
+    });
+    await db.update(runSteps).set({ status: "failed" }).where(eq(runSteps.id, staleStep));
+
+    // (c) claimed dispatch of a settled step, daemon still contacting →
+    // flagged only; the daemon gets its window to wind down
+    const freshRun = await newRun({ runtimeId });
+    const freshStep = await runningStepRow(freshRun.id, "s-fresh");
+    await db.insert(dispatches).values({
+      runId: freshRun.id,
+      stepRowId: freshStep,
+      runtimeId,
+      status: "claimed",
+      payload: {},
+      lastContactAt: sql`now()`,
+    });
+    await db.update(runSteps).set({ status: "cancelled" }).where(eq(runSteps.id, freshStep));
+
+    // (d) a LIVE dispatch — running run, running step — untouchable
+    const activeRun = await newRun({ runtimeId });
+    const activeStep = await runningStepRow(activeRun.id, "s-live");
+    await db.insert(dispatches).values({
+      runId: activeRun.id,
+      stepRowId: activeStep,
+      runtimeId,
+      status: "claimed",
+      payload: {},
+      lastContactAt: sql`now()`,
+    });
+
+    const swept = await sweepOrphanedDispatches(db, 60_000);
+    expect(swept).toEqual({ superseded: 1, flagged: 2, failed: 1 });
+
+    const byRun = async (runId: string) =>
+      (await db.select().from(dispatches).where(eq(dispatches.runId, runId)))[0];
+    expect((await byRun(doneRun.id))?.status).toBe("failed");
+    expect((await byRun(staleRun.id))?.status).toBe("failed");
+    const fresh = await byRun(freshRun.id);
+    expect(fresh?.status).toBe("claimed");
+    expect(fresh?.abortRequested).toBe(true);
+    const active = await byRun(activeRun.id);
+    expect(active?.status).toBe("claimed");
+    expect(active?.abortRequested).toBe(false);
   });
 
   it("aborts stale predecessors when a new attempt dispatches", async () => {

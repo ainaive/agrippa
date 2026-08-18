@@ -401,9 +401,11 @@ describe("claude executor event stream", () => {
       ]),
     );
     const failEvents = await collect(failing.executeStep(makeRequest(), makeCtx()));
+    // the agent's exhaustion carries its own code (ADR-0020): agent-class,
+    // budget-retried — not a provider fault
     expect(failEvents.at(-1)).toMatchObject({
       type: "step.failed",
-      error: { code: "model_error" },
+      error: { code: "max_turns_exceeded" },
     });
 
     const aborted = new AbortController();

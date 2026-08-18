@@ -98,7 +98,15 @@ function buildPrompt(req: StepExecutionRequest): string {
   return [role, priorContextBlock(req), req.instructions, artifactBlock].join("");
 }
 
-function normalizedErrorCode(message: string): "model_error" | "tool_error" {
+function normalizedErrorCode(
+  message: string,
+): "model_error" | "tool_error" | "provider_rate_limited" | "provider_unavailable" {
+  // distinguishable provider failures are platform-transient (ADR-0020) —
+  // the engine auto-retries them without burning the template budget
+  if (/rate.?limit|too many requests|\b429\b/i.test(message)) return "provider_rate_limited";
+  if (/overloaded|service unavailable|\b(?:529|503|502)\b/i.test(message)) {
+    return "provider_unavailable";
+  }
   return /sandbox|denied|permission/i.test(message) ? "tool_error" : "model_error";
 }
 
@@ -260,17 +268,17 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
             yield { type: "step.started", resumed: "rejected" };
             return;
           }
-          // the CLI died before announcing a thread (bad auth, bad flags…)
+          // the CLI died before announcing a thread (bad auth, bad flags…) —
+          // normalized like every other terminal path: a pre-start 429 is
+          // still a rate limit, and the platform allowance owns it
           ctx.logger.warn("codex died before starting a thread", { exitCode, stderr });
+          const preStartMessage =
+            collector.fatalMessage ??
+            collector.itemErrorMessage ??
+            (stderr || "codex produced no output");
           yield {
             type: "step.failed",
-            error: {
-              code: "model_error",
-              message:
-                collector.fatalMessage ??
-                collector.itemErrorMessage ??
-                (stderr || "codex produced no output"),
-            },
+            error: { code: normalizedErrorCode(preStartMessage), message: preStartMessage },
           };
           return;
         }
@@ -302,9 +310,10 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         if (ctx.signal.aborted) {
           yield { type: "step.failed", error: { code: "aborted", message: "aborted" } };
         } else {
+          const text = String(err).slice(0, 2000);
           yield {
             type: "step.failed",
-            error: { code: "model_error", message: String(err).slice(0, 2000) },
+            error: { code: normalizedErrorCode(text), message: text },
           };
         }
       } finally {

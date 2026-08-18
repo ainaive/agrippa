@@ -1,174 +1,103 @@
 {
-  "run": "执行",
-  "timeline": "时间线",
-  "attempt": "第",
-  "noSteps": "暂无步骤",
-  "noOutput": "暂无输出",
-  "noArtifacts": "暂无产出物",
-  "status": {
-    "queued": "排队中",
-    "pending": "待执行",
-    "running": "执行中",
-    "waiting_approval": "待审批",
-    "succeeded": "已成功",
-    "failed": "已失败",
-    "cancelled": "已取消",
-    "timed_out": "已超时",
-    "skipped": "已跳过"
-  },
-  "tabs": {
-    "output": "输出",
-    "activity": "活动",
-    "artifacts": "产出物",
-    "params": "参数",
-    "timeline": "时间线"
+  "actions": {
+    "cancel": "取消执行",
+    "download": "下载",
+    "retry": "重试",
+    "retryConfirm": "重试",
+    "retryTitle": "重试该任务？",
+    "retryWarning": "新的执行将从检出重新开始，并按项目当前配置绑定智能体与模型。已回答的问题与已批准的计划会再次询问。"
   },
   "activity": {
+    "approvalRequired": "等待审批",
     "empty": "暂无活动。",
-    "workspaceReady": "工作区就绪",
-    "stepStarted": "步骤开始",
+    "runDeferred": "等待具备所需智能体的工作节点",
     "stepCompleted": "步骤完成",
     "stepFailed": "步骤失败",
     "stepRetrying": "步骤重试中",
+    "stepStarted": "步骤开始",
     "subagent": "子智能体",
-    "approvalRequired": "等待审批",
-    "runDeferred": "等待具备所需智能体的工作节点"
+    "workspaceReady": "工作区就绪"
+  },
+  "approval": {
+    "approve": "批准",
+    "artifactMissing": "未产出",
+    "artifactsUnavailable": "呈现的产出物加载失败——请谨慎审阅；仍可驳回。",
+    "commentPlaceholder": "备注（可选）…",
+    "hint": "执行已在检查点暂停。请审阅产出物后批准或驳回。",
+    "loadingArtifacts": "正在加载呈现的产出物…",
+    "presented": "呈现的产出物",
+    "reject": "驳回",
+    "retryArtifacts": "重试"
+  },
+  "approvalsInbox": {
+    "description": "所有项目中等待人工处理的检查点。",
+    "empty": "当前没有等待你审批的事项。",
+    "openRun": "打开执行",
+    "review": "审阅",
+    "title": "待办审批"
   },
   "artifact": {
     "preview": "预览",
     "tooLarge": "内容过大，无法预览——请下载查看。"
   },
-  "actions": {
-    "cancel": "取消执行",
-    "retry": "重试",
-    "retryTitle": "重试该任务？",
-    "retryWarning": "新的执行将从检出重新开始，并按项目当前配置绑定智能体与模型。已回答的问题与已批准的计划会再次询问。",
-    "retryConfirm": "重试",
-    "download": "下载"
-  },
-  "approval": {
-    "hint": "执行已在检查点暂停。请审阅产出物后批准或驳回。",
-    "commentPlaceholder": "备注（可选）…",
-    "approve": "批准",
-    "reject": "驳回",
-    "presented": "呈现的产出物",
-    "loadingArtifacts": "正在加载呈现的产出物…",
-    "artifactsUnavailable": "呈现的产出物加载失败——请谨慎审阅；仍可驳回。",
-    "retryArtifacts": "重试",
-    "artifactMissing": "未产出"
-  },
-  "approvalsInbox": {
-    "title": "待办审批",
-    "empty": "当前没有等待你审批的事项。",
-    "openRun": "打开执行",
-    "review": "审阅",
-    "description": "所有项目中等待人工处理的检查点。"
-  },
-  "phases": {
-    "checkpoint": "审批检查点",
-    "notStarted": "尚未开始"
-  },
-  "steps": {
-    "attempts": "共 {{count}} 次尝试"
-  },
-  "limits": {
-    "title": "用量上限",
-    "tokens": "Token",
-    "duration": "时长",
-    "perPhase": "分阶段上限"
-  },
-  "meta": {
-    "title": "详情",
-    "template": "模板",
-    "executor": "执行器",
-    "models": "模型角色"
-  },
-  "dashboard": {
-    "openTasks": "进行中",
-    "pendingApprovals": "待办审批",
-    "tokens": "Token 用量",
-    "total": "任务总数",
-    "recent": "最近任务",
-    "newTask": "新建任务",
-    "viewAll": "查看全部",
-    "byModel": "按模型 Token 用量",
-    "noUsage": "本月尚无用量。",
-    "empty": "还没有任务——去任务目录选择一个吧。"
-  },
-  "table": {
-    "title": "标题",
-    "status": "状态",
-    "created": "创建时间",
-    "run": "执行",
-    "allStatuses": "全部状态",
-    "noMatches": "没有符合筛选条件的任务。"
-  },
-  "rounds": {
-    "label": "第 {{round}} 轮",
-    "ofMax": "第 {{round}}/{{max}} 轮"
-  },
-  "severity": {
-    "blocker": "阻断",
-    "major": "严重",
-    "minor": "轻微",
-    "info": "提示"
-  },
+  "attempt": "第",
   "checkpoint": {
+    "acceptAll": "全部接受并继续",
+    "acceptAllRecommendations": "全部采纳建议",
+    "acceptAllTitle": "接受全部评审问题？",
+    "acceptAllWarning": "将不再进行修复轮次。这些问题会被记录为已接受，并列入 PR 描述：",
+    "acceptConfirm": "接受并继续",
+    "answersMissing": "还有 {{count}} 个必答问题未回答",
+    "fixAll": "全部修复",
+    "fixSelected": "修复所选（{{count}}）",
     "hint": {
       "approval": "运行已暂停，等待你的决定。请查看材料后选择通过、要求修改或拒绝。",
       "input": "代理需要你的回答才能继续。",
       "review-gate": "评审者报告了问题。选择需要修复的项，或全部接受并继续。"
     },
-    "useRecommendation": "采纳建议：{{value}}",
-    "submitAnswers": "提交回答",
-    "acceptAllRecommendations": "全部采纳建议",
-    "answersMissing": "还有 {{count}} 个必答问题未回答",
+    "no": "否",
+    "outcome": {
+      "answered": "已回答",
+      "approved": "已通过",
+      "expired": "已超时",
+      "fix": "已要求修复",
+      "pass": "已通过",
+      "pending": "待处理",
+      "rejected": "已拒绝",
+      "request_changes": "已要求修改"
+    },
     "requestChanges": "要求修改",
     "requestChangesHint": "“要求修改”会让代理根据你的意见重新修订，请先填写意见。",
     "selectFinding": "选择问题 {{title}}",
-    "fixSelected": "修复所选（{{count}}）",
-    "fixAll": "全部修复",
-    "acceptAll": "全部接受并继续",
-    "acceptAllTitle": "接受全部评审问题？",
-    "acceptAllWarning": "将不再进行修复轮次。这些问题会被记录为已接受，并列入 PR 描述：",
-    "acceptConfirm": "接受并继续",
+    "submitAnswers": "提交回答",
     "uncheckedWaived": "修复所选后，未勾选的 {{count}} 个问题将被接受。",
-    "outcome": {
-      "approved": "已通过",
-      "rejected": "已拒绝",
-      "request_changes": "已要求修改",
-      "answered": "已回答",
-      "pass": "已通过",
-      "fix": "已要求修复",
-      "expired": "已超时",
-      "pending": "待处理"
-    },
-    "yes": "是",
-    "no": "否"
+    "useRecommendation": "采纳建议：{{value}}",
+    "yes": "是"
   },
   "comments": {
     "placeholder": "给团队写一条评论…（{{shortcut}} 发送）",
     "send": "发送"
   },
+  "dashboard": {
+    "byModel": "按模型 Token 用量",
+    "empty": "还没有任务——去任务目录选择一个吧。",
+    "newTask": "新建任务",
+    "noUsage": "本月尚无用量。",
+    "openTasks": "进行中",
+    "pendingApprovals": "待办审批",
+    "recent": "最近任务",
+    "tokens": "Token 用量",
+    "total": "任务总数",
+    "viewAll": "查看全部"
+  },
+  "failureClass.agent": "智能体",
+  "failureClass.platform": "平台",
+  "failureClass.user_policy": "策略",
   "followup": {
     "continues": "继续 #{{number}}",
-    "send": "继续执行",
     "hint": "让智能体在同一工作区继续，保留它已经掌握的全部上下文。",
-    "placeholder": "写评论，或让智能体继续…（{{shortcut}} 发送评论）"
-  },
-  "pr": {
-    "opened": "已创建 Pull Request",
-    "open": "打开 Pull Request"
-  },
-  "timelineFeed": {
-    "stepSkipped": "已跳过 {{stepId}}",
-    "reviewClean": "评审通过——没有发现问题",
-    "noQuestions": "没有待澄清的问题——继续执行",
-    "branchCreated": "已创建分支 {{branch}}",
-    "branchPushed": "已推送 {{branch}}",
-    "loopExhausted": "已达到循环上限",
-    "expand": "展开完整输出",
-    "collapse": "收起"
+    "placeholder": "写评论，或让智能体继续…（{{shortcut}} 发送评论）",
+    "send": "继续执行"
   },
   "inbox": {
     "kind": {
@@ -176,5 +105,79 @@
       "input": "回答问题",
       "review-gate": "评审结果"
     }
+  },
+  "limits": {
+    "duration": "时长",
+    "perPhase": "分阶段上限",
+    "title": "用量上限",
+    "tokens": "Token"
+  },
+  "meta": {
+    "executor": "执行器",
+    "models": "模型角色",
+    "template": "模板",
+    "title": "详情"
+  },
+  "noArtifacts": "暂无产出物",
+  "noOutput": "暂无输出",
+  "noSteps": "暂无步骤",
+  "phases": {
+    "checkpoint": "审批检查点",
+    "notStarted": "尚未开始"
+  },
+  "pr": {
+    "open": "打开 Pull Request",
+    "opened": "已创建 Pull Request"
+  },
+  "rounds": {
+    "label": "第 {{round}} 轮",
+    "ofMax": "第 {{round}}/{{max}} 轮"
+  },
+  "run": "执行",
+  "severity": {
+    "blocker": "阻断",
+    "info": "提示",
+    "major": "严重",
+    "minor": "轻微"
+  },
+  "status": {
+    "cancelled": "已取消",
+    "failed": "已失败",
+    "pending": "待执行",
+    "queued": "排队中",
+    "running": "执行中",
+    "skipped": "已跳过",
+    "succeeded": "已成功",
+    "timed_out": "已超时",
+    "waiting_approval": "待审批"
+  },
+  "steps": {
+    "attempts": "共 {{count}} 次尝试"
+  },
+  "table": {
+    "allStatuses": "全部状态",
+    "created": "创建时间",
+    "noMatches": "没有符合筛选条件的任务。",
+    "run": "执行",
+    "status": "状态",
+    "title": "标题"
+  },
+  "tabs": {
+    "activity": "活动",
+    "artifacts": "产出物",
+    "output": "输出",
+    "params": "参数",
+    "timeline": "时间线"
+  },
+  "timeline": "时间线",
+  "timelineFeed": {
+    "branchCreated": "已创建分支 {{branch}}",
+    "branchPushed": "已推送 {{branch}}",
+    "collapse": "收起",
+    "expand": "展开完整输出",
+    "loopExhausted": "已达到循环上限",
+    "noQuestions": "没有待澄清的问题——继续执行",
+    "reviewClean": "评审通过——没有发现问题",
+    "stepSkipped": "已跳过 {{stepId}}"
   }
 }

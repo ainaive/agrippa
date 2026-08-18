@@ -3,6 +3,7 @@ export * from "./daemon-protocol";
 export * from "./domain";
 export * from "./errors";
 export * from "./executors";
+export * from "./failure-reasons";
 export * from "./i18n";
 export * from "./interaction-schemas";
 export * from "./notifications";

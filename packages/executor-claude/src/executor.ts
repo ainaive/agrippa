@@ -270,7 +270,10 @@ export function createClaudeExecutor(
                 terminal = {
                   type: "step.failed",
                   error: {
-                    code: message.subtype === "error_max_turns" ? "model_error" : "internal",
+                    // max-turns is the AGENT's exhaustion, not a provider
+                    // fault — folded into model_error it drew the wrong
+                    // retry treatment (ADR-0020)
+                    code: message.subtype === "error_max_turns" ? "max_turns_exceeded" : "internal",
                     message:
                       "errors" in message && message.errors.length > 0
                         ? message.errors.join("; ")
@@ -300,9 +303,17 @@ export function createClaudeExecutor(
         if (ctx.signal.aborted) {
           yield { type: "step.failed", error: { code: "aborted", message: "aborted" } };
         } else {
+          // distinguishable provider failures get their platform-transient
+          // codes (ADR-0020); everything else stays agent-class model_error
+          const text = String(err);
+          const code = /rate.?limit|too many requests|\b429\b/i.test(text)
+            ? "provider_rate_limited"
+            : /overloaded|service unavailable|\b(?:529|503|502)\b/i.test(text)
+              ? "provider_unavailable"
+              : "model_error";
           yield {
             type: "step.failed",
-            error: { code: "model_error", message: String(err).slice(0, 2000) },
+            error: { code, message: text.slice(0, 2000) },
           };
         }
       } finally {

@@ -87,6 +87,10 @@ Documented in `infra/env/.env.example`; the full set:
 | `AGRIPPA_KEEP_WORKSPACES` | worker | `1` keeps finished run workspaces on disk for debugging |
 | `AGRIPPA_MAX_ARTIFACT_BYTES` | worker | Per-artifact size cap (default 25 MiB). A non-positive or unparseable value falls back to the default rather than lifting the cap |
 | `AGRIPPA_SCM` | worker | `fake` fabricates branch/push/PR instead of touching a real remote — for demos |
+| `AGRIPPA_STEP_IDLE_MINUTES` | worker | Hard-idle watchdog: no executor events for this long fails the step `executor_stalled` and retries it free of the template budget (default 10; `0` disables) |
+| `AGRIPPA_STEP_NO_PROGRESS_MINUTES` | worker | Semantic watchdog: no completed tool call, message or artifact for this long fails the step `no_progress` (default 30; `0` disables). Streamed tokens do not count as progress |
+| `AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS` | worker | Backoff between the free retries of platform-transient failures — rate limits, dead daemons, stalls (default 5) |
+| `AGRIPPA_RUN_QUEUED_DEADLINE_HOURS` | worker | A run still `queued` after this long fails `no_capable_runtime` with a notification instead of waiting forever (default 24) |
 | `AGRIPPA_SSE_KEEPALIVE_MS` | api | Interval between run-stream keepalive comment frames (default 15000). Lower only for an intermediary that reaps idle connections faster |
 | `PORT` | api | Listen port (default 3000) |
 | `AGRIPPA_PORT` | compose | Published port mapping. Accepts an interface — use `127.0.0.1:3000` behind a reverse proxy, or the plain-HTTP API binds `0.0.0.0` |

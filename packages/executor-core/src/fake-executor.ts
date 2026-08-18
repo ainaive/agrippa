@@ -1,5 +1,11 @@
 import type { ResumeCapability } from "@agrippa/core";
-import type { ExecutionContext, Executor, ExecutorEvent, StepExecutionRequest } from "./types";
+import type {
+  ExecutionContext,
+  Executor,
+  ExecutorEvent,
+  NormalizedErrorCode,
+  StepExecutionRequest,
+} from "./types";
 
 export type FakeStepBehavior =
   | {
@@ -9,8 +15,19 @@ export type FakeStepBehavior =
       usage?: FakeUsage;
       delayMs?: number;
     }
-  | { kind: "fail"; message?: string; failuresBeforeSuccess?: number; usage?: FakeUsage }
+  | {
+      kind: "fail";
+      message?: string;
+      failuresBeforeSuccess?: number;
+      usage?: FakeUsage;
+      /** Failure code — the retry policy branches on its CLASS (ADR-0020),
+       *  so compliance tests script the exact code, not just "a failure". */
+      code?: NormalizedErrorCode;
+    }
   | { kind: "hang" } // runs until aborted — for cancellation/timeout tests
+  // streams message.delta forever without ever completing anything — the
+  // semantic watchdog's prey (ADR-0020): plausible tokens are not progress
+  | { kind: "babble"; intervalMs?: number }
   | { kind: "crash"; usage?: FakeUsage } // throws mid-step — simulates a dying worker
   | { kind: "script"; events: ExecutorEvent[] };
 
@@ -148,6 +165,26 @@ export class FakeExecutor implements Executor {
         yield abortError();
         return;
       }
+      case "babble": {
+        while (!ctx.signal.aborted) {
+          yield { type: "message.delta", text: "…still thinking about it…" };
+          // abort-aware sleep: a large interval must not delay the aborted
+          // event past the watchdog's teardown — executors stop promptly
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, behavior.intervalMs ?? 20);
+            ctx.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
+        yield abortError();
+        return;
+      }
       case "crash": {
         if (behavior.usage) yield usageEvent(req.model.providerModelId, behavior.usage);
         throw new Error("simulated worker crash");
@@ -163,7 +200,10 @@ export class FakeExecutor implements Executor {
         }
         yield {
           type: "step.failed",
-          error: { code: "tool_error", message: behavior.message ?? "scripted failure" },
+          error: {
+            code: behavior.code ?? "tool_error",
+            message: behavior.message ?? "scripted failure",
+          },
         };
         return;
       }

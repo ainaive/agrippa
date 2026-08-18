@@ -192,6 +192,13 @@ export type EngineDeps = {
    * daemons via RemoteExecutor deps), the guard is off.
    */
   workspaceHost?: string | null;
+  /**
+   * Inactivity-watchdog windows (ADR-0020 Decision 5), overriding the env
+   * defaults (`AGRIPPA_STEP_IDLE_MINUTES` = 10, `AGRIPPA_STEP_NO_PROGRESS_MINUTES`
+   * = 30). 0 disables a watchdog. Injected so the compliance suite can use
+   * tiny windows.
+   */
+  watchdog?: { idleMs?: number; semanticMs?: number };
 };
 
 export type RunOutcome =

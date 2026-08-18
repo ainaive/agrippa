@@ -170,7 +170,7 @@ export class RemoteExecutor implements Executor {
         if (Date.now() - lastContact.getTime() > deadmanMs) {
           // kill it so a zombie daemon reviving later can't resurrect the
           // dispatch under an engine that has moved on
-          await db
+          const killed = await db
             .update(dispatches)
             .set({
               status: "failed",
@@ -181,12 +181,33 @@ export class RemoteExecutor implements Executor {
               and(
                 eq(dispatches.id, dispatchId),
                 inArray(dispatches.status, ["pending", "claimed"]),
+                // atomic staleness recheck on the DATABASE clock: a heartbeat
+                // landing between our stale read and this update must win —
+                // killing a live dispatch would transiently retry work the
+                // daemon is still executing (codex round 2)
+                // exact milliseconds: rounding to seconds turned sub-second
+                // test deadmans into a zero cutoff, making the recheck a
+                // no-op exactly where it is exercised (codex round 3)
+                sql`coalesce(${dispatches.lastContactAt}, ${dispatches.createdAt})
+                    < now() - ${deadmanMs} * interval '1 millisecond'`,
               ),
-            );
+            )
+            .returning({ id: dispatches.id });
+          if (killed.length === 0) {
+            // The CAS lost: the daemon settled the dispatch between our read
+            // and the kill. The next poll reads that terminal state and
+            // delivers its REAL result — synthesizing runtime_offline here
+            // would re-run work that may have completed, and its transient
+            // class would make the duplication automatic (codex round).
+            continue;
+          }
           yield {
             type: "step.failed",
             error: {
-              code: "internal",
+              // its own code (ADR-0020): a dead transport is platform-class
+              // and transient — 'internal' hid it from the retry policy and
+              // from every operator reading the error
+              code: "runtime_offline",
               message: `runtime ${this.opts.runtimeId} stopped reporting (deadman ${Math.round(deadmanMs / 1000)}s)`,
               retryable: true,
             },

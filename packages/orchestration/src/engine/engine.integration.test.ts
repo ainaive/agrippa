@@ -60,17 +60,22 @@ import {
   appendRunEvent,
   claimRunLease,
   decideCheckpoint,
+  expireApproval,
   finalizeRun,
   findStrandedCheckpointRuns,
+  findStuckCheckpoints,
   releaseRunLease,
   renewRunLeases,
   sweepDeadHostRuns,
+  sweepDeferredRuns,
   sweepRunLeases,
   transitionRun,
 } from "./run-lifecycle";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? "postgres://localhost:5432/agrippa_test";
 const TEMPLATES_DIR = path.resolve(import.meta.dirname, "../../../../templates");
+// platform-transient retries back off in production; tests must not sleep
+process.env.AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS ??= "0";
 
 // one pool for the whole suite — a pool per fixture exhausts max_connections
 const sharedDb = createDb(TEST_DATABASE_URL);
@@ -481,6 +486,301 @@ for (const transport of TRANSPORTS) {
         // usage recorded once per attempt — no double counting
         const usageRows = await db.select().from(tokenUsage).where(eq(tokenUsage.runId, runId));
         expect(usageRows.filter((u) => u.attempt === 1).length).toBeGreaterThan(0);
+      });
+
+      it("the stable channel is byte-identical across runs; volatility rides the step prompt", async () => {
+        // The prompt-cache discipline (ADR-0020 / m2-plan craft): the
+        // cache-stable prefix — system prompt, model, resources, limits,
+        // contracts, materialized layout — must be byte-identical across
+        // runs of a template version. Instructions are the VOLATILE channel,
+        // asserted here only as DETERMINISM: identical params and decisions
+        // must render identical instructions (no run ids or timestamps
+        // smuggled in) — a steering message or disclosure would rightly
+        // differ. Remaining volatile facts (run id, workspace path, prior
+        // context, sessions) belong to their own request fields. This test
+        // is the regression net for any future "write a brief into the
+        // workspace" or "stamp a date into instructions" change.
+        const runOnce = async () => {
+          const { db, runId, makeDeps } = await setupFixture();
+          const deps = makeDeps(HAPPY_SCRIPT);
+          await executeRun(deps, runId);
+          await approve(db, runId);
+          expect(await executeRun(deps, runId)).toBe("succeeded");
+          return deps.executor.requests;
+        };
+        const first = await runOnce();
+        const second = await runOnce();
+        expect(second.length).toBe(first.length);
+        for (let i = 0; i < first.length; i++) {
+          const a = first[i] as (typeof first)[number];
+          const b = second[i] as (typeof first)[number];
+          expect(b.stepId).toBe(a.stepId);
+          expect(b.systemPrompt).toBe(a.systemPrompt);
+          expect(b.instructions).toBe(a.instructions);
+          // modelId is a registry-row identity, not part of the executor's
+          // cache key — provider + providerModelId are what reach the wire
+          expect({ provider: b.model.provider, id: b.model.providerModelId }).toEqual({
+            provider: a.model.provider,
+            id: a.model.providerModelId,
+          });
+          // registry-row uuids differ per database and workspace paths per
+          // run; the cache-relevant bytes — names, prompts, provider model
+          // ids, and the WORKSPACE-RELATIVE layout — must not
+          const stable = (v: unknown, dir: string): unknown =>
+            JSON.parse(
+              JSON.stringify(v, (key, value) => (key === "modelId" ? undefined : value))
+                .split(dir)
+                .join("<ws>"),
+            );
+          expect(stable(b.subagents, b.workspaceDir)).toEqual(stable(a.subagents, a.workspaceDir));
+          expect(stable(b.skills, b.workspaceDir)).toEqual(stable(a.skills, a.workspaceDir));
+          expect(stable(b.mcpServers, b.workspaceDir)).toEqual(
+            stable(a.mcpServers, a.workspaceDir),
+          );
+          expect(b.limits).toEqual(a.limits);
+          expect(b.expectedArtifacts).toEqual(a.expectedArtifacts);
+          expect(b.toolPolicy.access).toBe(a.toolPolicy.access);
+          // the volatile channel is exactly these, and nothing else (on the
+          // remote transport workspaceDir is the symbolic placeholder the
+          // daemon substitutes, identical by design):
+          expect(b.runId).not.toBe(a.runId);
+          if (a.workspaceDir !== "${workspaceDir}") {
+            expect(b.workspaceDir).not.toBe(a.workspaceDir);
+          }
+        }
+      });
+
+      it("a platform-transient failure retries without the agent's budget (ADR-0020)", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        // implement-fix declares NO retry: under the one-treatment policy a
+        // single rate limit killed the run on a budget the author never spent
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": {
+            kind: "fail",
+            code: "provider_rate_limited",
+            failuresBeforeSuccess: 1,
+          },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("succeeded");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+          [1, "failed"],
+          [2, "succeeded"],
+        ]);
+      });
+
+      it("an agent-class failure on a no-retry step stays terminal — the contrast pin", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "fail", code: "tool_error", failuresBeforeSuccess: 1 },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("tool_error");
+      });
+
+      it("a platform-permanent failure short-circuits the remaining budget", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        // run-tests carries retry.max 2 — but retrying a workspace_lost
+        // reproduces the refusal, so not one budgeted attempt is spent on it
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "run-tests": { kind: "fail", code: "workspace_lost" as never },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("workspace_lost");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "run-tests")));
+        expect(attempts.map((a) => a.status)).toEqual(["failed"]);
+      });
+
+      it("platform-transient retries are capped, then the failure stands", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "fail", code: "provider_unavailable" },
+        };
+        await executeRun(makeDeps(script), runId);
+        await approve(db, runId);
+        expect(await executeRun(makeDeps(script), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("provider_unavailable");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        // one real attempt plus the cap of two non-budget retries
+        expect(attempts.map((a) => a.status)).toEqual(["failed", "failed", "failed"]);
+      });
+
+      it("a crash mid-backoff neither loses the free retry nor completes over the failure", async () => {
+        // The free retry lives only in memory during the backoff; a worker
+        // death there resumes with startAttempt PAST a maxAttempts that
+        // forgot the transient rows — and an exhausted loop falling through
+        // silently completes the phase over a failed step (codex round).
+        const { db, runId, makeDeps } = await setupFixture();
+        await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+        await approve(db, runId);
+        // as if the crashed leg had spent attempt 1 on a rate limit
+        await db.insert(runSteps).values({
+          runId,
+          phaseId: "fix",
+          stepId: "implement-fix",
+          iteration: 1,
+          attempt: 1,
+          seq: 90,
+          status: "failed",
+          error: { code: "provider_rate_limited", message: "429" },
+        });
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("succeeded");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        // the reconstructed entitlement ran attempt 2 — the row is there
+        expect(attempts.map((a) => [a.attempt, a.status]).sort()).toEqual([
+          [1, "failed"],
+          [2, "succeeded"],
+        ]);
+      });
+
+      it("a resume whose transient entitlement is already spent fails typed, never silently", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+        await approve(db, runId);
+        // one real attempt plus the full cap, all consumed by the dead leg
+        for (const attempt of [1, 2, 3]) {
+          await db.insert(runSteps).values({
+            runId,
+            phaseId: "fix",
+            stepId: "implement-fix",
+            iteration: 1,
+            attempt,
+            seq: 90 + attempt,
+            status: "failed",
+            error: { code: "provider_rate_limited", message: "429" },
+          });
+        }
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("provider_rate_limited");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts).toHaveLength(3); // no fourth attempt past the cap
+      });
+
+      it("a budgeted step resumed past the transient cap fails — the budget is not for platform faults", async () => {
+        // run-tests carries retry.max 2; live execution finalizes on the
+        // third transient failure REGARDLESS of that budget (it is the
+        // agent's, not the platform's), and recovery must reconstruct the
+        // decision, not just the attempt arithmetic (codex round 2)
+        const { db, runId, makeDeps } = await setupFixture();
+        await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+        await approve(db, runId);
+        for (const attempt of [1, 2, 3]) {
+          await db.insert(runSteps).values({
+            runId,
+            phaseId: "verify",
+            stepId: "run-tests",
+            iteration: 1,
+            attempt,
+            seq: 80 + attempt,
+            status: "failed",
+            error: { code: "provider_rate_limited", message: "429" },
+          });
+        }
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("provider_rate_limited");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "run-tests")));
+        expect(attempts).toHaveLength(3); // the budget never buys a platform fault an attempt
+      });
+
+      it("a resume onto a persisted PERMANENT failure finalizes, never retries", async () => {
+        // the crash landed between the failure row and its terminal decision;
+        // live execution short-circuits a workspace_lost on the spot
+        const { db, runId, makeDeps } = await setupFixture();
+        await executeRun(makeDeps(HAPPY_SCRIPT), runId);
+        await approve(db, runId);
+        await db.insert(runSteps).values({
+          runId,
+          phaseId: "fix",
+          stepId: "implement-fix",
+          iteration: 1,
+          attempt: 1,
+          seq: 90,
+          status: "failed",
+          error: { code: "workspace_lost", message: "gone" },
+        });
+        expect(await executeRun(makeDeps(HAPPY_SCRIPT), runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("workspace_lost");
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts).toHaveLength(1);
+      });
+
+      it("a silent executor trips the idle watchdog: executor_stalled, retried free, capped", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        // hang responds only to abort — the transport (both of them) is alive,
+        // the executor is not: precisely the gap the deadman cannot see
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "hang" },
+        };
+        await executeRun({ ...makeDeps(script), watchdog: { idleMs: 250, semanticMs: 0 } }, runId);
+        await approve(db, runId);
+        const deps = { ...makeDeps(script), watchdog: { idleMs: 250, semanticMs: 0 } };
+        expect(await executeRun(deps, runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("executor_stalled");
+        // platform-transient: one real attempt plus the free-cap of two
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts.map((a) => a.status)).toEqual(["failed", "failed", "failed"]);
+      });
+
+      it("an agent streaming tokens forever trips the semantic watchdog: no_progress", async () => {
+        const { db, runId, makeDeps } = await setupFixture();
+        const script: Record<string, FakeStepBehavior> = {
+          ...HAPPY_SCRIPT,
+          "implement-fix": { kind: "babble", intervalMs: 30 },
+        };
+        await executeRun({ ...makeDeps(script), watchdog: { idleMs: 0, semanticMs: 400 } }, runId);
+        await approve(db, runId);
+        const deps = { ...makeDeps(script), watchdog: { idleMs: 0, semanticMs: 400 } };
+        expect(await executeRun(deps, runId)).toBe("failed");
+        const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+        expect((run?.error as { code: string } | null)?.code).toBe("no_progress");
+        // agent-class: the step declares no retry, so exactly one attempt
+        const attempts = await db
+          .select()
+          .from(runSteps)
+          .where(and(eq(runSteps.runId, runId), eq(runSteps.stepId, "implement-fix")));
+        expect(attempts.map((a) => a.status)).toEqual(["failed"]);
       });
 
       it("onFailure: continue lets the run proceed past a permanently failing step", async () => {
@@ -1524,6 +1824,124 @@ describe.skipIf(!dbUp)("run-lifecycle module", () => {
     // cp-1 decided too → now every approval is decided → stranded, re-enqueue
     await decideCheckpoint(db, a1?.id as string, { status: "approved" });
     expect(await findStrandedCheckpointRuns(db)).toContain(runId);
+  });
+
+  it("findStuckCheckpoints selects only checkpoints past their own timeout plus slack", async () => {
+    const { db, runId } = await setupFixture();
+    await db.update(runs).set({ status: "waiting_approval" }).where(eq(runs.id, runId));
+    // fresh pending, inside its 60-minute timeout → not stuck
+    const [fresh] = await db
+      .insert(checkpoints)
+      .values({
+        runId,
+        checkpointId: "cp-fresh",
+        status: "pending",
+        payload: { timeoutMinutes: 60 },
+      })
+      .returning();
+    expect((await findStuckCheckpoints(db, 60_000)).map((c) => c.approvalId)).not.toContain(
+      fresh?.id,
+    );
+    // pending well past a 1-minute timeout → its expiry job was lost
+    const [stuck] = await db
+      .insert(checkpoints)
+      .values({
+        runId,
+        checkpointId: "cp-stuck",
+        status: "pending",
+        payload: { timeoutMinutes: 1 },
+        requestedAt: new Date(Date.now() - 10 * 60_000),
+      })
+      .returning();
+    const found = await findStuckCheckpoints(db, 60_000);
+    expect(found.map((c) => c.approvalId)).toContain(stuck?.id as string);
+    expect(found.find((c) => c.approvalId === stuck?.id)?.runId).toBe(runId);
+    // decided → out of the query the moment the CAS lands
+    await decideCheckpoint(db, stuck?.id as string, { status: "approved" });
+    expect((await findStuckCheckpoints(db, 60_000)).map((c) => c.approvalId)).not.toContain(
+      stuck?.id,
+    );
+  });
+
+  it("expireApproval expires only while the run still waits — never onto a terminal timeline", async () => {
+    const { db, runId } = await setupFixture();
+    await db.update(runs).set({ status: "waiting_approval" }).where(eq(runs.id, runId));
+    const [pending] = await db
+      .insert(checkpoints)
+      .values({ runId, checkpointId: "cp-exp", status: "pending", payload: { timeoutMinutes: 1 } })
+      .returning();
+
+    // waiting: the expiry decides, and the timeline says so
+    const expired = await expireApproval(db, { approvalId: pending?.id as string, runId });
+    expect(expired?.status).toBe("expired");
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.filter((e) => e.type === "checkpoint.expired")).toHaveLength(1);
+
+    // a COMMITTED cancel request wins even before its finalize lands: the
+    // flag commits in its own transaction, and expiry firing in that window
+    // must not mint the very event the cancel exists to prevent
+    const [midCancel] = await db
+      .insert(checkpoints)
+      .values({ runId, checkpointId: "cp-mid", status: "pending", payload: {} })
+      .returning();
+    await db.update(runs).set({ cancelRequested: true }).where(eq(runs.id, runId));
+    expect(await expireApproval(db, { approvalId: midCancel?.id as string, runId })).toBeNull();
+    const [midRow] = await db
+      .select()
+      .from(checkpoints)
+      .where(eq(checkpoints.id, midCancel?.id as string));
+    expect(midRow?.status).toBe("pending");
+
+    // cancelled: a leftover pending checkpoint stays untouched — a scheduled
+    // job firing after the cancel must not append to a terminal run
+    const [leftover] = await db
+      .insert(checkpoints)
+      .values({ runId, checkpointId: "cp-late", status: "pending", payload: {} })
+      .returning();
+    await db.update(runs).set({ status: "cancelled" }).where(eq(runs.id, runId));
+    expect(await expireApproval(db, { approvalId: leftover?.id as string, runId })).toBeNull();
+    const [row] = await db
+      .select()
+      .from(checkpoints)
+      .where(eq(checkpoints.id, leftover?.id as string));
+    expect(row?.status).toBe("pending");
+    const after = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(after.filter((e) => e.type === "checkpoint.expired")).toHaveLength(1);
+  });
+
+  it("findStuckCheckpoints never touches a terminal run's leftover checkpoint", async () => {
+    // cancelling a paused run leaves its checkpoint row pending — expiring
+    // it later would append a misleading event to a terminal run
+    const { db, runId } = await setupFixture();
+    await db.update(runs).set({ status: "cancelled" }).where(eq(runs.id, runId));
+    const [leftover] = await db
+      .insert(checkpoints)
+      .values({
+        runId,
+        checkpointId: "cp-leftover",
+        status: "pending",
+        payload: { timeoutMinutes: 1 },
+        requestedAt: new Date(Date.now() - 10 * 60_000),
+      })
+      .returning();
+    expect((await findStuckCheckpoints(db, 60_000)).map((c) => c.approvalId)).not.toContain(
+      leftover?.id as string,
+    );
+  });
+
+  it("sweepDeferredRuns fails only runs queued past the deadline, typed", async () => {
+    const { db, runId } = await setupFixture();
+    expect(await sweepDeferredRuns(db)).not.toContain(runId); // freshly queued
+    await db
+      .update(runs)
+      .set({ queuedAt: new Date(Date.now() - 25 * 3_600_000) })
+      .where(eq(runs.id, runId));
+    expect(await sweepDeferredRuns(db)).toContain(runId);
+    const [row] = await db.select().from(runs).where(eq(runs.id, runId));
+    expect(row?.status).toBe("failed");
+    expect((row?.error as { code: string } | null)?.code).toBe("no_capable_runtime");
+    const events = await db.select().from(runEvents).where(eq(runEvents.runId, runId));
+    expect(events.some((e) => e.type === "run.failed")).toBe(true);
   });
 
   it("sweepDeadHostRuns fails only parked runs whose host is silent past grace", async () => {

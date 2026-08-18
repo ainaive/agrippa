@@ -111,7 +111,22 @@ export type NormalizedErrorCode =
   | "tool_error"
   | "contract_violation"
   | "approval_rejected"
-  | "internal";
+  | "internal"
+  // ADR-0020: signals that were collapsed into the above now carry their own
+  // codes, because the engine's retry policy branches on the CLASS derived
+  // from them (@agrippa/core failure-reasons) — an exhausted agent and a
+  // rate-limited provider deserve opposite treatment
+  | "max_turns_exceeded"
+  | "provider_rate_limited"
+  | "provider_unavailable"
+  | "runtime_offline"
+  | "executor_stalled"
+  | "no_progress";
+// Deliberately NOT here: engine-authored codes — `crashed` (the engine
+// records a died-mid-step attempt itself), `workspace_lost`,
+// `publish_conflict`, `no_capable_runtime`, … — are run/step ROW codes an
+// executor never emits as an event. The taxonomy in @agrippa/core
+// classifies the superset; this union is only the executor contract.
 
 export type NormalizedError = {
   code: NormalizedErrorCode;

@@ -1,4 +1,4 @@
-import { isTerminalRunStatus, projectRoleAtLeast } from "@agrippa/core";
+import { failureClassOf, isTerminalRunStatus, projectRoleAtLeast } from "@agrippa/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChevronDownIcon, RotateCcwIcon, XIcon } from "lucide-react";
@@ -198,6 +198,9 @@ export function RunDetailPage() {
 
       {current.error && (
         <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          <span className="mr-2 rounded border border-destructive/40 px-1.5 py-0.5 text-xs uppercase">
+            {t(`failureClass.${failureClassOf(current.error.code).class}`)}
+          </span>
           {current.error.code}: {current.error.message}
         </p>
       )}

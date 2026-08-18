@@ -116,6 +116,133 @@ export async function findStrandedCheckpointRuns(db: DbOrTx): Promise<string[]> 
   return rows.map((r) => r.id);
 }
 
+/**
+ * Expire a pending approval — the expiry job's whole transaction. The run
+ * must still be WAITING with no committed cancel request: a cancelled run's
+ * leftover pending checkpoint must never sprout an expiry event on a
+ * terminal timeline, and a cancel REQUEST that has committed must win even
+ * before its finalize lands.
+ *
+ * LOCK ORDER IS LOAD-BEARING: checkpoint first, then run — the response
+ * endpoint's transaction acquires them in exactly that order (the decide's
+ * checkpoint-row UPDATE, then the event-seq runs-row UPDATE), and taking
+ * them reversed here deadlocks a concurrent human approval into a 500.
+ * Returns the decided row, or null when a user decided first, a prior job
+ * run did, or the run has moved on.
+ */
+export async function expireApproval(
+  db: Db,
+  payload: { approvalId: string; runId: string },
+): Promise<typeof checkpoints.$inferSelect | null> {
+  return await db.transaction(async (tx) => {
+    const [cp] = await tx
+      .select({ id: checkpoints.id, status: checkpoints.status })
+      .from(checkpoints)
+      .where(and(eq(checkpoints.id, payload.approvalId), eq(checkpoints.runId, payload.runId)))
+      .for("update");
+    if (!cp || cp.status !== "pending") return null;
+    const [run] = await tx
+      .select({ status: runs.status, cancelRequested: runs.cancelRequested })
+      .from(runs)
+      .where(eq(runs.id, payload.runId))
+      .for("update");
+    if (run?.status !== "waiting_approval" || run.cancelRequested) return null;
+    const row = await decideCheckpoint(tx, payload.approvalId, { status: "expired" });
+    if (!row) return null;
+    // the expiry previously left no trace until the engine resumed — one
+    // timeline event so the timeline (and notifications) can show it
+    await appendRunEvent(tx, {
+      runId: payload.runId,
+      type: "checkpoint.expired",
+      payload: {
+        checkpointRowId: row.id,
+        checkpointId: row.checkpointId,
+        kind: row.kind,
+        iteration: row.iteration,
+        title: (row.payload as { title?: unknown }).title,
+      },
+    });
+    return row;
+  });
+}
+
+/** Slack past a checkpoint's own timeout before its expiry job is re-armed. */
+export const STUCK_CHECKPOINT_SLACK_MS = 5 * 60_000;
+
+/**
+ * Pending checkpoints past their own timeout plus slack: the expiry job was
+ * lost (ADR-0020 Decision 6 — the arm is a single post-pause send with no
+ * backstop until this stage). The caller re-arms `enqueueApprovalExpiry` due
+ * immediately; the expiry handler decides the checkpoint by CAS on `pending`,
+ * so however many re-arms race, exactly one decision lands and the checkpoint
+ * leaves this query's result the moment it does.
+ */
+export async function findStuckCheckpoints(
+  db: DbOrTx,
+  slackMs: number = STUCK_CHECKPOINT_SLACK_MS,
+): Promise<Array<{ approvalId: string; runId: string }>> {
+  const rows = (await db.execute(sql`
+    select id, run_id from ${checkpoints}
+    where ${checkpoints.status} = 'pending'
+      -- only runs still WAITING: cancelling a paused run leaves its
+      -- checkpoint row pending, and expiring that later would append a
+      -- misleading event to a terminal run (codex round on feat/m3-craft)
+      and exists (select 1 from ${runs}
+            where ${runs.id} = ${checkpoints.runId}
+              and ${runs.status} = 'waiting_approval')
+      and ${checkpoints.requestedAt}
+          -- (#>> '{}')::jsonb normalizes BOTH encodings: drizzle-under-bun-sql
+          -- stores jsonb double-encoded (a JSON string), raw writers store the
+          -- object — ->> alone reads nothing from the former
+          + (coalesce(((${checkpoints.payload} #>> '{}')::jsonb ->> 'timeoutMinutes')::int, 1440)
+             * interval '1 minute')
+          + ${Math.round(slackMs / 1000)} * interval '1 second'
+        < now()
+  `)) as unknown as Array<{ id: string; run_id: string }>;
+  return rows.map((r) => ({ approvalId: r.id, runId: r.run_id }));
+}
+
+/** Deadline for a run nobody can execute (ADR-0020 Decision 6). */
+export function runQueuedDeadlineMs(): number {
+  const raw = Number(process.env.AGRIPPA_RUN_QUEUED_DEADLINE_HOURS ?? "");
+  return (Number.isFinite(raw) && raw > 0 ? raw : 24) * 3_600_000;
+}
+
+/**
+ * Runs `queued` past the deadline finalize `no_capable_runtime`, typed and
+ * notified — DELIBERATELY reversing M2's "a runtime-upgrade deferral proceeds
+ * by itself once the machine upgrades" (decided 2026-08-16 with the M3
+ * charter): a run nobody can execute should say so within a day rather than
+ * emit `run.deferred` every thirty seconds forever. Re-submitting after the
+ * fleet is fixed is the recovery, and it costs one click.
+ */
+export async function sweepDeferredRuns(
+  db: Db,
+  deadlineMs: number = runQueuedDeadlineMs(),
+): Promise<string[]> {
+  const deadline = sql`${Math.round(deadlineMs / 1000)} * interval '1 second'`;
+  const rows = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(eq(runs.status, "queued"), sql`${runs.queuedAt} < now() - ${deadline}`));
+  const failed: string[] = [];
+  for (const row of rows) {
+    const result = await finalizeRun(db, {
+      runId: row.id,
+      from: "queued",
+      to: "failed",
+      error: {
+        code: "no_capable_runtime",
+        message: "queued past the deadline — no live worker or runtime can execute this run",
+      },
+      usageTotals: {},
+      eventPayload: {},
+    });
+    if (result.outcome === "finalized") failed.push(row.id);
+  }
+  return failed;
+}
+
 /** How long a host must be silent, and a run parked, before the dead-pin rule fires. */
 export const DEAD_HOST_GRACE_MS = 5 * 60_000;
 

@@ -1,5 +1,6 @@
 import {
   type CheckpointStoredResponse,
+  failureClassOf,
   INTERACTION_ARTIFACT_MAX_BYTES,
   isCredentialGatedExecutor,
   isTerminalRunStatus,
@@ -81,6 +82,7 @@ import {
   releaseRunLease,
   transitionRun,
 } from "./run-lifecycle";
+import { withInactivityWatchdog } from "./watchdog";
 
 type RunRow = typeof runs.$inferSelect;
 type StepRow = typeof runSteps.$inferSelect;
@@ -235,6 +237,34 @@ export class WorkspaceElsewhereError extends Error {
  * had a turn, short enough that a directory nobody has fails quickly.
  */
 const WORKSPACE_AFFINITY_GRACE_MS = 5 * 60_000;
+
+/**
+ * Bounded non-budget retries for platform-transient step failures (ADR-0020
+ * Decision 4): the surroundings hiccupped, so the extra attempts cost the
+ * agent nothing. The cap mirrors crash recovery's shape; when it exhausts the
+ * failure proceeds as if permanent.
+ */
+const PLATFORM_TRANSIENT_RETRY_CAP = 2;
+
+/**
+ * Parse a non-negative numeric env knob. UNSET AND EMPTY both fall back:
+ * `Number("")` is 0, and an unset watchdog silently resolving to
+ * "disabled" was exactly the bug that taught this (codex round on
+ * feat/m3-craft). An explicit "0" still means what it says.
+ */
+export const envNumber = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
+const platformRetryBackoffMs = (): number =>
+  envNumber("AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS", 5) * 1000;
+
+/** A minute-denominated env knob; an explicit 0 means "off". */
+const envMinutes = (name: string, defaultMinutes: number): number =>
+  envNumber(name, defaultMinutes) * 60_000;
 
 /** Normalize runs.model_resolution (flat legacy or slot-keyed) to one slot's entries. */
 function slotResolutionEntries(raw: Record<string, unknown>, slot: string): ModelResolutionEntry[] {
@@ -472,6 +502,10 @@ class RunEngine {
   private interactionSources = new Map<string, "input" | "review-gate">();
   // rowKey → crashed-attempt count + last executor session, for crash resume
   private crashRecovery = new Map<string, { crashed: number; sessionId: string | null }>();
+  /** Persisted platform-transient failures per step row-key: a crash during
+   *  the free-retry backoff must not lose the entitlement — or, worse, leave
+   *  the resume with more attempts consumed than granted (codex round). */
+  private platformRetried = new Map<string, number>();
   // scrubs known secret values from event payloads before persist/publish
   private readonly redactor: SecretRedactor = createSecretRedactor(collectEnvSecretValues());
   /** Lease identity: the worker's container id, or a per-engine fallback. */
@@ -677,6 +711,17 @@ class RunEngine {
         rec.crashed += 1;
         if (row.executorSessionId) rec.sessionId = row.executorSessionId;
         this.crashRecovery.set(key, rec);
+      } else if (row.status === "failed") {
+        // a platform-transient failure consumed an attempt the template
+        // never budgeted (ADR-0020) — reconstruct that grant on resume, so a
+        // crash during the backoff neither loses the free retry nor leaves
+        // startAttempt past a maxAttempts that forgot these rows
+        const code = (row.error as { code?: string } | null)?.code;
+        const reason = failureClassOf(code);
+        if (reason.class === "platform" && reason.transient) {
+          const key = `${row.stepId}#${row.iteration}`;
+          this.platformRetried.set(key, (this.platformRetried.get(key) ?? 0) + 1);
+        }
       }
       const key = `${row.stepId}#${row.iteration}`;
       const current = this.stepRows.get(key);
@@ -1257,8 +1302,50 @@ class RunEngine {
     // no-retry step that died mid-run still re-executes instead of silently
     // being skipped (its loop would otherwise be `for (2; 2 <= 1)`)
     const recovery = this.crashRecovery.get(this.rowKey(step.id));
-    const maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0);
+    // ADR-0020: platform-transient failures get their own bounded retries on
+    // top of the budget — the surroundings hiccupped, and the template's
+    // retry.max is the AGENT's to spend. Persisted transient rows re-grant
+    // their extra attempts (capped) so recovery neither loses the
+    // entitlement nor forgets the rows already spent against it.
+    const priorTransientRows = this.platformRetried.get(this.rowKey(step.id)) ?? 0;
+    const priorTransient = Math.min(priorTransientRows, PLATFORM_TRANSIENT_RETRY_CAP);
+    let platformRetries = priorTransient;
+    let maxAttempts = (step.retry?.max ?? 0) + 1 + (recovery?.crashed ?? 0) + priorTransient;
     const startAttempt = (this.stepRows.get(this.rowKey(step.id))?.attempt ?? 0) + 1;
+
+    // Recovery reconstructs the TERMINAL DECISION, not just the attempt
+    // arithmetic (codex round 2): a persisted last failure that live
+    // execution would have finalized on the spot — permanent, policy, or the
+    // transient failure past the cap — must finalize here too, never earn
+    // fresh attempts because the crash landed between the failure row and
+    // its decision. `crashed` stays the crash-recovery channel.
+    const priorRow = this.stepRows.get(this.rowKey(step.id));
+    if (priorRow?.status === "failed") {
+      const priorCode = (priorRow.error as { code?: string } | null)?.code;
+      if (priorCode !== "crashed") {
+        const priorReason = failureClassOf(priorCode);
+        const terminal =
+          priorReason.class === "user_policy" ||
+          (priorReason.class === "platform" && !priorReason.transient) ||
+          (priorReason.class === "platform" &&
+            priorReason.transient &&
+            priorTransientRows > PLATFORM_TRANSIENT_RETRY_CAP);
+        if (terminal) {
+          if (step.onFailure === "continue") {
+            await this.emit("step.continued", {
+              phaseId: phase.id,
+              stepId: step.id,
+              iteration: this.currentIteration,
+            });
+            return;
+          }
+          throw new RunFailure(
+            priorCode ?? "internal",
+            `step ${step.id}: resumed onto a failure live execution finalizes immediately`,
+          );
+        }
+      }
+    }
 
     // conditional / requires gating
     const tailSkip = await this.followupTailSkip(phase, step);
@@ -1331,7 +1418,29 @@ class RunEngine {
         if (err instanceof StepFailed) {
           await this.failStepRow(row, err);
           if (this.abortReason) throw this.abortFailure();
-          if (attempt < maxAttempts) {
+          // The class decides whose move the retry is (ADR-0020):
+          // - platform+transient → a bounded extra attempt that costs the
+          //   agent nothing (never the template budget), with a short backoff;
+          // - agent → the template's retry budget, exactly as always;
+          // - platform-permanent and user_policy → no retry at all: the one
+          //   reproduces its refusal, the other would override a decision.
+          const reason = failureClassOf(err.errorPayload.code);
+          if (reason.class === "platform" && reason.transient) {
+            if (platformRetries < PLATFORM_TRANSIENT_RETRY_CAP) {
+              platformRetries += 1;
+              maxAttempts += 1;
+              await this.emit("step.retrying", {
+                phaseId: phase.id,
+                stepId: step.id,
+                iteration: this.currentIteration,
+                attempt,
+                transient: true,
+                error: err.errorPayload,
+              });
+              await Bun.sleep(platformRetryBackoffMs() * platformRetries);
+              continue;
+            }
+          } else if (reason.class === "agent" && attempt < maxAttempts) {
             await this.emit("step.retrying", {
               phaseId: phase.id,
               stepId: step.id,
@@ -1356,6 +1465,24 @@ class RunEngine {
         this.currentStepRowId = null;
       }
     }
+    // Reachable only when persisted attempts already consumed every
+    // entitlement (a crash between the last failure row and its terminal
+    // decision — e.g. mid-backoff). An exhausted loop must never fall
+    // through silently: that completes the phase over a failed step.
+    const lastRow = this.stepRows.get(this.rowKey(step.id));
+    const lastError = (lastRow?.error as { code?: string; message?: string } | null) ?? null;
+    if (step.onFailure === "continue") {
+      await this.emit("step.continued", {
+        phaseId: phase.id,
+        stepId: step.id,
+        iteration: this.currentIteration,
+      });
+      return;
+    }
+    throw new RunFailure(
+      lastError?.code ?? "internal",
+      `step ${step.id}: attempts exhausted (${lastError?.message ?? "no entitlement left on resume"})`,
+    );
   }
 
   /** The workspace's resolved repoRef input value (what checkout used). */
@@ -1689,8 +1816,17 @@ class RunEngine {
     let failure: StepFailed | null = null;
     let resumed: ResumeOutcome | undefined;
 
+    // ADR-0020 Decision 5: both transports pass through the same seam, so the
+    // watchdogs wrap here. A trip aborts THIS invocation (never the run) and
+    // surfaces as a synthetic step.failed whose class carries the treatment.
+    const stream = withInactivityWatchdog(binding.executor.executeStep(request, ctx), {
+      idleMs: this.deps.watchdog?.idleMs ?? envMinutes("AGRIPPA_STEP_IDLE_MINUTES", 10),
+      semanticMs:
+        this.deps.watchdog?.semanticMs ?? envMinutes("AGRIPPA_STEP_NO_PROGRESS_MINUTES", 30),
+      onTrip: () => invocation.abort(),
+    });
     try {
-      for await (const event of binding.executor.executeStep(request, ctx)) {
+      for await (const event of stream) {
         await this.persistExecutorEvent(phase, step, row, event);
         if (event.type === "step.started" && event.resumed) {
           resumed = event.resumed;
