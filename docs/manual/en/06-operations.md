@@ -91,6 +91,10 @@ Documented in `infra/env/.env.example`; the full set:
 | `AGRIPPA_STEP_NO_PROGRESS_MINUTES` | worker | Semantic watchdog: no completed tool call, message or artifact for this long fails the step `no_progress` (default 30; `0` disables). Streamed tokens do not count as progress |
 | `AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS` | worker | Backoff between the free retries of platform-transient failures — rate limits, dead daemons, stalls (default 5) |
 | `AGRIPPA_RUN_QUEUED_DEADLINE_HOURS` | worker | A run still `queued` after this long fails `no_capable_runtime` with a notification instead of waiting forever (default 24) |
+| `AGRIPPA_WORKSPACE_RETENTION_MINUTES` | worker | How long a finished run's workspace stays on disk — and so how long that run can still be continued, since a follow-up attaches to the same directory (default 60). Raise it to keep a steering window open across a slow review; `0` collects immediately and gives up follow-ups |
+| `AGRIPPA_FOLLOWUP_MAX_TOKENS` | worker | Token bound for one follow-up (default 200000). The template's own limit still caps it |
+| `AGRIPPA_FOLLOWUP_COALESCE_SECONDS` | api | How long a burst of steering messages waits to become a single follow-up run (default 15). A message arriving after that run starts becomes the next one |
+| `AGRIPPA_VERSION` | compose, worker | Image tag when pulling instead of building, and the build each worker reports in its heartbeat — this is where Admin → Workers reads a machine's version from |
 | `AGRIPPA_SSE_KEEPALIVE_MS` | api | Interval between run-stream keepalive comment frames (default 15000). Lower only for an intermediary that reaps idle connections faster |
 | `PORT` | api | Listen port (default 3000) |
 | `AGRIPPA_PORT` | compose | Published port mapping. Accepts an interface — use `127.0.0.1:3000` behind a reverse proxy, or the plain-HTTP API binds `0.0.0.0` |

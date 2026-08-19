@@ -90,6 +90,10 @@ docker compose -p agrippa -f infra/docker-compose.yml --env-file infra/env/.env 
 | `AGRIPPA_STEP_NO_PROGRESS_MINUTES` | worker | 语义看门狗：持续无已完成的工具调用、消息或产出物达到该时长时，步骤以 `no_progress` 失败（默认 30 分钟，`0` 关闭）。流式输出的 token 不算进展 |
 | `AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS` | worker | 平台瞬时故障（限流、守护进程离线、卡死）免费重试之间的退避时长（默认 5 秒） |
 | `AGRIPPA_RUN_QUEUED_DEADLINE_HOURS` | worker | 排队超过该时长的执行会以 `no_capable_runtime` 失败并发送通知，而不是永远等待（默认 24 小时） |
+| `AGRIPPA_WORKSPACE_RETENTION_MINUTES` | worker | 已结束执行的工作区在磁盘上保留多久——也就是该执行还能被继续（跟进）多久，因为跟进执行会挂载到同一目录（默认 60 分钟）。评审较慢时可调大以延长可跟进窗口；`0` 表示立即回收，同时放弃跟进能力 |
+| `AGRIPPA_FOLLOWUP_MAX_TOKENS` | worker | 单次跟进的 token 上限（默认 200000）。模板自身的额度仍然是上限 |
+| `AGRIPPA_FOLLOWUP_COALESCE_SECONDS` | api | 连续多条追加指令合并为一次跟进执行的等待窗口（默认 15 秒）。在跟进执行开始之后到达的消息会进入下一次跟进 |
+| `AGRIPPA_VERSION` | compose, worker | 直接拉取镜像（而非本地构建）时的镜像 tag，同时也是各 worker 在心跳中上报的构建版本——管理 → Workers 页面的版本列即取自此处 |
 | `AGRIPPA_SSE_KEEPALIVE_MS` | api | 执行事件流发送保活注释帧的间隔（默认 15000 毫秒）。仅当中间层回收空闲连接更快时才需要调小 |
 | `PORT` | api | 监听端口（默认 3000） |
 | `AGRIPPA_PORT` | compose | 对外发布的端口映射，可带网卡地址。反向代理之后请用 `127.0.0.1:3000`，否则明文 HTTP 的 API 会监听 `0.0.0.0` |

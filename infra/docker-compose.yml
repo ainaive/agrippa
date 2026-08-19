@@ -34,6 +34,14 @@ services:
       AGRIPPA_MIGRATE_ON_BOOT: ${AGRIPPA_MIGRATE_ON_BOOT:-}
       # SSE comment-frame interval; empty keeps the 15s default
       AGRIPPA_SSE_KEEPALIVE_MS: ${AGRIPPA_SSE_KEEPALIVE_MS:-}
+      # Strict-Transport-Security lifetime. Listed here because an unlisted name
+      # simply never reaches the process: the documented rollback for this one
+      # is to serve `max-age=0` so browsers forget the pin, and that rollback
+      # cannot work if the value is dropped on the way in.
+      AGRIPPA_HSTS_MAX_AGE: ${AGRIPPA_HSTS_MAX_AGE:-}
+      # debounce window in which a burst of steering messages coalesces into one
+      # follow-up run; empty keeps the default
+      AGRIPPA_FOLLOWUP_COALESCE_SECONDS: ${AGRIPPA_FOLLOWUP_COALESCE_SECONDS:-}
     volumes:
       # the API serves artifact downloads AND receives daemon artifact uploads
       # into the staging area (ADR-0017: /api/daemon/dispatches/:id/artifacts,
@@ -100,12 +108,29 @@ services:
       CODEX_API_KEY: ${CODEX_API_KEY:-}
       AGRIPPA_EXECUTOR: ${AGRIPPA_EXECUTOR:-claude-agent-sdk}
       WORKER_SLOTS: ${WORKER_SLOTS:-2}
+      # The worker reports this in its heartbeat, which is the only place an
+      # operator can see which build a machine is running. It was already the
+      # image tag above, so the value existed and simply never reached the
+      # process — Admin → Workers showed every worker's version as blank.
+      AGRIPPA_VERSION: ${AGRIPPA_VERSION:-}
       # notification deep links point at the SPA — same value the api uses
       AGRIPPA_BASE_URL: ${AGRIPPA_BASE_URL:-http://localhost:3000}
       # optional toggles; empty is the default in every case
       AGRIPPA_MAX_ARTIFACT_BYTES: ${AGRIPPA_MAX_ARTIFACT_BYTES:-}
       AGRIPPA_KEEP_WORKSPACES: ${AGRIPPA_KEEP_WORKSPACES:-}
       AGRIPPA_SCM: ${AGRIPPA_SCM:-}
+      # The operator knobs documented in design 08 and manual 06. They are read
+      # in the worker only, and an explicit `environment:` map means a value in
+      # .env reaches the process ONLY if it is listed here — unlike the systemd
+      # topology, whose EnvironmentFile passes the whole file. Leaving one out
+      # makes the documentation false rather than making the default apply
+      # loudly, which is how all five went inert until the M3 closeout.
+      AGRIPPA_WORKSPACE_RETENTION_MINUTES: ${AGRIPPA_WORKSPACE_RETENTION_MINUTES:-}
+      AGRIPPA_FOLLOWUP_MAX_TOKENS: ${AGRIPPA_FOLLOWUP_MAX_TOKENS:-}
+      AGRIPPA_STEP_IDLE_MINUTES: ${AGRIPPA_STEP_IDLE_MINUTES:-}
+      AGRIPPA_STEP_NO_PROGRESS_MINUTES: ${AGRIPPA_STEP_NO_PROGRESS_MINUTES:-}
+      AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS: ${AGRIPPA_PLATFORM_RETRY_BACKOFF_SECONDS:-}
+      AGRIPPA_RUN_QUEUED_DEADLINE_HOURS: ${AGRIPPA_RUN_QUEUED_DEADLINE_HOURS:-}
     volumes:
       - workspaces:/work/runs # throwaway per-run checkouts (worker only)
       - artifacts:/work/artifacts # shared with the API for downloads

@@ -37,6 +37,7 @@ import {
   assertQuotaHeadroom,
   decideCheckpoint,
   enqueueAfterCommit,
+  envNumber,
   finalizeRun,
   flattenPhases,
   resolveRunPlan,
@@ -61,13 +62,15 @@ import { assertProjectRole, requireProjectRole } from "../middleware/rbac";
  * not feel ignored. The run row is the buffer, so this is only a delay — the
  * messages are on the thread immediately either way.
  */
-const FOLLOWUP_COALESCE_SECONDS = (() => {
-  const raw = Number(process.env.AGRIPPA_FOLLOWUP_COALESCE_SECONDS);
-  // A NaN would reach enqueueRunAfter, whose failure enqueueAfterCommit
-  // swallows by design — so every follow-up would silently fall back to the
-  // 30s straggler sweep. Same finite-check shape as retentionMinutes().
-  return Number.isFinite(raw) && raw >= 0 ? raw : 15;
-})();
+// envNumber, not a local Number() — a NaN would reach enqueueRunAfter, whose
+// failure enqueueAfterCommit swallows by design, so every follow-up would
+// silently fall back to the 30s straggler sweep. It also treats an EMPTY value
+// as absent, which a local `>= 0` check would not: `Number("")` is 0, and
+// compose passes `${AGRIPPA_FOLLOWUP_COALESCE_SECONDS:-}` — an empty string on
+// every deployment that never sets it — so the local shape read "coalesce for
+// zero seconds" and burst-coalescing quietly stopped working. Same trap the
+// watchdogs hit (codex round on feat/m3-craft). An explicit "0" still means 0.
+const FOLLOWUP_COALESCE_SECONDS = envNumber("AGRIPPA_FOLLOWUP_COALESCE_SECONDS", 15);
 
 async function loadRunScoped(
   c: { var: AppEnv["Variables"] },
